@@ -1,0 +1,11 @@
+/vendor
+/node_modules
+.env
+config.php
+.DS_Store
+/.backup
+/.vscode
+/logs
+/app/logs
+/bigcommerce-app/error_log
+*.log

@@ -1,0 +1,49 @@
+.settings-container {
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.settings-card {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    border: 1px solid #e5e7eb;
+    overflow: hidden;
+}
+
+.settings-header {
+    padding: 24px;
+    border-bottom: 1px solid #e5e7eb;
+    background: #f9fafb;
+}
+
+.settings-body {
+    padding: 32px;
+}
+
+.settings-group {
+    margin-bottom: 24px;
+}
+
+.settings-label {
+    display: block;
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 8px;
+}
+
+.settings-helper {
+    font-size: 0.875rem;
+    color: #6b7280;
+    margin-top: 6px;
+    line-height: 1.5;
+}
+
+.tag {
+    background: #e0e7ff;
+    color: #4338ca;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    font-family: monospace;
+}

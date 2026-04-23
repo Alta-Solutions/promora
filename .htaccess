@@ -1,0 +1,28 @@
+AddHandler ${application/x-httpd-rwdigital-php82} .php .php5 .phtml .php7 .php8
+<IfModule mod_rewrite.c>
+
+    RewriteEngine On
+
+    RewriteBase /promo-manager/
+
+    
+
+    # Redirect to index.php
+
+    RewriteCond %{REQUEST_FILENAME} !-f
+
+    RewriteCond %{REQUEST_FILENAME} !-d
+
+    RewriteRule ^(.*)$ index.php?route=$1 [QSA,L]
+
+</IfModule>
+
+
+
+# Disable directory listing
+
+Options -Indexes
+
+# php -- BEGIN cPanel-generated handler, do not edit
+# This domain inherits the “PHP” package.
+# php -- END cPanel-generated handler, do not edit

@@ -1,0 +1,36 @@
+{
+  "name": "Promora",
+  "version": "1.0.0",
+  "description": "Advanced multi-promotion management with priority-based pricing and custom field tagging",
+  "author": "RedWood Digital",
+  "support_email": "hello@rwdigital.io",
+  "categories": ["Marketing", "Sales & Promotion"],
+  "icon": "http://localhost/public/assets/icons/promo-manager.png",
+  "developer": {
+    "name": "RedWood Digital",
+    "website_url": "https://rwdigital.io"
+  },
+  "features": [
+    "Multiple simultaneous promotions",
+    "Priority-based pricing",
+    "Custom field tagging",
+    "Automated synchronization",
+    "Advanced filtering"
+  ],
+  "scopes": [
+    "store_v2_products",
+    "store_v2_products_read_only",
+    "store_v2_content",
+    "store_v2_content_read_only",
+    "store_v2_marketing",
+    "store_v2_marketing_read_only"
+  ],
+  "oauth": {
+    "redirect_urls": [
+      "http://localhost/bigcommerce-app/auth.php"
+    ],
+    "logout_url": "http://localhost/bigcommerce-app/uninstall.php"
+  },
+  "load_url": "http://localhost/bigcommerce-app/load.php",
+  "uninstall_url": "http://localhost/bigcommerce-app/uninstall.php"
+}
