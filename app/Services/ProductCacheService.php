@@ -509,9 +509,23 @@ class ProductCacheService {
      * @return string SQL string koji počinje sa AND (npr. " AND brand_id = ? ...")
      */
     private function buildFilterQuery($filters, &$params) {
+        if (!is_array($filters)) {
+            return "";
+        }
+
+        $excludeFilters = [];
+        if (isset($filters['exclude']) && is_array($filters['exclude'])) {
+            $excludeFilters = $filters['exclude'];
+            unset($filters['exclude']);
+        }
+
         $sql = "";
 
         foreach ($filters as $key => $value) {
+            if ($key === 'exclude') {
+                continue;
+            }
+
             // Preskačemo prazne vrijednosti, ali dozvoljavamo nulu ('0' ili 0)
             if (empty($value) && $value !== '0' && $value !== 0) {
                 continue;
@@ -662,6 +676,32 @@ class ProductCacheService {
                     $params[] = '%' . $value . '%';
                     break;
             }
+        }
+
+        return $sql . $this->buildExcludeFilterQuery($excludeFilters, $params);
+    }
+
+    private function buildExcludeFilterQuery(array $excludeFilters, array &$params): string {
+        $sql = "";
+
+        foreach ($excludeFilters as $key => $value) {
+            if ($key === 'exclude' || (empty($value) && $value !== '0' && $value !== 0)) {
+                continue;
+            }
+
+            $subqueryParams = [$this->storeHash];
+            $subqueryWhere = $this->buildFilterQuery([$key => $value], $subqueryParams);
+
+            if (trim($subqueryWhere) === '') {
+                continue;
+            }
+
+            $sql .= " AND pc.id NOT IN (
+                SELECT pc.id
+                FROM products_cache pc
+                WHERE pc.store_hash = ?{$subqueryWhere}
+            )";
+            $params = array_merge($params, $subqueryParams);
         }
 
         return $sql;

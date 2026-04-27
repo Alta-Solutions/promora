@@ -249,6 +249,14 @@ class PromotionController {
         $normalizedFilters = [];
 
         foreach ($filters as $key => $value) {
+            if ($key === 'exclude' && is_array($value)) {
+                $normalizedExcludeFilters = $this->normalizeFilters($value);
+                if (!empty($normalizedExcludeFilters)) {
+                    $normalizedFilters['exclude'] = $normalizedExcludeFilters;
+                }
+                continue;
+            }
+
             $normalizedKey = $key;
 
             if (strpos($key, 'custom_field:') === 0) {

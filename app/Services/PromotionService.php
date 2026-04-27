@@ -902,7 +902,21 @@ public function __construct(Database $db = null) {
      * Ovo je PHP ekvivalent SQL WHERE klauzula iz ProductCacheService.
      */
     private function productMatchesFilters($product, $filters) {
+        if (!is_array($filters)) {
+            return true;
+        }
+
+        $excludeFilters = [];
+        if (isset($filters['exclude']) && is_array($filters['exclude'])) {
+            $excludeFilters = $filters['exclude'];
+            unset($filters['exclude']);
+        }
+
         foreach ($filters as $key => $value) {
+            if ($key === 'exclude') {
+                continue;
+            }
+
             if (empty($value) && $value !== '0' && $value !== 0) continue;
 
             if (strpos($key, 'custom_field:') === 0) {
@@ -953,10 +967,10 @@ public function __construct(Database $db = null) {
                     if (empty(array_intersect($productCats, $requiredCats))) return false;
                     break;
                 case 'price:min':
-                    if ($product['price'] < $value) return false;
+                    if (!isset($product['price']) || $product['price'] === '' || (float)$product['price'] < (float)$value) return false;
                     break;
                 case 'price:max':
-                    if ($product['price'] > $value) return false;
+                    if (!isset($product['price']) || $product['price'] === '' || (float)$product['price'] > (float)$value) return false;
                     break;
                 case 'product_id':
                     if ((int)$product['product_id'] !== (int)$value) return false;
@@ -987,7 +1001,26 @@ public function __construct(Database $db = null) {
                     break;
             }
         }
+
+        if ($this->productMatchesAnyExcludeFilter($product, $excludeFilters)) {
+            return false;
+        }
+
         return true;
+    }
+
+    private function productMatchesAnyExcludeFilter($product, array $excludeFilters): bool {
+        foreach ($excludeFilters as $key => $value) {
+            if ($key === 'exclude' || (empty($value) && $value !== '0' && $value !== 0)) {
+                continue;
+            }
+
+            if ($this->productMatchesFilters($product, [$key => $value])) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function normalizeEscapedUnicodeString(string $value): string {
