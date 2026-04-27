@@ -47,3 +47,115 @@
     font-size: 0.8em;
     font-family: monospace;
 }
+
+.settings-custom-fields-select {
+    width: 100%;
+}
+
+.settings-custom-fields-select.ts-wrapper {
+    width: 100%;
+}
+
+.settings-custom-fields-select .ts-control,
+.settings-custom-fields-select.ts-wrapper .ts-control {
+    min-height: 42px;
+    padding: 7px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    box-shadow: none;
+    background: #fff;
+}
+
+.settings-custom-fields-select.focus .ts-control,
+.settings-custom-fields-select.ts-wrapper.focus .ts-control {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.settings-custom-fields-select .item,
+.settings-custom-fields-select.ts-wrapper .item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 6px 6px 0;
+    padding: 4px 0 4px 10px;
+    border-radius: 999px;
+    background: #dbeafe;
+    color: #1d4ed8;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.settings-custom-fields-select.plugin-remove_button .item .remove,
+.settings-custom-fields-select.ts-wrapper.plugin-remove_button .item .remove,
+.settings-custom-fields-select.ts-wrapper.plugin-remove_button:not(.rtl) .item .remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin-left: 0;
+    padding: 0;
+    border-left: none;
+    border-radius: 999px;
+    background: transparent;
+    color: #1d4ed8;
+    font-size: 13px;
+    line-height: 1;
+}
+
+.settings-custom-fields-select.ts-wrapper.plugin-remove_button .item .remove:hover,
+.settings-custom-fields-select.ts-wrapper.plugin-remove_button .item .remove:focus {
+    background: rgba(29, 78, 216, 0.22);
+    color: #1e3a8a;
+}
+
+.settings-custom-fields-select .ts-dropdown,
+.settings-custom-fields-select.ts-wrapper .ts-dropdown {
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+    overflow: hidden;
+    z-index: 1100;
+}
+
+.settings-custom-fields-select .ts-dropdown-content,
+.settings-custom-fields-select.ts-wrapper .ts-dropdown-content {
+    max-height: 240px;
+    padding: 8px;
+}
+
+.settings-custom-field-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+}
+
+.settings-custom-fields-select.ts-wrapper .option.selected {
+    background: #eff6ff;
+    color: #1d4ed8;
+}
+
+.settings-custom-field-checkbox {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: #2563eb;
+    pointer-events: none;
+}
+
+.settings-custom-field-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.settings-custom-field-count {
+    flex: 0 0 auto;
+    color: #6b7280;
+    font-size: 12px;
+}

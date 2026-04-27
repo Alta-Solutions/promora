@@ -85,17 +85,33 @@ $cacheStats = $cacheService->getCacheStats();
 
                 <div class="settings-group">
                     <label class="settings-label">Filteri za Promocije</label>
-                    <input type="text"
-                           name="custom_fields"
-                           class="form-input"
-                           value="<?= htmlspecialchars($allowedFiltersString ?? '') ?>"
-                           placeholder="npr. Materijal, Sezona, Pol">
+                    <?php $selectedAllowedFilters = $settings['allowed_filters'] ?? []; ?>
+                    <select
+                        id="settings-custom-fields"
+                        name="custom_fields[]"
+                        multiple
+                        class="settings-custom-fields-select"
+                        placeholder="Izaberite custom field filtere">
+                        <?php foreach (($availableCustomFieldFilters ?? []) as $filter): ?>
+                            <?php
+                            $filterName = (string)($filter['name'] ?? '');
+                            if ($filterName === '') {
+                                continue;
+                            }
+                            ?>
+                            <option
+                                value="<?= htmlspecialchars($filterName) ?>"
+                                data-count="<?= (int)($filter['product_count'] ?? 0) ?>"
+                                data-data="<?= htmlspecialchars(json_encode(['count' => (int)($filter['product_count'] ?? 0)]), ENT_QUOTES, 'UTF-8') ?>"
+                                <?= in_array($filterName, $selectedAllowedFilters, true) ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($filterName) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
 
                     <div class="settings-helper">
-                        Unesite nazive polja iz BigCommerce-a odvojene zarezom.<br>
-                        <span style="display: inline-block; margin-top: 8px;">
-                            Primer: <span class="tag">Materijal</span> <span class="tag">Boja</span> <span class="tag">Kolekcija</span>
-                        </span>
+                        Izaberite custom field nazive pronadjene u lokalnom cache-u proizvoda.
+                        Ako lista nije azurna, pokrenite Product Cache sync.
                     </div>
                 </div>
 
@@ -288,4 +304,78 @@ async function clearCache() {
         alert('Greska: ' + error.message);
     }
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+    const customFieldsSelect = document.getElementById('settings-custom-fields');
+    if (!customFieldsSelect || typeof TomSelect === 'undefined') {
+        return;
+    }
+
+    const customFieldCounts = {};
+    customFieldsSelect.querySelectorAll('option').forEach(option => {
+        customFieldCounts[option.value] = Number(option.dataset.count || 0);
+    });
+
+    const selectedCustomFields = new Set(Array.from(customFieldsSelect.selectedOptions).map(option => option.value));
+
+    const syncCustomFieldCheckboxes = function(tomSelect) {
+        tomSelect.dropdown_content
+            .querySelectorAll('.settings-custom-field-checkbox')
+            .forEach(checkbox => {
+                const option = checkbox.closest('[data-value]');
+                checkbox.checked = option ? selectedCustomFields.has(option.dataset.value) : false;
+            });
+    };
+
+    const customFieldsTomSelect = new TomSelect(customFieldsSelect, {
+        plugins: {
+            remove_button: {
+                title: 'Ukloni filter'
+            }
+        },
+        copyClassesToDropdown: false,
+        create: false,
+        closeAfterSelect: false,
+        hideSelected: false,
+        maxItems: null,
+        placeholder: customFieldsSelect.getAttribute('placeholder') || 'Izaberite custom field filtere',
+        onChange: function(values) {
+            selectedCustomFields.clear();
+            (Array.isArray(values) ? values : [values]).forEach(value => {
+                if (value !== null && value !== undefined && value !== '') {
+                    selectedCustomFields.add(String(value));
+                }
+            });
+            syncCustomFieldCheckboxes(this);
+        },
+        onDropdownOpen: function() {
+            syncCustomFieldCheckboxes(this);
+        },
+        onType: function() {
+            window.requestAnimationFrame(() => syncCustomFieldCheckboxes(this));
+        },
+        render: {
+            option: function(data, escape) {
+                const count = Number(data.count || customFieldCounts[data.value] || 0);
+                const countHtml = count > 0
+                    ? `<span class="settings-custom-field-count">${escape(String(count))} proizvoda</span>`
+                    : '';
+                const checked = selectedCustomFields.has(String(data.value)) ? 'checked' : '';
+
+                return `
+                    <div class="settings-custom-field-option">
+                        <input type="checkbox" class="settings-custom-field-checkbox" tabindex="-1" aria-hidden="true" ${checked}>
+                        <span class="settings-custom-field-label">${escape(data.text)}</span>
+                        ${countHtml}
+                    </div>
+                `;
+            },
+            item: function(data, escape) {
+                return `<div>${escape(data.text)}</div>`;
+            }
+        }
+    });
+
+    syncCustomFieldCheckboxes(customFieldsTomSelect);
+});
 </script>

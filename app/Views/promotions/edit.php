@@ -105,10 +105,473 @@ let currentFilters = <?= json_encode(array_map(function($key, $value) {
     return ['type' => $key, 'value' => $value];
 }, array_keys($filters), array_values($filters))) ?>;
 const csrfToken = <?= json_encode(\App\Support\Csrf::token()) ?>;
+let tomSelectInstances = {};
+let customFieldOptionsCache = {};
+let productOptionsCache = {};
+let isDestroyingTomSelectInstances = false;
+const PRODUCT_SKU_FILTER_TYPE = 'sku:in';
+const PRODUCT_SELECT_ALL_VALUE = '__promotion_select_all_product_search__';
+const PRODUCT_PARENT_SELECT_ALL_PREFIX = '__promotion_select_all_parent_variants__:';
+const STATIC_TOM_SELECT_FILTER_TYPES = ['categories:in', 'brand_id', PRODUCT_SKU_FILTER_TYPE];
 
-// Same functions as create.php
+function isCustomFieldFilter(type) {
+    return String(type).startsWith('custom_field:');
+}
+
+function isTomSelectFilter(type) {
+    return STATIC_TOM_SELECT_FILTER_TYPES.includes(type) || isCustomFieldFilter(type);
+}
+
+function isProductSkuFilter(type) {
+    return type === PRODUCT_SKU_FILTER_TYPE;
+}
+
+function isProductPseudoValue(value) {
+    return value === PRODUCT_SELECT_ALL_VALUE || String(value).startsWith(PRODUCT_PARENT_SELECT_ALL_PREFIX);
+}
+
+function getCustomFieldName(type) {
+    return isCustomFieldFilter(type) ? String(type).slice(13) : '';
+}
+
+function getDefaultFilterValue(type) {
+    if (isTomSelectFilter(type)) {
+        return [];
+    }
+
+    if (type === 'is_visible' || type === 'is_featured') {
+        return true;
+    }
+
+    return '';
+}
+
+function normalizeTomSelectValues(type, value) {
+    if (Array.isArray(value)) {
+        return value.map(item => String(item)).filter(item => item !== '');
+    }
+
+    if (value === null || value === undefined || value === '') {
+        return [];
+    }
+
+    const normalizedValue = String(value).trim();
+    if (normalizedValue === '') {
+        return [];
+    }
+
+    if (isCustomFieldFilter(type)) {
+        return [normalizedValue];
+    }
+
+    return normalizedValue
+        .split(',')
+        .map(item => item.trim())
+        .filter(item => item !== '');
+}
+
+function normalizeCustomFieldFilterType(type) {
+    if (!String(type).startsWith('custom_field:')) {
+        return type;
+    }
+
+    return 'custom_field:' + String(type.slice(13)).replace(/\\u([0-9a-fA-F]{4})/g, function(_, hex) {
+        return String.fromCharCode(parseInt(hex, 16));
+    });
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function formatProductPrice(value) {
+    if (value === null || value === undefined || value === '') {
+        return '';
+    }
+
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? numericValue.toFixed(2) : String(value);
+}
+
+function cloneProductOption(option) {
+    return {
+        ...option,
+        variant_values: Array.isArray(option.variant_values) ? [...option.variant_values] : option.variant_values,
+        parent_variant_values: Array.isArray(option.parent_variant_values) ? [...option.parent_variant_values] : option.parent_variant_values
+    };
+}
+
+function parseProductSearchTerms(search) {
+    return String(search || '')
+        .split(/[\s,]+/)
+        .map(term => term.trim().toLowerCase())
+        .filter(term => term !== '');
+}
+
+async function fetchCustomFieldOptions(fieldName, query = '') {
+    const cacheKey = JSON.stringify([fieldName, query.trim().toLowerCase()]);
+    if (customFieldOptionsCache[cacheKey]) {
+        return customFieldOptionsCache[cacheKey];
+    }
+
+    const params = new URLSearchParams();
+    params.append('_csrf_token', csrfToken);
+    params.append('field_name', fieldName);
+    params.append('q', query);
+    params.append('limit', '50');
+
+    const response = await fetch('?route=promotions&action=customFieldOptions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params
+    });
+
+    let result;
+    try {
+        result = await response.json();
+    } catch (error) {
+        console.error('Invalid custom field options response', { fieldName, query, error });
+        throw error;
+    }
+
+    if (!response.ok || !result.success) {
+        console.error('Failed to load custom field options', {
+            fieldName,
+            query,
+            status: response.status,
+            error: result?.error || 'Unknown error'
+        });
+        throw new Error(result?.error || `HTTP ${response.status}`);
+    }
+
+    const options = result.data?.options || [];
+    customFieldOptionsCache[cacheKey] = options;
+    return options;
+}
+
+async function fetchProductOptions(query = '') {
+    const cacheKey = query.trim().toLowerCase();
+    if (productOptionsCache[cacheKey]) {
+        return productOptionsCache[cacheKey].map(cloneProductOption);
+    }
+
+    const params = new URLSearchParams();
+    params.append('_csrf_token', csrfToken);
+    params.append('q', query);
+    params.append('limit', '100');
+
+    const response = await fetch('?route=promotions&action=productOptions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params
+    });
+
+    let result;
+    try {
+        result = await response.json();
+    } catch (error) {
+        console.error('Invalid product options response', { query, error });
+        throw error;
+    }
+
+    if (!response.ok || !result.success) {
+        console.error('Failed to load product options', {
+            query,
+            status: response.status,
+            error: result?.error || 'Unknown error'
+        });
+        throw new Error(result?.error || `HTTP ${response.status}`);
+    }
+
+    const options = result.data?.options || [];
+    productOptionsCache[cacheKey] = options.map(cloneProductOption);
+    return options.map(cloneProductOption);
+}
+
+function destroyTomSelectInstances() {
+    isDestroyingTomSelectInstances = true;
+
+    try {
+        Object.values(tomSelectInstances).forEach(instance => {
+            if (!instance || typeof instance.destroy !== 'function') {
+                return;
+            }
+
+            if (typeof instance.close === 'function') {
+                instance.close();
+            }
+
+            if (typeof instance.clear === 'function') {
+                instance.clear(true);
+            }
+
+            if (typeof instance.setTextboxValue === 'function') {
+                instance.setTextboxValue('');
+            }
+
+            instance.destroy();
+        });
+    } finally {
+        tomSelectInstances = {};
+        isDestroyingTomSelectInstances = false;
+    }
+}
+
+function initializeTomSelectInstances() {
+    if (typeof TomSelect === 'undefined') {
+        return;
+    }
+
+    document.querySelectorAll('.js-filter-multiselect').forEach(select => {
+        const index = Number(select.dataset.filterIndex);
+        const filterType = select.dataset.filterType || '';
+        const placeholder = select.dataset.placeholder || 'Izaberite vrednosti';
+        const removeTitle = select.dataset.removeTitle || 'Ukloni stavku';
+        let currentProductSearchValues = [];
+        const commonConfig = {
+            plugins: {
+                checkbox_options: {},
+                remove_button: {
+                    title: removeTitle
+                }
+            },
+            copyClassesToDropdown: false,
+            create: false,
+            closeAfterSelect: false,
+            hideSelected: false,
+            loadingClass: 'promotion-filter-multiselect-loading',
+            maxItems: null,
+            placeholder: placeholder,
+            loadThrottle: 300,
+            onChange: function() {
+                if (isDestroyingTomSelectInstances || !currentFilters[index] || currentFilters[index].type !== filterType) {
+                    return;
+                }
+
+                updateFilterValue(index, normalizeTomSelectValues(filterType, this.getValue())
+                    .filter(value => !isProductPseudoValue(value)));
+            }
+        };
+
+        let instance;
+
+        if (isProductSkuFilter(filterType)) {
+            instance = new TomSelect(select, {
+                ...commonConfig,
+                preload: 'focus',
+                valueField: 'value',
+                labelField: 'label',
+                searchField: ['name', 'sku'],
+                splitOn: /a^/,
+                maxOptions: 100,
+                score: function(search) {
+                    const defaultScore = this.getScoreFunction(search);
+                    const normalizedSearch = String(search || '').toLowerCase();
+                    const searchTerms = parseProductSearchTerms(search);
+                    const shouldUseTermScore = normalizedSearch.includes(',') || searchTerms.length > 1;
+
+                    return function(item) {
+                        if (item.is_select_all) {
+                            return 1;
+                        }
+
+                        if (item.is_parent_select_all) {
+                            const parentName = String(item.name || item.label || '').toLowerCase();
+                            const variantValues = Array.isArray(item.variant_values)
+                                ? item.variant_values.map(value => String(value).toLowerCase())
+                                : [];
+
+                            if (searchTerms.some(term => variantValues.some(value => value === term || value.startsWith(term) || value.includes(term)))) {
+                                return 1;
+                            }
+
+                            return searchTerms.length === 0 || searchTerms.every(term => parentName.includes(term))
+                                ? 1
+                                : defaultScore(item);
+                        }
+
+                        if (!shouldUseTermScore) {
+                            return defaultScore(item);
+                        }
+
+                        const sku = String(item.sku || item.value || '').toLowerCase();
+                        const name = String(item.name || item.label || '').toLowerCase();
+                        const parentVariantValues = Array.isArray(item.parent_variant_values)
+                            ? item.parent_variant_values.map(value => String(value).toLowerCase())
+                            : [];
+
+                        if (searchTerms.some(term => sku === term || sku.startsWith(term) || sku.includes(term))) {
+                            return 1;
+                        }
+
+                        if (item.is_variant && searchTerms.some(term => parentVariantValues.some(value => value === term || value.startsWith(term) || value.includes(term)))) {
+                            return 0.75;
+                        }
+
+                        return searchTerms.every(term => name.includes(term)) ? 0.5 : 0;
+                    };
+                },
+                load: function(query, callback) {
+                    fetchProductOptions(query)
+                        .then(options => {
+                            currentProductSearchValues = options
+                                .map(option => String(option.value || option.sku || ''))
+                                .filter(value => value !== '' && !isProductPseudoValue(value));
+
+                            callback(currentProductSearchValues.length > 0
+                                ? [{
+                                    value: PRODUCT_SELECT_ALL_VALUE,
+                                    label: 'Izaberi sve',
+                                    is_select_all: true,
+                                    current_count: currentProductSearchValues.length
+                                }, ...options]
+                                : options);
+                        })
+                        .catch(() => callback([]));
+                },
+                onItemAdd: function(value) {
+                    let shouldCloseDropdown = true;
+
+                    if (value === PRODUCT_SELECT_ALL_VALUE) {
+                        this.removeItem(PRODUCT_SELECT_ALL_VALUE, true);
+                        currentProductSearchValues.forEach(productValue => {
+                            if (!this.items.includes(productValue)) {
+                                this.addItem(productValue, true);
+                            }
+                        });
+                    } else if (String(value).startsWith(PRODUCT_PARENT_SELECT_ALL_PREFIX)) {
+                        shouldCloseDropdown = false;
+                        const parentOption = this.options[value] || {};
+                        const variantValues = Array.isArray(parentOption.variant_values)
+                            ? parentOption.variant_values
+                            : [];
+
+                        this.removeItem(value, true);
+                        variantValues.forEach(productValue => {
+                            if (productValue && !this.items.includes(productValue)) {
+                                this.addItem(String(productValue), true);
+                            }
+                        });
+                    } else {
+                        return;
+                    }
+
+                    this.setTextboxValue('');
+                    this.lastQuery = null;
+                    this.refreshItems();
+                    this.refreshOptions(false);
+                    if (shouldCloseDropdown) {
+                        this.close();
+                    }
+                    updateFilterValue(index, normalizeTomSelectValues(filterType, this.getValue()));
+                },
+                render: {
+                    option: function(data, escape) {
+                        if (data.is_select_all) {
+                            return `
+                                <div class="promotion-product-select-all-option">
+                                    <span>Izaberi sve</span>
+                                    <span>${escape(String(data.current_count || 0))} iz trenutne pretrage</span>
+                                </div>
+                            `;
+                        }
+
+                        if (data.is_parent_select_all) {
+                            return `
+                                <div class="promotion-product-parent-option">
+                                    <span>${escape(data.name || data.label || '')}</span>
+                                    <span>Izaberi sve varijante (${escape(String(data.variant_count || 0))})</span>
+                                </div>
+                            `;
+                        }
+
+                        const regularPrice = formatProductPrice(data.regular_price);
+                        const salePrice = formatProductPrice(data.sale_price);
+                        const salePriceHtml = salePrice
+                            ? `<span class="promotion-product-option-sale">Sale: ${escape(salePrice)}</span>`
+                            : '';
+
+                        return `
+                            <div class="promotion-product-option ${data.is_variant ? 'promotion-product-variant-option' : ''}">
+                                <span class="promotion-product-option-name">${escape(data.name || data.label || '')}</span>
+                                <span class="promotion-product-option-sku">${escape(data.sku || data.value || '')}</span>
+                                <span class="promotion-product-option-price">${escape(regularPrice)}</span>
+                                ${salePriceHtml}
+                            </div>
+                        `;
+                    },
+                    item: function(data, escape) {
+                        return `<div>${escape(data.sku || data.value || data.text || '')}</div>`;
+                    },
+                    loading: function() {
+                        return `
+                            <div class="promotion-filter-loading">
+                                <span class="promotion-filter-loading-spinner" aria-hidden="true"></span>
+                                <span>Ucitavanje proizvoda...</span>
+                            </div>
+                        `;
+                    }
+                }
+            });
+        } else if (isCustomFieldFilter(filterType)) {
+            instance = new TomSelect(select, {
+                ...commonConfig,
+                preload: 'focus',
+                valueField: 'value',
+                labelField: 'label',
+                searchField: ['label'],
+                maxOptions: 50,
+                load: function(query, callback) {
+                    fetchCustomFieldOptions(getCustomFieldName(filterType), query)
+                        .then(callback)
+                        .catch(() => callback([]));
+                },
+                render: {
+                    option: function(data, escape) {
+                        const countHtml = typeof data.count === 'number'
+                            ? `<span style="margin-left: auto; color: #6b7280; font-size: 12px;">${escape(String(data.count))}</span>`
+                            : '';
+                        return `<div style="display: flex; align-items: center; gap: 10px; width: 100%;"><span>${escape(data.label)}</span>${countHtml}</div>`;
+                    },
+                    loading: function() {
+                        return `
+                            <div class="promotion-filter-loading">
+                                <span class="promotion-filter-loading-spinner" aria-hidden="true"></span>
+                                <span>Učitavanje vrednosti...</span>
+                            </div>
+                        `;
+                    }
+                }
+            });
+        } else {
+            instance = new TomSelect(select, {
+                ...commonConfig,
+                maxOptions: null
+            });
+        }
+
+        instance.wrapper.classList.add('promotion-filter-multiselect-wrapper');
+        instance.dropdown.classList.add('promotion-filter-multiselect-dropdown');
+
+        tomSelectInstances[index] = instance;
+    });
+}
+
+currentFilters = currentFilters.map(filter => ({
+    ...filter,
+    type: normalizeCustomFieldFilterType(filter.type),
+    value: isTomSelectFilter(normalizeCustomFieldFilterType(filter.type))
+        ? normalizeTomSelectValues(normalizeCustomFieldFilterType(filter.type), filter.value)
+        : filter.value
+}));
+
 function addFilter() {
-    currentFilters.push({ type: 'is_visible', value: true });
+    currentFilters.push({ type: 'is_visible', value: getDefaultFilterValue('is_visible') });
     renderFilters();
     schedulePreviewUpdate();
 }
@@ -120,18 +583,28 @@ function removeFilter(index) {
 }
 
 function updateFilterType(index, type) {
+    if (!currentFilters[index]) {
+        return;
+    }
+
     currentFilters[index].type = type;
-    currentFilters[index].value = '';
+    currentFilters[index].value = getDefaultFilterValue(type);
     renderFilters();
     schedulePreviewUpdate();
 }
 
 function updateFilterValue(index, value) {
+    if (!currentFilters[index]) {
+        return;
+    }
+
     currentFilters[index].value = value;
     schedulePreviewUpdate();
 }
 
 function renderFilters() {
+    destroyTomSelectInstances();
+
     let filterTypes = [
         { value: 'categories:in', label: 'Kategorije' },
         { value: 'brand_id', label: 'Brend' },
@@ -155,15 +628,46 @@ function renderFilters() {
     const html = currentFilters.map((filter, index) => {
         let inputHtml = '';
         
-        if (filter.type === 'categories:in') {
-            inputHtml = `<select multiple onchange="updateFilterValue(${index}, Array.from(this.selectedOptions).map(o => o.value))" class="form-input" style="height: 80px;">
-                ${categories.map(c => `<option value="${c.id}" ${Array.isArray(filter.value) && filter.value.includes(String(c.id)) ? 'selected' : ''}>${c.name}</option>`).join('')}
-            </select>`;
-        } else if (filter.type === 'brand_id') {
-            inputHtml = `<select onchange="updateFilterValue(${index}, this.value)" class="form-input">
-                <option value="">Izaberite brend</option>
-                ${brands.map(b => `<option value="${b.id}" ${filter.value == b.id ? 'selected' : ''}>${b.name}</option>`).join('')}
-            </select>`;
+        if (isTomSelectFilter(filter.type)) {
+            const selectedIds = new Set(normalizeTomSelectValues(filter.type, filter.value));
+            const options = filter.type === 'categories:in'
+                ? categories
+                : (filter.type === 'brand_id' ? brands : selectedIds.size > 0
+                    ? Array.from(selectedIds).map(value => ({
+                        id: value,
+                        name: value,
+                        value: value,
+                        label: value,
+                        sku: value
+                    }))
+                    : []);
+            const placeholder = filter.type === 'categories:in'
+                ? 'Izaberite kategorije'
+                : (filter.type === 'brand_id'
+                    ? 'Izaberite brendove'
+                    : (isProductSkuFilter(filter.type) ? 'Pretrazi proizvode po nazivu ili SKU-u' : 'Pretraži i izaberite vrednosti'));
+            const removeTitle = filter.type === 'categories:in'
+                ? 'Ukloni kategoriju'
+                : (filter.type === 'brand_id'
+                    ? 'Ukloni brend'
+                    : (isProductSkuFilter(filter.type) ? 'Ukloni proizvod' : 'Ukloni vrednost'));
+
+            inputHtml = `
+                <select
+                    multiple
+                    class="js-filter-multiselect"
+                    data-filter-index="${index}"
+                    data-filter-type="${escapeHtml(filter.type)}"
+                    data-placeholder="${escapeHtml(placeholder)}"
+                    data-remove-title="${escapeHtml(removeTitle)}"
+                >
+                    ${options.map(option => `
+                        <option value="${escapeHtml(String(option.id))}" ${selectedIds.has(String(option.id)) ? 'selected' : ''}>
+                            ${escapeHtml(option.name)}
+                        </option>
+                    `).join('')}
+                </select>
+            `;
         } else if (filter.type === 'is_visible' || filter.type === 'is_featured') {
             inputHtml = `<select onchange="updateFilterValue(${index}, this.value === 'true')" class="form-input">
                 <option value="true" ${String(filter.value) === 'true' ? 'selected' : ''}>Da</option>
@@ -176,7 +680,7 @@ function renderFilters() {
         }
         
         return `
-            <div class="filter-item" style="display: grid; grid-template-columns: 200px 1fr 32px; gap: 10px; align-items: start; margin-bottom: 10px; background: white; padding: 10px; border: 1px solid #e5e7eb; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+            <div class="filter-item promotion-filter-item" style="display: grid; grid-template-columns: 200px minmax(0, 1fr) 32px; gap: 10px; align-items: start; margin-bottom: 10px; background: white; padding: 10px; border: 1px solid #e5e7eb; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
                 <div>
                     <label style="font-size: 11px; font-weight: 600; color: #6b7280; display: block; margin-bottom: 4px;">Tip uslova</label>
                     <select onchange="updateFilterType(${index}, this.value)" class="form-input">
@@ -187,7 +691,7 @@ function renderFilters() {
                         `).join('')}
                     </select>
                 </div>
-                <div>
+                <div style="min-width: 0;">
                     <label style="font-size: 11px; font-weight: 600; color: #6b7280; display: block; margin-bottom: 4px;">Vrednost</label>
                     ${inputHtml}
                 </div>
@@ -201,6 +705,7 @@ function renderFilters() {
     }).join('');
 
     document.getElementById('filter-list').innerHTML = html;
+    initializeTomSelectInstances();
 }
 
 document.getElementById('promotionForm').addEventListener('submit', function(e) {
@@ -213,9 +718,6 @@ document.getElementById('promotionForm').addEventListener('submit', function(e) 
 
 // Initialize
 renderFilters();
-
-// Initial preview
-setTimeout(updatePreview, 500);
 </script>
 
 <div class="card" style="margin-top: 20px; background: #f9fafb;">
@@ -309,4 +811,6 @@ async function updatePreview() {
         document.getElementById('preview-table-body').innerHTML = '<tr><td colspan="4" style="text-align: center; color: red;">Greška pri učitavanju.</td></tr>';
     }
 }
+
+setTimeout(updatePreview, 500);
 </script>

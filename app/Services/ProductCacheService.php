@@ -9,7 +9,8 @@ class ProductCacheService {
     private $storeHash;
     
     // Konstanta za veličinu batch-a. MySQL obično odlično rukuje sa 1000-5000.
-    private const DB_BATCH_SIZE = 100; 
+    private const DB_BATCH_SIZE = 100;
+    private const CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE = 500;
     
     public function __construct(Database $db = null) {
         $this->db = $db ?? Database::getInstance();
@@ -21,6 +22,8 @@ class ProductCacheService {
             throw new \Exception("Store context required for ProductCacheService");
         }
         $this->ensureProductsCacheSchema();
+        $this->ensureCustomFieldFilterIndexSchema();
+        $this->ensureCustomFieldFilterIndexData();
         $this->api = new BigCommerceAPI();
     }
     
@@ -253,6 +256,7 @@ class ProductCacheService {
                 return; // Ništa za upis, izlazimo iz metode.
             }
             $this->db->query($sql, $params);
+            $this->syncCustomFieldFilterIndex($products);
         } catch (\PDOException $e) {
             // Ako dođe do greške prilikom izvršavanja upita, ispisujemo sve detalje.
             header('Content-Type: text/plain; charset=utf-8'); // Osigurava ispravan prikaz
@@ -338,7 +342,7 @@ class ProductCacheService {
     // --------------------------------------------------------------------------------------------------
 
     public function getProductsByFilters($filters = [], $limit = null, $offset = 0) {
-        $sql = "SELECT * FROM products_cache WHERE store_hash = ?";
+        $sql = "SELECT pc.* FROM products_cache pc WHERE pc.store_hash = ?";
         $params = [$this->storeHash];
 
         $sql .= $this->buildFilterQuery($filters, $params);
@@ -400,6 +404,7 @@ class ProductCacheService {
     
     public function clearCache() {
         $this->db->query("DELETE FROM products_cache WHERE store_hash = ?", [$this->storeHash]);
+        $this->db->query("DELETE FROM product_custom_field_index WHERE store_hash = ?", [$this->storeHash]);
         return true;
     }
     
@@ -488,7 +493,7 @@ class ProductCacheService {
     }
 
     public function countProductsByFilters($filters = []) {
-        $sql = "SELECT COUNT(*) as total FROM products_cache WHERE store_hash = ?";
+        $sql = "SELECT COUNT(*) as total FROM products_cache pc WHERE pc.store_hash = ?";
         $params = [$this->storeHash];
         
         $sql .= $this->buildFilterQuery($filters, $params);
@@ -517,28 +522,32 @@ class ProductCacheService {
             // ---------------------------------------------------------
             if (strpos($key, 'custom_field:') === 0) {
                 // Izdvajamo pravi naziv polja (npr. "Materijal" iz "custom_field:Materijal")
-                $fieldName = substr($key, 13); 
+                $fieldName = $this->normalizeEscapedUnicodeString(substr($key, 13));
                 
                 // Provjera da li je vrijednost niz (multiselect -> OR logika)
-                if (is_array($value)) {
-                    // SCENARIO: Korisnik je izabrao npr. Materijal = Pamuk ILI Svila
-                    $orConditions = [];
-                    foreach ($value as $subValue) {
-                        // Tražimo JSON objekat unutar niza custom_fields
-                        $orConditions[] = "JSON_CONTAINS(custom_fields, JSON_OBJECT('name', ?, 'value', ?))";
-                        $params[] = $fieldName;
-                        $params[] = (string)$subValue; // Osiguravamo string tip
-                    }
-                    
-                    // Spajamo uslove sa OR i stavljamo u zagradu
-                    if (!empty($orConditions)) {
-                        $sql .= " AND (" . implode(' OR ', $orConditions) . ")";
-                    }
-                } else {
-                    // SCENARIO: Običan filter, jedna vrijednost
-                    $sql .= " AND JSON_CONTAINS(custom_fields, JSON_OBJECT('name', ?, 'value', ?))";
+                $fieldValues = is_array($value) ? $value : [$value];
+                $fieldValues = array_values(array_filter(array_map(function($item) {
+                    return $this->normalizeEscapedUnicodeString((string)$item);
+                }, $fieldValues), function($item) {
+                    return $item !== '';
+                }));
+
+                if (!empty($fieldValues)) {
+                    $placeholders = implode(',', array_fill(0, count($fieldValues), '?'));
+                    $sql .= " AND EXISTS (
+                        SELECT 1
+                        FROM product_custom_field_index pcfi
+                        WHERE pcfi.store_hash = ?
+                          AND pcfi.product_id = pc.product_id
+                          AND pcfi.field_name = ?
+                          AND pcfi.field_value IN ($placeholders)
+                    )";
+
+                    $params[] = $this->storeHash;
                     $params[] = $fieldName;
-                    $params[] = (string)$value;
+                    foreach ($fieldValues as $fieldValue) {
+                        $params[] = $fieldValue;
+                    }
                 }
                 
                 // Bitno: nastavljamo petlju da ne bi ušli u switch ispod
@@ -567,8 +576,24 @@ class ProductCacheService {
                     break;
 
                 case 'brand_id':
-                    $sql .= " AND brand_id = ?";
-                    $params[] = $value;
+                    $brandIds = is_array($value) ? $value : explode(',', (string)$value);
+                    $brandIds = array_values(array_filter(array_map(function($brandId) {
+                        return trim((string)$brandId);
+                    }, $brandIds), function($brandId) {
+                        return $brandId !== '';
+                    }));
+
+                    if (count($brandIds) === 1) {
+                        $sql .= " AND brand_id = ?";
+                        $params[] = (int)$brandIds[0];
+                    } elseif (!empty($brandIds)) {
+                        $placeholders = implode(',', array_fill(0, count($brandIds), '?'));
+                        $sql .= " AND brand_id IN ($placeholders)";
+
+                        foreach ($brandIds as $brandId) {
+                            $params[] = (int)$brandId;
+                        }
+                    }
                     break;
 
                 case 'product_id':
@@ -640,6 +665,557 @@ class ProductCacheService {
         }
 
         return $sql;
+    }
+
+    public function getCustomFieldFilterValues(string $fieldName, string $search = '', int $limit = 50): array {
+        $fieldName = $this->normalizeEscapedUnicodeString($fieldName);
+        $search = $this->normalizeEscapedUnicodeString($search);
+        $limit = max(1, min(100, $limit));
+
+        if ($fieldName === '') {
+            return [];
+        }
+
+        $rows = $this->fetchIndexedCustomFieldFilterValueRows($fieldName, $search, $limit);
+
+        if (empty($rows) && !$this->hasIndexedCustomFieldRows($fieldName)) {
+            $this->rebuildCustomFieldFilterIndexFromCache();
+            $rows = $this->fetchIndexedCustomFieldFilterValueRows($fieldName, $search, $limit);
+        }
+
+        if (empty($rows)) {
+            $rows = $this->fetchCustomFieldFilterValueRowsFromCache($fieldName, $search, $limit);
+        }
+
+        return array_map(function($row) {
+            return [
+                'value' => $row['field_value'],
+                'label' => $row['field_value'],
+                'count' => (int)($row['product_count'] ?? 0),
+            ];
+        }, $rows);
+    }
+
+    public function getCustomFieldFilterNames(): array {
+        $rows = $this->db->fetchAll(
+            "SELECT field_name, COUNT(DISTINCT product_id) AS product_count
+             FROM product_custom_field_index
+             WHERE store_hash = ?
+             GROUP BY field_name
+             ORDER BY field_name ASC",
+            [$this->storeHash]
+        );
+
+        if (empty($rows)) {
+            $this->rebuildCustomFieldFilterIndexFromCache();
+            $rows = $this->db->fetchAll(
+                "SELECT field_name, COUNT(DISTINCT product_id) AS product_count
+                 FROM product_custom_field_index
+                 WHERE store_hash = ?
+                 GROUP BY field_name
+                 ORDER BY field_name ASC",
+                [$this->storeHash]
+            );
+        }
+
+        return array_map(function($row) {
+            return [
+                'name' => (string)$row['field_name'],
+                'product_count' => (int)($row['product_count'] ?? 0),
+            ];
+        }, $rows);
+    }
+
+    public function getProductFilterOptions(string $search = '', int $limit = 50): array {
+        $search = $this->normalizeEscapedUnicodeString($search);
+        $limit = max(1, min(100, $limit));
+        $searchTerms = $this->parseProductSearchTerms($search);
+        $parentSelectAllPrefix = '__promotion_select_all_parent_variants__:';
+
+        $sql = "SELECT product_id, variant_id, type, name, sku, price, sale_price
+                FROM products_cache
+                WHERE store_hash = ?
+                  AND sku IS NOT NULL
+                  AND TRIM(sku) <> ''";
+        $params = [$this->storeHash];
+
+        if ($search !== '') {
+            $searchLike = '%' . $search . '%';
+            $searchConditions = [
+                "sku LIKE ?",
+                "name LIKE ?",
+            ];
+            $params[] = $searchLike;
+            $params[] = $searchLike;
+
+            if (count($searchTerms) > 1) {
+                $placeholders = implode(',', array_fill(0, count($searchTerms), '?'));
+                $searchConditions[] = "sku IN ($placeholders)";
+                foreach ($searchTerms as $term) {
+                    $params[] = $term;
+                }
+
+                foreach ($searchTerms as $term) {
+                    $searchConditions[] = "sku LIKE ?";
+                    $params[] = $term . '%';
+                }
+            }
+
+            $sql .= " AND (" . implode(' OR ', $searchConditions) . ")";
+
+            $sql .= " ORDER BY
+                        CASE
+                            WHEN sku = ? THEN 0
+                            " . (count($searchTerms) > 1 ? "WHEN sku IN (" . implode(',', array_fill(0, count($searchTerms), '?')) . ") THEN 1" : "") . "
+                            WHEN sku LIKE ? THEN 1
+                            WHEN name LIKE ? THEN 2
+                            ELSE 3
+                        END,
+                        name ASC,
+                        sku ASC";
+            $params[] = $search;
+            if (count($searchTerms) > 1) {
+                foreach ($searchTerms as $term) {
+                    $params[] = $term;
+                }
+            }
+            $params[] = $search . '%';
+            $params[] = $searchLike;
+        } else {
+            $sql .= " ORDER BY name ASC, sku ASC";
+        }
+
+        $sql .= " LIMIT " . (int)$limit;
+
+        $rows = $this->db->fetchAll($sql, $params);
+
+        if (empty($rows)) {
+            return [];
+        }
+
+        $productIds = array_values(array_unique(array_map(function($row) {
+            return (int)($row['product_id'] ?? 0);
+        }, $rows)));
+        $productIds = array_values(array_filter($productIds, fn($productId) => $productId > 0));
+
+        $parentNamesByProductId = [];
+        $variantRowsByProductId = [];
+
+        if (!empty($productIds)) {
+            $placeholders = implode(',', array_fill(0, count($productIds), '?'));
+            $groupRows = $this->db->fetchAll(
+                "SELECT product_id, variant_id, type, name, sku, price, sale_price
+                 FROM products_cache
+                 WHERE store_hash = ?
+                   AND product_id IN ($placeholders)
+                 ORDER BY product_id ASC, variant_id IS NULL DESC, name ASC, sku ASC",
+                array_merge([$this->storeHash], $productIds)
+            );
+
+            foreach ($groupRows as $groupRow) {
+                $productId = (int)($groupRow['product_id'] ?? 0);
+                if ($productId <= 0) {
+                    continue;
+                }
+
+                if (empty($groupRow['variant_id'])) {
+                    $parentNamesByProductId[$productId] = (string)($groupRow['name'] ?? '');
+                    continue;
+                }
+
+                if (empty($groupRow['sku']) || trim((string)$groupRow['sku']) === '') {
+                    continue;
+                }
+
+                if (!isset($variantRowsByProductId[$productId])) {
+                    $variantRowsByProductId[$productId] = [];
+                }
+
+                $variantRowsByProductId[$productId][] = $groupRow;
+            }
+        }
+
+        $options = [];
+        $emittedProductGroups = [];
+        $emittedValues = [];
+
+        foreach ($rows as $row) {
+            $productId = (int)($row['product_id'] ?? 0);
+            $productVariantRows = $variantRowsByProductId[$productId] ?? [];
+
+            if (!empty($productVariantRows)) {
+                if (isset($emittedProductGroups[$productId])) {
+                    continue;
+                }
+
+                $emittedProductGroups[$productId] = true;
+                $parentName = $parentNamesByProductId[$productId] ?: (string)($row['name'] ?? '');
+                $variantValues = array_values(array_unique(array_filter(array_map(function($variantRow) {
+                    return (string)($variantRow['sku'] ?? '');
+                }, $productVariantRows), function($sku) {
+                    return trim($sku) !== '';
+                })));
+
+                $options[] = [
+                    'value' => $parentSelectAllPrefix . $productId,
+                    'label' => $parentName,
+                    'name' => $parentName,
+                    'sku' => '',
+                    'regular_price' => null,
+                    'sale_price' => null,
+                    'product_id' => $productId,
+                    'variant_id' => null,
+                    'type' => 'parent_variant_group',
+                    'is_parent_select_all' => true,
+                    'variant_values' => $variantValues,
+                    'variant_count' => count($variantValues),
+                ];
+
+                foreach ($productVariantRows as $variantRow) {
+                    $variantOption = $this->mapProductFilterOptionRow($variantRow);
+                    $variantOption['parent_name'] = $parentName;
+                    $variantOption['is_variant'] = true;
+                    $variantOption['parent_variant_values'] = $variantValues;
+                    $variantOption['parent_variant_count'] = count($variantValues);
+
+                    if (isset($emittedValues[$variantOption['value']])) {
+                        continue;
+                    }
+
+                    $emittedValues[$variantOption['value']] = true;
+                    $options[] = $variantOption;
+                }
+
+                continue;
+            }
+
+            $option = $this->mapProductFilterOptionRow($row);
+            if (isset($emittedValues[$option['value']])) {
+                continue;
+            }
+
+            $emittedValues[$option['value']] = true;
+            $options[] = $option;
+        }
+
+        return $options;
+    }
+
+    private function mapProductFilterOptionRow(array $row): array {
+        $salePrice = $row['sale_price'];
+        $hasSalePrice = is_numeric($salePrice) && (float)$salePrice > 0;
+
+        return [
+            'value' => (string)$row['sku'],
+            'label' => (string)$row['name'],
+            'name' => (string)$row['name'],
+            'sku' => (string)$row['sku'],
+            'regular_price' => is_numeric($row['price']) ? (float)$row['price'] : null,
+            'sale_price' => $hasSalePrice ? (float)$salePrice : null,
+            'product_id' => isset($row['product_id']) ? (int)$row['product_id'] : null,
+            'variant_id' => isset($row['variant_id']) ? (int)$row['variant_id'] : null,
+            'type' => (string)($row['type'] ?? 'product'),
+        ];
+    }
+
+    private function parseProductSearchTerms(string $search): array {
+        if ($search === '') {
+            return [];
+        }
+
+        $terms = preg_split('/[\s,]+/u', $search, -1, PREG_SPLIT_NO_EMPTY);
+        if (!is_array($terms)) {
+            return [];
+        }
+
+        return array_values(array_unique(array_filter(array_map(function($term) {
+            return trim($this->normalizeEscapedUnicodeString((string)$term));
+        }, $terms), function($term) {
+            return $term !== '';
+        })));
+    }
+
+    private function fetchIndexedCustomFieldFilterValueRows(string $fieldName, string $search, int $limit): array {
+        $sql = "SELECT field_value, COUNT(DISTINCT product_id) AS product_count
+                FROM product_custom_field_index
+                WHERE store_hash = ?
+                  AND field_name = ?";
+        $params = [$this->storeHash, $fieldName];
+
+        if ($search !== '') {
+            $sql .= " AND field_value LIKE ?";
+            $params[] = '%' . $search . '%';
+        }
+
+        $sql .= " GROUP BY field_value
+                  ORDER BY product_count DESC, field_value ASC
+                  LIMIT " . (int)$limit;
+
+        return $this->db->fetchAll($sql, $params);
+    }
+
+    private function hasIndexedCustomFieldRows(string $fieldName): bool {
+        $row = $this->db->fetchOne(
+            "SELECT 1
+             FROM product_custom_field_index
+             WHERE store_hash = ?
+               AND field_name = ?
+             LIMIT 1",
+            [$this->storeHash, $fieldName]
+        );
+
+        return !empty($row);
+    }
+
+    private function fetchCustomFieldFilterValueRowsFromCache(string $fieldName, string $search, int $limit): array {
+        $rows = $this->db->fetchAll(
+            "SELECT product_id, custom_fields
+             FROM products_cache
+             WHERE store_hash = ?
+               AND variant_id IS NULL
+               AND custom_fields IS NOT NULL",
+            [$this->storeHash]
+        );
+
+        $counts = [];
+
+        foreach ($rows as $row) {
+            $productId = (int)($row['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $productFieldRows = $this->extractCustomFieldIndexRows($productId, $row['custom_fields'] ?? []);
+            foreach ($productFieldRows as $productFieldRow) {
+                if ($productFieldRow['field_name'] !== $fieldName) {
+                    continue;
+                }
+
+                if ($search !== '' && mb_stripos($productFieldRow['field_value'], $search, 0, 'UTF-8') === false) {
+                    continue;
+                }
+
+                if (!isset($counts[$productFieldRow['field_value']])) {
+                    $counts[$productFieldRow['field_value']] = 0;
+                }
+
+                $counts[$productFieldRow['field_value']]++;
+            }
+        }
+
+        $resultRows = [];
+        foreach ($counts as $fieldValue => $productCount) {
+            $resultRows[] = [
+                'field_value' => $fieldValue,
+                'product_count' => $productCount,
+            ];
+        }
+
+        usort($resultRows, function($left, $right) {
+            if ($left['product_count'] === $right['product_count']) {
+                return strcmp($left['field_value'], $right['field_value']);
+            }
+
+            return $right['product_count'] <=> $left['product_count'];
+        });
+
+        return array_slice($resultRows, 0, $limit);
+    }
+
+    private function ensureCustomFieldFilterIndexSchema(): void {
+        $this->db->query(
+            "CREATE TABLE IF NOT EXISTS `product_custom_field_index` (
+                `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                `store_hash` VARCHAR(255) NOT NULL,
+                `product_id` INT UNSIGNED NOT NULL,
+                `field_name` VARCHAR(255) NOT NULL,
+                `field_value` VARCHAR(255) NOT NULL,
+                UNIQUE KEY `uniq_store_product_field_value` (`store_hash`, `product_id`, `field_name`, `field_value`),
+                INDEX `idx_store_field_name_value` (`store_hash`, `field_name`, `field_value`),
+                INDEX `idx_store_product` (`store_hash`, `product_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+    }
+
+    private function ensureCustomFieldFilterIndexData(): void {
+        $existingIndexRow = $this->db->fetchOne(
+            "SELECT id
+             FROM product_custom_field_index
+             WHERE store_hash = ?
+             LIMIT 1",
+            [$this->storeHash]
+        );
+
+        if ($existingIndexRow) {
+            return;
+        }
+
+        $existingCacheRow = $this->db->fetchOne(
+            "SELECT product_id
+             FROM products_cache
+             WHERE store_hash = ?
+               AND variant_id IS NULL
+             LIMIT 1",
+            [$this->storeHash]
+        );
+
+        if (!$existingCacheRow) {
+            return;
+        }
+
+        $this->rebuildCustomFieldFilterIndexFromCache();
+    }
+
+    private function rebuildCustomFieldFilterIndexFromCache(): void {
+        $this->db->query(
+            "DELETE FROM product_custom_field_index WHERE store_hash = ?",
+            [$this->storeHash]
+        );
+
+        $offset = 0;
+
+        do {
+            $rows = $this->db->fetchAll(
+                "SELECT product_id, custom_fields
+                 FROM products_cache
+                 WHERE store_hash = ?
+                   AND variant_id IS NULL
+                 ORDER BY product_id ASC
+                 LIMIT " . self::CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE . " OFFSET " . (int)$offset,
+                [$this->storeHash]
+            );
+
+            if (empty($rows)) {
+                break;
+            }
+
+            $indexRows = [];
+            foreach ($rows as $row) {
+                $indexRows = array_merge(
+                    $indexRows,
+                    $this->extractCustomFieldIndexRows((int)$row['product_id'], $row['custom_fields'] ?? [])
+                );
+            }
+
+            $this->insertCustomFieldIndexRows($indexRows);
+            $offset += self::CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE;
+        } while (count($rows) === self::CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE);
+    }
+
+    private function syncCustomFieldFilterIndex(array $products): void {
+        if (empty($products)) {
+            return;
+        }
+
+        $productIds = [];
+        $indexRows = [];
+
+        foreach ($products as $product) {
+            $productId = (int)($product['id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $productIds[$productId] = $productId;
+            $indexRows = array_merge(
+                $indexRows,
+                $this->extractCustomFieldIndexRows($productId, $product['custom_fields'] ?? [])
+            );
+        }
+
+        if (empty($productIds)) {
+            return;
+        }
+
+        $this->deleteCustomFieldIndexRowsByProductIds(array_values($productIds));
+        $this->insertCustomFieldIndexRows($indexRows);
+    }
+
+    private function extractCustomFieldIndexRows(int $productId, $customFields): array {
+        if (is_string($customFields)) {
+            $customFields = json_decode($customFields, true);
+        }
+
+        if (!is_array($customFields)) {
+            return [];
+        }
+
+        $rows = [];
+        $seen = [];
+
+        foreach ($customFields as $field) {
+            $fieldName = $this->normalizeEscapedUnicodeString((string)($field['name'] ?? ''));
+            $fieldValue = $this->normalizeEscapedUnicodeString((string)($field['value'] ?? ''));
+
+            if ($fieldName === '' || $fieldValue === '') {
+                continue;
+            }
+
+            $dedupeKey = $productId . '|' . $fieldName . '|' . $fieldValue;
+            if (isset($seen[$dedupeKey])) {
+                continue;
+            }
+
+            $seen[$dedupeKey] = true;
+            $rows[] = [
+                'product_id' => $productId,
+                'field_name' => $fieldName,
+                'field_value' => $fieldValue,
+            ];
+        }
+
+        return $rows;
+    }
+
+    private function deleteCustomFieldIndexRowsByProductIds(array $productIds): void {
+        if (empty($productIds)) {
+            return;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($productIds), '?'));
+        $params = array_merge([$this->storeHash], array_map('intval', $productIds));
+
+        $this->db->query(
+            "DELETE FROM product_custom_field_index
+             WHERE store_hash = ?
+               AND product_id IN ($placeholders)",
+            $params
+        );
+    }
+
+    private function insertCustomFieldIndexRows(array $rows): void {
+        if (empty($rows)) {
+            return;
+        }
+
+        $placeholders = [];
+        $params = [];
+
+        foreach ($rows as $row) {
+            $placeholders[] = '(?, ?, ?, ?)';
+            $params[] = $this->storeHash;
+            $params[] = (int)$row['product_id'];
+            $params[] = $row['field_name'];
+            $params[] = $row['field_value'];
+        }
+
+        $this->db->query(
+            "INSERT INTO product_custom_field_index
+             (store_hash, product_id, field_name, field_value)
+             VALUES " . implode(', ', $placeholders) . "
+             ON DUPLICATE KEY UPDATE field_value = VALUES(field_value)",
+            $params
+        );
+    }
+
+    public function deleteProductCustomFieldIndex(int $productId): void {
+        $this->deleteCustomFieldIndexRowsByProductIds([$productId]);
+    }
+
+    private function normalizeEscapedUnicodeString(string $value): string {
+        return preg_replace_callback('/\\\\u([0-9a-fA-F]{4})/', function($matches) {
+            return json_decode('"\\u' . $matches[1] . '"');
+        }, trim($value));
     }
 
 }

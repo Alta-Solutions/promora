@@ -440,7 +440,8 @@ body {
 }
 
 /* Loading */
-.loading {
+.app-loading,
+.loading:not(.ts-wrapper) {
     text-align: center;
     padding: 40px;
     color: #6b7280;
