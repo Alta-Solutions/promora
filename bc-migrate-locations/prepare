@@ -1,7 +1,0 @@
-php .\migrate-locations.php `
-  --source-store=fa8il6vy5q `
-  --source-token=lu2se3px30nvxznffbxdqziimqlfaz6 `
-  --target-store=i5zrevrrdl `
-  --target-token=67583evguxzwam174rzyd10ctbrwici `
-  --default-state="Hrvatska" `
-  --dry-run
