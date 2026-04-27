@@ -27,7 +27,7 @@ function showLoading(elementId) {
     const element = document.getElementById(elementId);
     if (element) {
         element.innerHTML = `
-            <div class="loading">
+            <div class="app-loading">
                 <div class="spinner"></div>
                 Učitavanje...
             </div>

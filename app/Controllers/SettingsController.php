@@ -2,6 +2,7 @@
 namespace App\Controllers;
 
 use App\Models\Database;
+use App\Services\ProductCacheService;
 use App\Services\QueueService;
 use App\Support\Csrf;
 
@@ -20,7 +21,8 @@ class SettingsController {
             $settings = [];
         }
 
-        $allowedFiltersString = implode(', ', $settings['allowed_filters'] ?? []);
+        $settings['allowed_filters'] = $this->normalizeAllowedFilters($settings['allowed_filters'] ?? []);
+        $availableCustomFieldFilters = $this->getAvailableCustomFieldFilters($settings['allowed_filters'], $db);
         $promotionCustomFieldName = $settings['promotion_custom_field_name'] ?? \Config::$CUSTOM_FIELD_NAME;
         $enableOmnibus = !empty($store['enable_omnibus']);
         $queueService = new QueueService($storeHash);
@@ -54,13 +56,11 @@ class SettingsController {
         $db = Database::getInstance();
         $storeHash = $_SESSION['store_hash'] ?? $db->getStoreContext();
         $enableOmnibus = isset($_POST['enable_omnibus']) ? 1 : 0;
-        $rawInput = $_POST['custom_fields'] ?? '';
+        $rawInput = $_POST['custom_fields'] ?? [];
         $promotionCustomFieldName = trim($_POST['promotion_custom_field_name'] ?? '');
 
-        $filtersArray = explode(',', $rawInput);
-        $filtersArray = array_map('trim', $filtersArray);
-        $filtersArray = array_filter($filtersArray);
-        $filtersArray = array_values($filtersArray);
+        $filtersArray = is_array($rawInput) ? $rawInput : explode(',', (string)$rawInput);
+        $filtersArray = $this->normalizeAllowedFilters($filtersArray);
 
         try {
             $store = $db->fetchOne(
@@ -183,5 +183,66 @@ class SettingsController {
         );
 
         return (int)($row['total'] ?? 0);
+    }
+
+    private function normalizeAllowedFilters($filters): array {
+        if (!is_array($filters)) {
+            $filters = explode(',', (string)$filters);
+        }
+
+        $normalizedFilters = [];
+
+        foreach ($filters as $filterName) {
+            $normalizedFilterName = $this->normalizeEscapedUnicodeString((string)$filterName);
+            if ($normalizedFilterName !== '' && !in_array($normalizedFilterName, $normalizedFilters, true)) {
+                $normalizedFilters[] = $normalizedFilterName;
+            }
+        }
+
+        return array_values($normalizedFilters);
+    }
+
+    private function normalizeEscapedUnicodeString(string $value): string {
+        return preg_replace_callback('/\\\\u([0-9a-fA-F]{4})/', function($matches) {
+            return json_decode('"\\u' . $matches[1] . '"');
+        }, trim($value));
+    }
+
+    private function getAvailableCustomFieldFilters(array $selectedFilters, Database $db): array {
+        try {
+            $cacheService = new ProductCacheService($db);
+            $availableFilters = $cacheService->getCustomFieldFilterNames();
+        } catch (\Throwable $e) {
+            error_log("Failed to load custom field filter names: " . $e->getMessage());
+            $availableFilters = [];
+        }
+
+        $filtersByName = [];
+        foreach ($availableFilters as $filter) {
+            $name = $this->normalizeEscapedUnicodeString((string)($filter['name'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+
+            $filtersByName[$name] = [
+                'name' => $name,
+                'product_count' => (int)($filter['product_count'] ?? 0),
+            ];
+        }
+
+        foreach ($selectedFilters as $filterName) {
+            $name = $this->normalizeEscapedUnicodeString((string)$filterName);
+            if ($name === '' || isset($filtersByName[$name])) {
+                continue;
+            }
+
+            $filtersByName[$name] = [
+                'name' => $name,
+                'product_count' => 0,
+            ];
+        }
+
+        ksort($filtersByName, SORT_NATURAL | SORT_FLAG_CASE);
+        return array_values($filtersByName);
     }
 }

@@ -77,6 +77,17 @@ try {
             INDEX `idx_sku` (`sku`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
+        "CREATE TABLE IF NOT EXISTS `product_custom_field_index` (
+            `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+            `store_hash` VARCHAR(255) NOT NULL,
+            `product_id` INT UNSIGNED NOT NULL,
+            `field_name` VARCHAR(255) NOT NULL,
+            `field_value` VARCHAR(255) NOT NULL,
+            UNIQUE KEY `uniq_store_product_field_value` (`store_hash`, `product_id`, `field_name`, `field_value`),
+            INDEX `idx_store_field_name_value` (`store_hash`, `field_name`, `field_value`),
+            INDEX `idx_store_product` (`store_hash`, `product_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+
         // Tabela za promocije
         "CREATE TABLE IF NOT EXISTS `promotions` (
             `id` INT AUTO_INCREMENT PRIMARY KEY,

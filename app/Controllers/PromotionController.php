@@ -142,7 +142,7 @@ class PromotionController {
             return;
         }
         
-        $filters = json_decode($_POST['filters'] ?? '{}', true);
+        $filters = $this->getSubmittedFilters();
         $discountPercent = floatval($_POST['discount_percent'] ?? 0);
         
         try {
@@ -165,12 +165,62 @@ class PromotionController {
             return;
         }
         
-        $filters = json_decode($_POST['filters'] ?? '{}', true);
+        $filters = $this->getSubmittedFilters();
         
         try {
             $stats = $this->promotionService->getFilterStats($filters);
             echo json_encode(['success' => true, 'data' => $stats]);
         } catch (\Exception $e) {
+            echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        }
+    }
+
+    public function customFieldOptions() {
+        header('Content-Type: application/json');
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
+            http_response_code(403);
+            echo json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
+            return;
+        }
+
+        $fieldName = $this->normalizeEscapedUnicodeString(trim((string)($_POST['field_name'] ?? '')));
+        $query = $this->normalizeEscapedUnicodeString(trim((string)($_POST['q'] ?? '')));
+        $limit = max(1, min(100, (int)($_POST['limit'] ?? 50)));
+
+        $allowedCustomFields = $this->getStoreSettings()['allowed_filters'] ?? [];
+        if ($fieldName === '' || !in_array($fieldName, $allowedCustomFields, true)) {
+            http_response_code(400);
+            echo json_encode(['success' => false, 'error' => 'Invalid custom field']);
+            return;
+        }
+
+        try {
+            $options = $this->cacheService->getCustomFieldFilterValues($fieldName, $query, $limit);
+            echo json_encode(['success' => true, 'data' => ['options' => $options]]);
+        } catch (\Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        }
+    }
+
+    public function productOptions() {
+        header('Content-Type: application/json');
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
+            http_response_code(403);
+            echo json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
+            return;
+        }
+
+        $query = $this->normalizeEscapedUnicodeString(trim((string)($_POST['q'] ?? '')));
+        $limit = max(1, min(100, (int)($_POST['limit'] ?? 50)));
+
+        try {
+            $options = $this->cacheService->getProductFilterOptions($query, $limit);
+            echo json_encode(['success' => true, 'data' => ['options' => $options]]);
+        } catch (\Throwable $e) {
+            http_response_code(500);
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
         }
     }
@@ -183,16 +233,89 @@ class PromotionController {
             'start_date' => $_POST['start_date'] ?? date('Y-m-d H:i:s'),
             'end_date' => $_POST['end_date'] ?? date('Y-m-d H:i:s', strtotime('+7 days')),
             'priority' => $_POST['priority'] ?? 0,
-            'filters' => json_decode($_POST['filters'] ?? '{}', true),
+            'filters' => $this->getSubmittedFilters(),
             'color' => $_POST['color'] ?? '#3b82f6',
             'description' => $_POST['description'] ?? '',
             'target_category_id' => $_POST['target_category_id'] ?? null
         ];
     }
 
+    private function getSubmittedFilters() {
+        $filters = json_decode($_POST['filters'] ?? '{}', true);
+        return $this->normalizeFilters(is_array($filters) ? $filters : []);
+    }
+
+    private function normalizeFilters(array $filters) {
+        $normalizedFilters = [];
+
+        foreach ($filters as $key => $value) {
+            $normalizedKey = $key;
+
+            if (strpos($key, 'custom_field:') === 0) {
+                $normalizedKey = 'custom_field:' . $this->normalizeEscapedUnicodeString(substr($key, 13));
+            }
+
+            if (
+                in_array($key, ['categories:in', 'brand_id', 'sku:in'], true) ||
+                (strpos($key, 'custom_field:') === 0 && is_array($value))
+            ) {
+                $normalizedFilters[$normalizedKey] = $this->normalizeMultiSelectFilterValues($value);
+            } else {
+                $normalizedFilters[$normalizedKey] = is_string($value)
+                    ? $this->normalizeEscapedUnicodeString(trim($value))
+                    : $value;
+            }
+        }
+
+        return $normalizedFilters;
+    }
+
+    private function normalizeMultiSelectFilterValues($value) {
+        if (is_array($value)) {
+            return array_values(array_filter(array_map(function($item) {
+                return $this->normalizeEscapedUnicodeString(trim((string)$item));
+            }, $value), function($item) {
+                return $item !== '';
+            }));
+        }
+
+        if ($value === null || $value === '') {
+            return [];
+        }
+
+        return array_values(array_filter(array_map(function($item) {
+            return $this->normalizeEscapedUnicodeString(trim((string)$item));
+        }, explode(',', (string)$value)), function($item) {
+            return $item !== '';
+        }));
+    }
+
+    private function normalizeEscapedUnicodeString(string $value): string {
+        return preg_replace_callback('/\\\\u([0-9a-fA-F]{4})/', function($matches) {
+            return json_decode('"\\u' . $matches[1] . '"');
+        }, trim($value));
+    }
+
     private function getStoreSettings() {
         $db = \App\Models\Database::getInstance();
         $data = $db->fetchOne("SELECT settings FROM bigcommerce_stores WHERE store_hash = ?", [$db->getStoreContext()]);
-        return json_decode($data['settings'] ?? '{}', true);
+        $settings = json_decode($data['settings'] ?? '{}', true);
+
+        if (!is_array($settings)) {
+            return [];
+        }
+
+        $allowedFilters = $settings['allowed_filters'] ?? [];
+        $normalizedAllowedFilters = [];
+
+        foreach ($allowedFilters as $filterName) {
+            $normalizedFilterName = $this->normalizeEscapedUnicodeString((string)$filterName);
+            if ($normalizedFilterName !== '' && !in_array($normalizedFilterName, $normalizedAllowedFilters, true)) {
+                $normalizedAllowedFilters[] = $normalizedFilterName;
+            }
+        }
+
+        $settings['allowed_filters'] = $normalizedAllowedFilters;
+        return $settings;
     }
 }

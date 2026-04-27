@@ -500,7 +500,7 @@ class BigCommerceAPI {
     
     private function validateFilters($filters) {
         $supportedFilters = [
-            'categories:in', 'brand_id', 'price:min', 'price:max', 'date_modified:min',
+            'categories:in', 'brand_id', 'brand_id:in', 'price:min', 'price:max', 'date_modified:min',
             'is_visible', 'is_featured', 'inventory_level:min',
             'include', // 🚀 FIX: Omogućava prosleđivanje 'include' parametra (npr. 'variants,images')
             'inventory_level:max', 'sku:in', 'name:like'
@@ -512,7 +512,21 @@ class BigCommerceAPI {
                 if (is_bool($value)) {
                     $validFilters[$key] = $value ? 'true' : 'false';
                 } else if (is_array($value)) {
-                    $validFilters[$key] = implode(',', $value);
+                    $normalizedValues = array_values(array_filter(array_map(function($item) {
+                        return trim((string)$item);
+                    }, $value), function($item) {
+                        return $item !== '';
+                    }));
+
+                    if (empty($normalizedValues)) {
+                        continue;
+                    }
+
+                    if ($key === 'brand_id') {
+                        $validFilters['brand_id:in'] = implode(',', $normalizedValues);
+                    } else {
+                        $validFilters[$key] = implode(',', $normalizedValues);
+                    }
                 } else {
                     $validFilters[$key] = $value;
                 }

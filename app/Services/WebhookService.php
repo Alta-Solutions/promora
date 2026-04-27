@@ -322,6 +322,10 @@ class WebhookService {
             [$productId, $storeHash]
         );
         $this->db->query(
+            "DELETE FROM product_custom_field_index WHERE product_id = ? AND store_hash = ?",
+            [$productId, $storeHash]
+        );
+        $this->db->query(
             "DELETE FROM promotion_products WHERE product_id = ? AND store_hash = ?",
             [$productId, $storeHash]
         );

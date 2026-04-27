@@ -906,29 +906,43 @@ public function __construct(Database $db = null) {
             if (empty($value) && $value !== '0' && $value !== 0) continue;
 
             if (strpos($key, 'custom_field:') === 0) {
-                $fieldName = substr($key, 13);
+                $fieldName = $this->normalizeEscapedUnicodeString(substr($key, 13));
                 $productFields = $product['custom_fields'] ?? [];
-                // Ako je string (iz baze), dekodiraj ga
                 if (is_string($productFields)) $productFields = json_decode($productFields, true);
-                
+                if (!is_array($productFields)) $productFields = [];
+
+                $requiredValues = is_array($value) ? $value : [$value];
+                $requiredValues = array_values(array_filter(array_map(function($item) {
+                    return $this->normalizeEscapedUnicodeString((string)$item);
+                }, $requiredValues), function($item) {
+                    return $item !== '';
+                }));
+
                 $match = false;
                 foreach ($productFields as $field) {
-                    if ($field['name'] === $fieldName) {
-                        // Podrška za niz vrednosti (OR) ili jednu vrednost
-                        if (is_array($value)) {
-                            if (in_array($field['value'], $value)) $match = true;
-                        } else {
-                            if ($field['value'] == $value) $match = true;
-                        }
+                    $normalizedFieldName = $this->normalizeEscapedUnicodeString((string)($field['name'] ?? ''));
+                    $normalizedFieldValue = $this->normalizeEscapedUnicodeString((string)($field['value'] ?? ''));
+
+                    if ($normalizedFieldName === $fieldName && in_array($normalizedFieldValue, $requiredValues, true)) {
+                        $match = true;
+                        break;
                     }
                 }
+
                 if (!$match) return false;
                 continue;
             }
 
             switch ($key) {
                 case 'brand_id':
-                    if ($product['brand_id'] != $value) return false;
+                    $requiredBrands = is_array($value) ? $value : explode(',', (string)$value);
+                    $requiredBrands = array_values(array_filter(array_map(function($brandId) {
+                        return trim((string)$brandId);
+                    }, $requiredBrands), function($brandId) {
+                        return $brandId !== '';
+                    }));
+
+                    if (!in_array((string)($product['brand_id'] ?? ''), $requiredBrands, true)) return false;
                     break;
                 case 'categories:in':
                     $productCats = $product['categories'] ?? [];
@@ -974,6 +988,12 @@ public function __construct(Database $db = null) {
             }
         }
         return true;
+    }
+
+    private function normalizeEscapedUnicodeString(string $value): string {
+        return preg_replace_callback('/\\\\u([0-9a-fA-F]{4})/', function($matches) {
+            return json_decode('"\\u' . $matches[1] . '"');
+        }, trim($value));
     }
 
     /**

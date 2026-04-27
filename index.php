@@ -33,7 +33,7 @@ $controllerMap = [
     ],
     'promotions' => [
         'class' => \App\Controllers\PromotionController::class,
-        'actions' => ['index', 'create', 'edit', 'delete', 'preview', 'filterStats'],
+        'actions' => ['index', 'create', 'edit', 'delete', 'preview', 'filterStats', 'customFieldOptions', 'productOptions'],
     ],
     'sync' => [
         'class' => \App\Controllers\SyncController::class,
