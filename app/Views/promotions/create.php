@@ -82,6 +82,14 @@
                 <button type="button" onclick="addFilter()" class="btn btn-secondary btn-sm" style="width: 100%; margin-top: 15px; border: 1px dashed #d1d5db; background: white; color: #6b7280; padding: 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">+ Dodaj uslov</button>
             </div>
         </div>
+
+        <div class="form-group" style="margin-bottom: 20px;">
+            <label class="form-label" style="display: block; margin-bottom: 10px; font-weight: 600; color: #111827; font-size: 1.1em;">Exclude pravila</label>
+            <div class="filter-builder" style="background: #fff7ed; padding: 20px; border-radius: 8px; border: 1px solid #fed7aa;">
+                <div id="exclude-filter-list"></div>
+                <button type="button" onclick="addFilter('exclude')" class="btn btn-secondary btn-sm" style="width: 100%; margin-top: 15px; border: 1px dashed #fdba74; background: white; color: #9a3412; padding: 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">+ Dodaj exclude uslov</button>
+            </div>
+        </div>
         
         <input type="hidden" name="filters" id="filters-json">
 
@@ -97,6 +105,7 @@ let categories = <?= json_encode($categories) ?>;
 let brands = <?= json_encode($brands) ?>;
 let allowedCustomFields = <?= json_encode($allowedCustomFields) ?>;
 let currentFilters = [];
+let currentExcludeFilters = [];
 const csrfToken = <?= json_encode(\App\Support\Csrf::token()) ?>;
 let tomSelectInstances = {};
 let customFieldOptionsCache = {};
@@ -313,6 +322,9 @@ function initializeTomSelectInstances() {
 
     document.querySelectorAll('.js-filter-multiselect').forEach(select => {
         const index = Number(select.dataset.filterIndex);
+        const scope = select.dataset.filterScope || 'include';
+        const filterCollection = getFilterCollection(scope);
+        const instanceKey = `${scope}:${index}`;
         const filterType = select.dataset.filterType || '';
         const placeholder = select.dataset.placeholder || 'Izaberite vrednosti';
         const removeTitle = select.dataset.removeTitle || 'Ukloni stavku';
@@ -333,12 +345,12 @@ function initializeTomSelectInstances() {
             placeholder: placeholder,
             loadThrottle: 300,
             onChange: function() {
-                if (isDestroyingTomSelectInstances || !currentFilters[index] || currentFilters[index].type !== filterType) {
+                if (isDestroyingTomSelectInstances || !filterCollection[index] || filterCollection[index].type !== filterType) {
                     return;
                 }
 
                 updateFilterValue(index, normalizeTomSelectValues(filterType, this.getValue())
-                    .filter(value => !isProductPseudoValue(value)));
+                    .filter(value => !isProductPseudoValue(value)), scope);
             }
         };
 
@@ -452,7 +464,7 @@ function initializeTomSelectInstances() {
                     if (shouldCloseDropdown) {
                         this.close();
                     }
-                    updateFilterValue(index, normalizeTomSelectValues(filterType, this.getValue()));
+                    updateFilterValue(index, normalizeTomSelectValues(filterType, this.getValue()), scope);
                 },
                 render: {
                     option: function(data, escape) {
@@ -542,39 +554,45 @@ function initializeTomSelectInstances() {
         instance.wrapper.classList.add('promotion-filter-multiselect-wrapper');
         instance.dropdown.classList.add('promotion-filter-multiselect-dropdown');
 
-        tomSelectInstances[index] = instance;
+        tomSelectInstances[instanceKey] = instance;
     });
 }
 
-function addFilter() {
-    currentFilters.push({ type: 'is_visible', value: getDefaultFilterValue('is_visible') });
+function getFilterCollection(scope = 'include') {
+    return scope === 'exclude' ? currentExcludeFilters : currentFilters;
+}
+
+function addFilter(scope = 'include') {
+    getFilterCollection(scope).push({ type: 'is_visible', value: getDefaultFilterValue('is_visible') });
     renderFilters();
     schedulePreviewUpdate();
 }
 
-function removeFilter(index) {
-    currentFilters.splice(index, 1);
+function removeFilter(index, scope = 'include') {
+    getFilterCollection(scope).splice(index, 1);
     renderFilters();
     schedulePreviewUpdate();
 }
 
-function updateFilterType(index, type) {
-    if (!currentFilters[index]) {
+function updateFilterType(index, type, scope = 'include') {
+    const filterCollection = getFilterCollection(scope);
+    if (!filterCollection[index]) {
         return;
     }
 
-    currentFilters[index].type = type;
-    currentFilters[index].value = getDefaultFilterValue(type);
+    filterCollection[index].type = type;
+    filterCollection[index].value = getDefaultFilterValue(type);
     renderFilters();
     schedulePreviewUpdate();
 }
 
-function updateFilterValue(index, value) {
-    if (!currentFilters[index]) {
+function updateFilterValue(index, value, scope = 'include') {
+    const filterCollection = getFilterCollection(scope);
+    if (!filterCollection[index]) {
         return;
     }
 
-    currentFilters[index].value = value;
+    filterCollection[index].value = value;
     schedulePreviewUpdate();
 }
 
@@ -602,7 +620,10 @@ function renderFilters() {
         });
     }
 
-    const html = currentFilters.map((filter, index) => {
+    const renderFilterItems = (filterCollection, scope = 'include') => {
+        const scopeAttribute = escapeHtml(scope);
+
+        return filterCollection.map((filter, index) => {
         let inputHtml = '';
         
         if (isTomSelectFilter(filter.type)) {
@@ -634,6 +655,7 @@ function renderFilters() {
                     multiple
                     class="js-filter-multiselect"
                     data-filter-index="${index}"
+                    data-filter-scope="${scopeAttribute}"
                     data-filter-type="${escapeHtml(filter.type)}"
                     data-placeholder="${escapeHtml(placeholder)}"
                     data-remove-title="${escapeHtml(removeTitle)}"
@@ -646,21 +668,21 @@ function renderFilters() {
                 </select>
             `;
         } else if (filter.type === 'is_visible' || filter.type === 'is_featured') {
-            inputHtml = `<select onchange="updateFilterValue(${index}, this.value === 'true')" class="form-input">
-                <option value="true">Da</option>
-                <option value="false">Ne</option>
+            inputHtml = `<select onchange="updateFilterValue(${index}, this.value === 'true', '${scopeAttribute}')" class="form-input">
+                <option value="true" ${String(filter.value) === 'true' ? 'selected' : ''}>Da</option>
+                <option value="false" ${String(filter.value) === 'false' ? 'selected' : ''}>Ne</option>
             </select>`;
         } else if (filter.type.includes('custom_field:') || filter.type === 'sku:in'){
-            inputHtml = `<input type="text" value="${filter.value || ''}" onchange="updateFilterValue(${index}, this.value)" class="form-input">`;
+            inputHtml = `<input type="text" value="${filter.value || ''}" onchange="updateFilterValue(${index}, this.value, '${scopeAttribute}')" class="form-input">`;
         } else {
-            inputHtml = `<input type="number" value="${filter.value || ''}" onchange="updateFilterValue(${index}, this.value)" class="form-input">`;
+            inputHtml = `<input type="number" value="${filter.value || ''}" onchange="updateFilterValue(${index}, this.value, '${scopeAttribute}')" class="form-input">`;
         }
         
         return `
             <div class="filter-item promotion-filter-item" style="display: grid; grid-template-columns: 200px minmax(0, 1fr) 32px; gap: 10px; align-items: start; margin-bottom: 10px; background: white; padding: 10px; border: 1px solid #e5e7eb; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
                 <div>
                     <label style="font-size: 11px; font-weight: 600; color: #6b7280; display: block; margin-bottom: 4px;">Tip uslova</label>
-                    <select onchange="updateFilterType(${index}, this.value)" class="form-input">
+                    <select onchange="updateFilterType(${index}, this.value, '${scopeAttribute}')" class="form-input">
                         ${filterTypes.map(t => `
                             <option value="${t.value}" ${filter.type === t.value ? 'selected' : ''}>
                                 ${t.label}
@@ -673,23 +695,40 @@ function renderFilters() {
                     ${inputHtml}
                 </div>
                 <div style="padding-top: 22px;">
-                    <button type="button" onclick="removeFilter(${index})" class="btn btn-danger btn-sm" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center;" title="Ukloni">
+                    <button type="button" onclick="removeFilter(${index}, '${scopeAttribute}')" class="btn btn-danger btn-sm" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center;" title="Ukloni">
                         ×
                     </button>
                 </div>
             </div>
         `;
     }).join('');
+    };
 
-    document.getElementById('filter-list').innerHTML = html;
+    document.getElementById('filter-list').innerHTML = renderFilterItems(currentFilters, 'include');
+    document.getElementById('exclude-filter-list').innerHTML = renderFilterItems(currentExcludeFilters, 'exclude');
     initializeTomSelectInstances();
 }
 
-document.getElementById('promotionForm').addEventListener('submit', function(e) {
+function buildFiltersPayload() {
     const filtersObj = {};
     currentFilters.forEach(filter => {
         filtersObj[filter.type] = filter.value;
     });
+
+    const excludeFiltersObj = {};
+    currentExcludeFilters.forEach(filter => {
+        excludeFiltersObj[filter.type] = filter.value;
+    });
+
+    if (Object.keys(excludeFiltersObj).length > 0) {
+        filtersObj.exclude = excludeFiltersObj;
+    }
+
+    return filtersObj;
+}
+
+document.getElementById('promotionForm').addEventListener('submit', function(e) {
+    const filtersObj = buildFiltersPayload();
     document.getElementById('filters-json').value = JSON.stringify(filtersObj);
 });
 
@@ -735,10 +774,7 @@ function schedulePreviewUpdate() {
 }
 
 async function updatePreview() {
-    const filtersObj = {};
-    currentFilters.forEach(filter => {
-        filtersObj[filter.type] = filter.value;
-    });
+    const filtersObj = buildFiltersPayload();
     
     const discount = document.getElementById('promo-discount').value || 0;
     
