@@ -5,12 +5,15 @@ use App\Models\Database;
 use App\Services\ProductCacheService;
 use App\Services\QueueService;
 use App\Support\Csrf;
+use App\Support\StoreSettings;
+use App\Support\Translator;
 
 class SettingsController {
     public function index() {
         $db = Database::getInstance();
         $storeHash = $_SESSION['store_hash'] ?? $db->getStoreContext();
         $db->setStoreContext($storeHash);
+        StoreSettings::ensureSettingsColumn($db);
         $store = $db->fetchOne(
             "SELECT settings, enable_omnibus FROM bigcommerce_stores WHERE store_hash = ?",
             [$storeHash]
@@ -24,6 +27,8 @@ class SettingsController {
         $settings['allowed_filters'] = $this->normalizeAllowedFilters($settings['allowed_filters'] ?? []);
         $availableCustomFieldFilters = $this->getAvailableCustomFieldFilters($settings['allowed_filters'], $db);
         $promotionCustomFieldName = $settings['promotion_custom_field_name'] ?? \Config::$CUSTOM_FIELD_NAME;
+        $availableLanguages = Translator::availableLocales();
+        $currentLanguage = Translator::normalizeLocale($settings['language'] ?? Translator::locale());
         $enableOmnibus = !empty($store['enable_omnibus']);
         $queueService = new QueueService($storeHash);
         $activeOmnibusJob = $queueService->getActiveJobByType('omnibus_sync');
@@ -47,7 +52,7 @@ class SettingsController {
 
         if (!Csrf::validateRequest()) {
             http_response_code(403);
-            $_SESSION['flash_message'] = 'Sesija je istekla. Podesavanja nisu sacuvana.';
+            $_SESSION['flash_message'] = trans('settings.flash.csrf_expired_settings');
             $_SESSION['flash_type'] = 'error';
             header('Location: index.php?route=settings');
             exit;
@@ -58,11 +63,13 @@ class SettingsController {
         $enableOmnibus = isset($_POST['enable_omnibus']) ? 1 : 0;
         $rawInput = $_POST['custom_fields'] ?? [];
         $promotionCustomFieldName = trim($_POST['promotion_custom_field_name'] ?? '');
+        $language = Translator::normalizeLocale($_POST['language'] ?? Translator::locale());
 
         $filtersArray = is_array($rawInput) ? $rawInput : explode(',', (string)$rawInput);
         $filtersArray = $this->normalizeAllowedFilters($filtersArray);
 
         try {
+            StoreSettings::ensureSettingsColumn($db);
             $store = $db->fetchOne(
                 "SELECT settings FROM bigcommerce_stores WHERE store_hash = ?",
                 [$storeHash]
@@ -89,7 +96,7 @@ class SettingsController {
                 );
 
                 if ($activePromotion) {
-                    $_SESSION['flash_message'] = 'Naziv promotion custom field-a ne moze se menjati dok postoje aktivne promocije.';
+                    $_SESSION['flash_message'] = trans('settings.flash.custom_field_locked');
                     $_SESSION['flash_type'] = 'error';
                     header('Location: index.php?route=settings');
                     exit;
@@ -98,19 +105,21 @@ class SettingsController {
 
             $settings['allowed_filters'] = $filtersArray;
             $settings['promotion_custom_field_name'] = $promotionCustomFieldName;
+            $settings['language'] = $language;
 
             $db->query(
                 "UPDATE bigcommerce_stores SET settings = ?, enable_omnibus = ? WHERE store_hash = ?",
-                [json_encode($settings), $enableOmnibus, $storeHash]
+                [json_encode($settings, JSON_UNESCAPED_UNICODE), $enableOmnibus, $storeHash]
             );
 
-            $_SESSION['flash_message'] = 'Podesavanja su uspesno sacuvana.';
+            Translator::setLocale($language);
+            $_SESSION['flash_message'] = trans('settings.flash.saved');
             $_SESSION['flash_type'] = 'success';
             header('Location: index.php?route=settings');
             exit;
         } catch (\Exception $e) {
             error_log("Settings save failed: " . $e->getMessage());
-            $_SESSION['flash_message'] = 'Cuvanje podesavanja nije uspelo.';
+            $_SESSION['flash_message'] = trans('settings.flash.save_failed');
             $_SESSION['flash_type'] = 'error';
             header('Location: index.php?route=settings');
             exit;
@@ -119,7 +128,7 @@ class SettingsController {
 
     public function triggerOmnibusSync() {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $_SESSION['flash_message'] = 'Rucni Omnibus sync se pokrece iskljucivo preko POST zahteva iz settings stranice.';
+            $_SESSION['flash_message'] = trans('settings.flash.manual_sync_post_only');
             $_SESSION['flash_type'] = 'error';
             header('Location: index.php?route=settings');
             exit;
@@ -127,7 +136,7 @@ class SettingsController {
 
         if (!Csrf::validateRequest()) {
             http_response_code(403);
-            $_SESSION['flash_message'] = 'Sesija je istekla. Omnibus sync nije pokrenut.';
+            $_SESSION['flash_message'] = trans('settings.flash.csrf_expired_omnibus');
             $_SESSION['flash_type'] = 'error';
             header('Location: index.php?route=settings');
             exit;
@@ -144,7 +153,7 @@ class SettingsController {
             );
 
             if (!$store || empty($store['enable_omnibus'])) {
-                $_SESSION['flash_message'] = 'Omnibus Price Tracker nije aktiviran za ovu instancu.';
+                $_SESSION['flash_message'] = trans('settings.flash.omnibus_not_enabled');
                 $_SESSION['flash_type'] = 'error';
                 header('Location: index.php?route=settings');
                 exit;
@@ -155,15 +164,15 @@ class SettingsController {
             $result = $queueService->createOmnibusSyncJob($totalItems);
 
             if (!empty($result['created'])) {
-                $_SESSION['flash_message'] = 'Omnibus sync je zakazan. Job #' . (int)$result['job_id'] . '.';
+                $_SESSION['flash_message'] = trans('settings.flash.omnibus_scheduled', ['job_id' => (int)$result['job_id']]);
                 $_SESSION['flash_type'] = 'success';
             } else {
-                $_SESSION['flash_message'] = $result['message'] ?? 'Omnibus sync nije pokrenut.';
+                $_SESSION['flash_message'] = $result['message'] ?? trans('settings.flash.omnibus_not_started');
                 $_SESSION['flash_type'] = 'error';
             }
         } catch (\Throwable $e) {
             error_log("Manual omnibus sync scheduling failed: " . $e->getMessage());
-            $_SESSION['flash_message'] = 'Pokretanje Omnibus sync-a nije uspelo.';
+            $_SESSION['flash_message'] = trans('settings.flash.omnibus_start_failed');
             $_SESSION['flash_type'] = 'error';
         }
 

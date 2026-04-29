@@ -1,10 +1,10 @@
 <div class="page-header">
     <div>
-        <h2 class="page-title">Promocije</h2>
-        <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;">Upravljajte popustima i kampanjama</p>
+        <h2 class="page-title"><?= trans_e('promotions.index_title') ?></h2>
+        <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;"><?= trans_e('promotions.index_subtitle') ?></p>
     </div>
     <a href="?route=promotions&action=create" class="btn btn-primary">
-        + Nova promocija
+        + <?= trans_e('promotions.new_promotion') ?>
     </a>
 </div>
 
@@ -12,22 +12,22 @@
     <?php if (empty($promotions)): ?>
         <div class="empty-state">
             <span class="empty-icon">🏷️</span>
-            <h3>Nema aktivnih promocija</h3>
-            <p>Kreirajte prvu promociju da biste započeli sa popustima.</p>
-            <a href="?route=promotions&action=create" class="btn btn-primary" style="margin-top: 20px;">Kreiraj promociju</a>
+            <h3><?= trans_e('promotions.empty_title') ?></h3>
+            <p><?= trans_e('promotions.empty_text') ?></p>
+            <a href="?route=promotions&action=create" class="btn btn-primary" style="margin-top: 20px;"><?= trans_e('promotions.create_promotion') ?></a>
         </div>
     <?php else: ?>
         <div style="overflow-x: auto;">
             <table class="promo-table">
                 <thead>
                     <tr>
-                        <th>Name</th>
-                        <th>Frontend value</th>
-                        <th>Discount</th>
-                        <th>Duration</th>
-                        <th>Status</th>
-                        <th>Priority</th>
-                        <th style="text-align: right;">Actions</th>
+                        <th><?= trans_e('promotions.table_name') ?></th>
+                        <th><?= trans_e('promotions.table_frontend_value') ?></th>
+                        <th><?= trans_e('promotions.table_discount') ?></th>
+                        <th><?= trans_e('promotions.table_duration') ?></th>
+                        <th><?= trans_e('promotions.table_status') ?></th>
+                        <th><?= trans_e('promotions.table_priority') ?></th>
+                        <th style="text-align: right;"><?= trans_e('promotions.table_actions') ?></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -38,14 +38,14 @@
                         $end = strtotime($promo['end_date']);
                         
                         $statusClass = 'badge-active';
-                        $statusLabel = 'Aktivna';
+                        $statusLabel = trans('promotions.status_active');
                         
                         if ($promo['status'] === 'expired' || $end < $now) {
                             $statusClass = 'badge-expired';
-                            $statusLabel = 'Istekla';
+                            $statusLabel = trans('promotions.status_expired');
                         } elseif ($start > $now) {
                             $statusClass = 'badge-scheduled';
-                            $statusLabel = 'Zakazana';
+                            $statusLabel = trans('promotions.status_scheduled');
                         }
                     ?>
                     <tr>
@@ -73,27 +73,27 @@
                                 <?= date('d.m.Y H:i', $start) ?>
                             </div>
                             <div style="font-size: 0.75rem; color: #9ca3af;">
-                                do <?= date('d.m.Y H:i', $end) ?>
+                                <?= trans_e('promotions.date_to') ?> <?= date('d.m.Y H:i', $end) ?>
                             </div>
                         </td>
                         <td>
-                            <span class="badge <?= $statusClass ?>"><?= $statusLabel ?></span>
+                            <span class="badge <?= $statusClass ?>"><?= htmlspecialchars($statusLabel, ENT_QUOTES, 'UTF-8') ?></span>
                         </td>
                         <td>
                             <span style="font-weight: 600; color: #6b7280;"><?= $promo['priority'] ?></span>
                         </td>
                         <td>
                             <div class="action-buttons">
-                                <button onclick="syncSingle(<?= $promo['id'] ?>)" class="btn-icon" title="Sinhronizuj odmah">
+                                <button onclick="syncSingle(<?= $promo['id'] ?>)" class="btn-icon" title="<?= trans_e('promotions.sync_now') ?>">
                                     🔄
                                 </button>
-                                <a href="?route=promotions&action=duplicate&id=<?= $promo['id'] ?>" class="btn-icon" title="Dupliraj">
+                                <a href="?route=promotions&action=duplicate&id=<?= $promo['id'] ?>" class="btn-icon" title="<?= trans_e('common.duplicate') ?>">
                                     &#x2398;
                                 </a>
-                                <a href="?route=promotions&action=edit&id=<?= $promo['id'] ?>" class="btn-icon" title="Izmeni">
+                                <a href="?route=promotions&action=edit&id=<?= $promo['id'] ?>" class="btn-icon" title="<?= trans_e('common.edit') ?>">
                                     ✏️
                                 </a>
-                                <a href="?route=promotions&action=delete&id=<?= $promo['id'] ?>" class="btn-icon delete" title="Obriši" onclick="return confirm('Da li ste sigurni da želite da obrišete ovu promociju? Proizvodi će biti vraćeni na originalne cene.');">
+                                <a href="?route=promotions&action=delete&id=<?= $promo['id'] ?>" class="btn-icon delete" title="<?= trans_e('common.delete') ?>" onclick="return confirm(appT('promotions.delete_confirm'));">
                                     🗑️
                                 </a>
                             </div>
@@ -108,18 +108,18 @@
 
 <script>
 async function syncSingle(id) {
-    if(!confirm('Pokrenuti ručnu sinhronizaciju za ovu promociju?')) return;
+    if(!confirm(appT('promotions.confirm_manual_sync'))) return;
     
     try {
         const response = await fetch('?route=sync&action=startSingle&id=' + id);
         const result = await response.json();
         if(result.success) {
-            alert('✅ Sinhronizacija započeta! Posao ID: ' + result.job_id);
+            alert('✅ ' + appT('promotions.sync_started', { job_id: result.job_id }));
         } else {
-            alert('❌ Greška: ' + (result.error || 'Nepoznata greška'));
+            alert('❌ ' + appT('common.error') + ': ' + (result.error || appT('common.unknown_error')));
         }
     } catch(e) {
-        alert('❌ Greška u komunikaciji sa serverom.');
+        alert('❌ ' + appT('promotions.communication_error'));
     }
 }
 </script>

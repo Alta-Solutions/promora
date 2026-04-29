@@ -38,7 +38,8 @@ try {
             `installed_at` DATETIME NOT NULL,
             `last_accessed` DATETIME NULL,
             `enable_omnibus` TINYINT(1) NOT NULL DEFAULT 0,
-            `currency` VARCHAR(10) NOT NULL DEFAULT 'USD'
+            `currency` VARCHAR(10) NOT NULL DEFAULT 'USD',
+            `settings` JSON NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
         // Tabela za keširanje proizvoda

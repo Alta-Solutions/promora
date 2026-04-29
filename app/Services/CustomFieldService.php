@@ -2,6 +2,7 @@
 namespace App\Services;
 
 use App\Models\Database;
+use App\Support\StoreSettings;
 
 class CustomFieldService {
     private $api;
@@ -15,11 +16,7 @@ class CustomFieldService {
         $storeHash = $db->getStoreContext();
 
         if ($storeHash) {
-            $store = $db->fetchOne(
-                "SELECT settings FROM bigcommerce_stores WHERE store_hash = ?",
-                [$storeHash]
-            );
-            $settings = json_decode($store['settings'] ?? '{}', true);
+            $settings = StoreSettings::load($db, $storeHash);
             $configuredFieldName = trim((string)($settings['promotion_custom_field_name'] ?? ''));
             if ($configuredFieldName !== '') {
                 $this->fieldName = $configuredFieldName;

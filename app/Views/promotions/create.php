@@ -27,8 +27,8 @@
 
 <div class="promotion-create-page">
     <div class="promotion-page-heading">
-        <h2><?= $isDuplicate ? 'Duplikat promocije' : 'Nova promocija' ?></h2>
-        <a href="?route=promotions" class="promotion-back-link">← Nazad</a>
+        <h2><?= trans_e($isDuplicate ? 'promotions.form.duplicate_title' : 'promotions.form.create_title') ?></h2>
+        <a href="?route=promotions" class="promotion-back-link">← <?= trans_e('common.back') ?></a>
     </div>
 
     <form method="POST" action="?route=promotions&action=create" id="promotionForm" class="promotion-create-form">
@@ -37,32 +37,32 @@
         <section class="promotion-card promotion-setup-card">
             <div class="promotion-setup-grid">
                 <div class="promotion-setup-column">
-                    <h4 class="promotion-section-title">Osnovne informacije</h4>
+                    <h4 class="promotion-section-title"><?= trans_e('promotions.form.basic_info') ?></h4>
 
                     <div class="form-group promotion-field">
-                        <label class="form-label">Interni naziv promocije <span class="required-marker">*</span></label>
-                        <input type="text" name="name" class="form-input" value="<?= htmlspecialchars($nameValue) ?>" required placeholder="npr. Letnja rasprodaja">
-                        <small class="promotion-field-help">Ovaj naziv se koristi samo unutar aplikacije.</small>
+                        <label class="form-label"><?= trans_e('promotions.form.internal_name') ?> <span class="required-marker">*</span></label>
+                        <input type="text" name="name" class="form-input" value="<?= htmlspecialchars($nameValue) ?>" required placeholder="<?= trans_e('promotions.form.internal_name_placeholder') ?>">
+                        <small class="promotion-field-help"><?= trans_e('promotions.form.internal_name_help') ?></small>
                     </div>
 
                     <div class="form-group promotion-field">
-                        <label class="form-label">Vrijednost za BigCommerce custom field <span class="required-marker">*</span></label>
-                        <input type="text" name="custom_field_value" class="form-input" value="<?= htmlspecialchars($customFieldValue) ?>" required placeholder="npr. Akcija -20%">
-                        <small class="promotion-field-help">Ova vrijednost se šalje na BigCommerce kao sadržaj promotion custom field-a.</small>
+                        <label class="form-label"><?= trans_e('promotions.form.custom_field_value') ?> <span class="required-marker">*</span></label>
+                        <input type="text" name="custom_field_value" class="form-input" value="<?= htmlspecialchars($customFieldValue) ?>" required placeholder="<?= trans_e('promotions.form.custom_field_value_placeholder') ?>">
+                        <small class="promotion-field-help"><?= trans_e('promotions.form.custom_field_value_help') ?></small>
                     </div>
 
                     <div class="form-group promotion-field">
-                        <label class="form-label">Opis</label>
-                        <textarea name="description" class="form-textarea promotion-description-input" placeholder="Interna napomena..."><?= htmlspecialchars($descriptionValue) ?></textarea>
+                        <label class="form-label"><?= trans_e('promotions.form.description') ?></label>
+                        <textarea name="description" class="form-textarea promotion-description-input" placeholder="<?= trans_e('promotions.form.description_placeholder') ?>"><?= htmlspecialchars($descriptionValue) ?></textarea>
                     </div>
                 </div>
 
                 <div class="promotion-setup-column promotion-technical-column">
-                    <h4 class="promotion-section-title">Tehničke postavke promocije</h4>
+                    <h4 class="promotion-section-title"><?= trans_e('promotions.form.technical_settings') ?></h4>
 
                     <div class="promotion-technical-grid">
                         <div class="form-group promotion-field">
-                            <label class="form-label">Popust (%) <span class="required-marker">*</span></label>
+                            <label class="form-label"><?= trans_e('promotions.form.discount_percent') ?> <span class="required-marker">*</span></label>
                             <div class="promotion-input-suffix">
                                 <input type="number" name="discount_percent" id="promo-discount" class="form-input" min="0" max="100" step="0.01" value="<?= htmlspecialchars($discountValue) ?>" required>
                                 <span>%</span>
@@ -70,12 +70,12 @@
                         </div>
 
                         <div class="form-group promotion-field">
-                            <label class="form-label">Prioritet</label>
+                            <label class="form-label"><?= trans_e('common.priority') ?></label>
                             <input type="number" name="priority" class="form-input" value="<?= htmlspecialchars($priorityValue) ?>" min="0">
                         </div>
 
                         <div class="form-group promotion-field promotion-full-field">
-                            <label class="form-label">Oznaka boje</label>
+                            <label class="form-label"><?= trans_e('promotions.form.color_label') ?></label>
                             <div class="promotion-color-row">
                                 <input type="color" name="color" class="color-picker promotion-color-input" value="<?= htmlspecialchars($colorValue) ?>">
                                 <span class="promotion-color-value" id="promotion-color-value"><?= htmlspecialchars(strtoupper($colorValue)) ?></span>
@@ -83,24 +83,24 @@
                         </div>
 
                         <div class="form-group promotion-field promotion-full-field">
-                            <label class="form-label">Početak <span class="required-marker">*</span></label>
+                            <label class="form-label"><?= trans_e('promotions.form.start') ?> <span class="required-marker">*</span></label>
                             <input type="hidden" name="start_date" id="start-date" value="<?= date('Y-m-d\TH:i', $startDateTime) ?>">
                             <div class="promotion-datetime-picker js-promotion-datetime-picker" data-target="start-date">
                                 <input type="date" class="form-input js-promotion-date" value="<?= date('Y-m-d', $startDateTime) ?>" required>
-                                <select class="form-input promotion-time-select js-promotion-hour" data-selected="<?= date('H', $startDateTime) ?>" aria-label="Sat početka"></select>
+                                <select class="form-input promotion-time-select js-promotion-hour" data-selected="<?= date('H', $startDateTime) ?>" aria-label="<?= trans_e('promotions.form.start_hour_aria') ?>"></select>
                                 <span class="promotion-time-separator">:</span>
-                                <select class="form-input promotion-time-select js-promotion-minute" data-selected="<?= date('i', $startDateTime) ?>" aria-label="Minut početka"></select>
+                                <select class="form-input promotion-time-select js-promotion-minute" data-selected="<?= date('i', $startDateTime) ?>" aria-label="<?= trans_e('promotions.form.start_minute_aria') ?>"></select>
                             </div>
                         </div>
 
                         <div class="form-group promotion-field promotion-full-field">
-                            <label class="form-label">Kraj <span class="required-marker">*</span></label>
+                            <label class="form-label"><?= trans_e('promotions.form.end') ?> <span class="required-marker">*</span></label>
                             <input type="hidden" name="end_date" id="end-date" value="<?= date('Y-m-d\TH:i', $endDateTime) ?>">
                             <div class="promotion-datetime-picker js-promotion-datetime-picker" data-target="end-date">
                                 <input type="date" class="form-input js-promotion-date" value="<?= date('Y-m-d', $endDateTime) ?>" required>
-                                <select class="form-input promotion-time-select js-promotion-hour" data-selected="<?= date('H', $endDateTime) ?>" aria-label="Sat kraja"></select>
+                                <select class="form-input promotion-time-select js-promotion-hour" data-selected="<?= date('H', $endDateTime) ?>" aria-label="<?= trans_e('promotions.form.end_hour_aria') ?>"></select>
                                 <span class="promotion-time-separator">:</span>
-                                <select class="form-input promotion-time-select js-promotion-minute" data-selected="<?= date('i', $endDateTime) ?>" aria-label="Minut kraja"></select>
+                                <select class="form-input promotion-time-select js-promotion-minute" data-selected="<?= date('i', $endDateTime) ?>" aria-label="<?= trans_e('promotions.form.end_minute_aria') ?>"></select>
                             </div>
                         </div>
                     </div>
@@ -110,62 +110,62 @@
 
         <div class="promotion-workspace-grid">
             <section class="promotion-card promotion-filter-card">
-                <h3 class="promotion-card-title">Filteri proizvoda</h3>
+                <h3 class="promotion-card-title"><?= trans_e('promotions.filters.products') ?></h3>
 
                 <div class="promotion-filter-box">
                     <div class="promotion-filter-box-header">
-                        <span>Koji proizvodi su na akciji?</span>
-                        <span class="promotion-info-dot" title="Uslovi koji uključuju proizvode u promociju.">i</span>
+                        <span><?= trans_e('promotions.filters.include_question') ?></span>
+                        <span class="promotion-info-dot" title="<?= trans_e('promotions.filters.include_help') ?>">i</span>
                     </div>
                     <div id="filter-list"></div>
                     <button type="button" onclick="addFilter()" class="promotion-add-filter-button">
-                        + Dodaj uslov
+                        <?= trans_e('promotions.filters.add_condition') ?>
                     </button>
                 </div>
 
                 <div class="promotion-filter-box promotion-filter-box-exclude">
                     <div class="promotion-filter-box-header">
-                        <span>Exclude pravila</span>
-                        <span class="promotion-info-dot" title="Uslovi koji izuzimaju proizvode iz promocije.">i</span>
+                        <span><?= trans_e('promotions.filters.exclude_rules') ?></span>
+                        <span class="promotion-info-dot" title="<?= trans_e('promotions.filters.exclude_help') ?>">i</span>
                     </div>
                     <div id="exclude-filter-list"></div>
                     <button type="button" onclick="addFilter('exclude')" class="promotion-add-filter-button promotion-add-filter-button-exclude">
-                        + Dodaj exclude uslov
+                        <?= trans_e('promotions.filters.add_exclude_condition') ?>
                     </button>
                 </div>
 
                 <input type="hidden" name="filters" id="filters-json">
 
                 <div class="promotion-form-actions">
-                    <a href="?route=promotions" class="btn btn-secondary">Otkaži</a>
-                    <button type="submit" class="btn btn-primary"><?= $isDuplicate ? 'Kreiraj duplikat' : 'Kreiraj promociju' ?></button>
+                    <a href="?route=promotions" class="btn btn-secondary"><?= trans_e('common.cancel') ?></a>
+                    <button type="submit" class="btn btn-primary"><?= trans_e($isDuplicate ? 'promotions.form.create_duplicate_submit' : 'promotions.form.create_submit') ?></button>
                 </div>
             </section>
 
             <section class="promotion-card promotion-preview-card">
                 <div class="promotion-preview-header">
-                    <h3 class="promotion-card-title">Pregled proizvoda (<span id="preview-count">0</span>)</h3>
+                    <h3 class="promotion-card-title"><?= trans_e('promotions.preview.title') ?> (<span id="preview-count">0</span>)</h3>
                     <button type="button" onclick="updatePreview()" class="btn btn-secondary promotion-refresh-button">
-                        Osveži listu
+                        <?= trans_e('promotions.preview.refresh_list') ?>
                     </button>
                 </div>
 
                 <div class="promotion-preview-toolbar">
-                    <input type="search" id="preview-search" class="form-input promotion-preview-search" placeholder="Pretraži proizvod">
+                    <input type="search" id="preview-search" class="form-input promotion-preview-search" placeholder="<?= trans_e('promotions.preview.search_placeholder') ?>">
                 </div>
 
                 <div class="promotion-preview-table-wrap">
                     <table class="table promotion-preview-table">
                         <thead>
                             <tr>
-                                <th>Naziv / SKU</th>
-                                <th>Cena</th>
-                                <th>Nova cena</th>
-                                <th>Zaliha</th>
+                                <th><?= trans_e('promotions.preview.name_sku') ?></th>
+                                <th><?= trans_e('promotions.preview.price') ?></th>
+                                <th><?= trans_e('promotions.preview.new_price') ?></th>
+                                <th><?= trans_e('promotions.preview.stock') ?></th>
                             </tr>
                         </thead>
                         <tbody id="preview-table-body">
-                            <tr><td colspan="4" class="promotion-preview-empty">Učitavanje...</td></tr>
+                            <tr><td colspan="4" class="promotion-preview-empty"><?= trans_e('promotions.preview.empty_loading') ?></td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -496,8 +496,8 @@ function initializeTomSelectInstances() {
         const filterCollection = getFilterCollection(scope);
         const instanceKey = `${scope}:${index}`;
         const filterType = select.dataset.filterType || '';
-        const placeholder = select.dataset.placeholder || 'Izaberite vrednosti';
-        const removeTitle = select.dataset.removeTitle || 'Ukloni stavku';
+        const placeholder = select.dataset.placeholder || appT('promotions.filters.values_placeholder');
+        const removeTitle = select.dataset.removeTitle || appT('promotions.filters.remove_value');
         let currentProductSearchValues = [];
         const commonConfig = {
             plugins: {
@@ -592,7 +592,7 @@ function initializeTomSelectInstances() {
                             callback(currentProductSearchValues.length > 0
                                 ? [{
                                     value: PRODUCT_SELECT_ALL_VALUE,
-                                    label: 'Izaberi sve',
+                                    label: appT('promotions.filters.select_all'),
                                     is_select_all: true,
                                     current_count: currentProductSearchValues.length
                                 }, ...options]
@@ -641,8 +641,8 @@ function initializeTomSelectInstances() {
                         if (data.is_select_all) {
                             return `
                                 <div class="promotion-product-select-all-option">
-                                    <span>Izaberi sve</span>
-                                    <span>${escape(String(data.current_count || 0))} iz trenutne pretrage</span>
+                                    <span>${escape(appT('promotions.filters.select_all'))}</span>
+                                    <span>${escape(appT('promotions.filters.current_search_count', { count: data.current_count || 0 }))}</span>
                                 </div>
                             `;
                         }
@@ -651,7 +651,7 @@ function initializeTomSelectInstances() {
                             return `
                                 <div class="promotion-product-parent-option">
                                     <span>${escape(data.name || data.label || '')}</span>
-                                    <span>Izaberi sve varijante (${escape(String(data.variant_count || 0))})</span>
+                                    <span>${escape(appT('promotions.filters.select_all_variants', { count: data.variant_count || 0 }))}</span>
                                 </div>
                             `;
                         }
@@ -659,7 +659,7 @@ function initializeTomSelectInstances() {
                         const regularPrice = formatProductPrice(data.regular_price);
                         const salePrice = formatProductPrice(data.sale_price);
                         const salePriceHtml = salePrice
-                            ? `<span class="promotion-product-option-sale">Sale: ${escape(salePrice)}</span>`
+                            ? `<span class="promotion-product-option-sale">${escape(appT('promotions.filters.sale'))}: ${escape(salePrice)}</span>`
                             : '';
 
                         return `
@@ -678,7 +678,7 @@ function initializeTomSelectInstances() {
                         return `
                             <div class="promotion-filter-loading">
                                 <span class="promotion-filter-loading-spinner" aria-hidden="true"></span>
-                                <span>Ucitavanje proizvoda...</span>
+                                <span>${escape(appT('promotions.filters.loading_products'))}</span>
                             </div>
                         `;
                     }
@@ -708,7 +708,7 @@ function initializeTomSelectInstances() {
                         return `
                             <div class="promotion-filter-loading">
                                 <span class="promotion-filter-loading-spinner" aria-hidden="true"></span>
-                                <span>Učitavanje vrednosti...</span>
+                                <span>${escape(appT('promotions.filters.loading_values'))}</span>
                             </div>
                         `;
                     }
@@ -786,14 +786,14 @@ function renderFilters() {
     destroyTomSelectInstances();
 
     let filterTypes = [
-        { value: 'categories:in', label: 'Kategorije' },
-        { value: 'brand_id', label: 'Brend' },
-        { value: 'price:min', label: 'Minimalna cena' },
-        { value: 'price:max', label: 'Maksimalna cena' },
-        { value: 'is_visible', label: 'Vidljiv' },
-        { value: 'is_featured', label: 'Istaknut' },
-        { value: 'inventory_level:min', label: 'Minimalna zaliha' },
-        { value: 'sku:in', label: 'SKU proizvoda' }
+        { value: 'categories:in', label: appT('promotions.filters.categories') },
+        { value: 'brand_id', label: appT('promotions.filters.brand') },
+        { value: 'price:min', label: appT('promotions.filters.price_min') },
+        { value: 'price:max', label: appT('promotions.filters.price_max') },
+        { value: 'is_visible', label: appT('promotions.filters.visible') },
+        { value: 'is_featured', label: appT('promotions.filters.featured') },
+        { value: 'inventory_level:min', label: appT('promotions.filters.inventory_min') },
+        { value: 'sku:in', label: appT('promotions.filters.sku') }
     ];
 
     if (allowedCustomFields.length > 0) {
@@ -801,7 +801,7 @@ function renderFilters() {
             filterTypes.push({
                 // Ključ pravimo kao prefiks + naziv (npr. custom_field:Materijal)
                 value: 'custom_field:' + fieldName, 
-                label: 'Atribut: ' + fieldName
+                label: appT('promotions.filters.attribute_prefix') + fieldName
             });
         });
     }
@@ -831,15 +831,15 @@ function renderFilters() {
                     }))
                     : []);
             const placeholder = filter.type === 'categories:in'
-                ? 'Izaberite kategorije'
+                ? appT('promotions.filters.categories_placeholder')
                 : (filter.type === 'brand_id'
-                    ? 'Izaberite brendove'
-                    : (isProductSkuFilter(filter.type) ? 'Pretrazi proizvode po nazivu ili SKU-u' : 'Pretraži i izaberite vrednosti'));
+                    ? appT('promotions.filters.brands_placeholder')
+                    : (isProductSkuFilter(filter.type) ? appT('promotions.filters.products_placeholder') : appT('promotions.filters.values_placeholder')));
             const removeTitle = filter.type === 'categories:in'
-                ? 'Ukloni kategoriju'
+                ? appT('promotions.filters.remove_category')
                 : (filter.type === 'brand_id'
-                    ? 'Ukloni brend'
-                    : (isProductSkuFilter(filter.type) ? 'Ukloni proizvod' : 'Ukloni vrednost'));
+                    ? appT('promotions.filters.remove_brand')
+                    : (isProductSkuFilter(filter.type) ? appT('promotions.filters.remove_product') : appT('promotions.filters.remove_value')));
 
             inputHtml = `
                 <select
@@ -860,8 +860,8 @@ function renderFilters() {
             `;
         } else if (filter.type === 'is_visible' || filter.type === 'is_featured') {
             inputHtml = `<select onchange="updateFilterValue(${index}, this.value === 'true', '${scopeAttribute}')" class="form-input">
-                <option value="true" ${String(filter.value) === 'true' ? 'selected' : ''}>Da</option>
-                <option value="false" ${String(filter.value) === 'false' ? 'selected' : ''}>Ne</option>
+                <option value="true" ${String(filter.value) === 'true' ? 'selected' : ''}>${escapeHtml(appT('common.yes'))}</option>
+                <option value="false" ${String(filter.value) === 'false' ? 'selected' : ''}>${escapeHtml(appT('common.no'))}</option>
             </select>`;
         } else if (filter.type.includes('custom_field:') || filter.type === 'sku:in'){
             inputHtml = `<input type="text" value="${escapeHtml(filter.value || '')}" onchange="updateFilterValue(${index}, this.value, '${scopeAttribute}')" class="form-input">`;
@@ -872,7 +872,7 @@ function renderFilters() {
         return `
             <div class="filter-item promotion-filter-item">
                 <div class="promotion-filter-type-field">
-                    <label class="promotion-filter-item-label">Tip uslova</label>
+                    <label class="promotion-filter-item-label">${escapeHtml(appT('promotions.filters.type_label'))}</label>
                     <select onchange="updateFilterType(${index}, this.value, '${scopeAttribute}')" class="form-input">
                         ${filterTypes.map(t => `
                             <option value="${escapeHtml(t.value)}" ${filter.type === t.value ? 'selected' : ''}>
@@ -882,11 +882,11 @@ function renderFilters() {
                     </select>
                 </div>
                 <div class="promotion-filter-value-field">
-                    <label class="promotion-filter-item-label">Vrednost</label>
+                    <label class="promotion-filter-item-label">${escapeHtml(appT('promotions.filters.value_label'))}</label>
                     ${inputHtml}
                 </div>
                 <div class="promotion-filter-remove-field">
-                    <button type="button" onclick="removeFilter(${index}, '${scopeAttribute}')" class="promotion-filter-remove-button" title="Ukloni">
+                    <button type="button" onclick="removeFilter(${index}, '${scopeAttribute}')" class="promotion-filter-remove-button" title="${escapeHtml(appT('promotions.filters.remove'))}">
                         ×
                     </button>
                 </div>
@@ -956,7 +956,7 @@ function renderPreviewRows(products) {
         : products;
 
     if (visibleProducts.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="promotion-preview-empty">Nema proizvoda koji odgovaraju filterima.</td></tr>';
+        tbody.innerHTML = `<tr><td colspan="4" class="promotion-preview-empty">${escapeHtml(appT('promotions.preview.empty_filtered'))}</td></tr>`;
         return;
     }
 
@@ -964,7 +964,7 @@ function renderPreviewRows(products) {
         <tr>
             <td>
                 <div class="promotion-preview-name">${escapeHtml(product.name || '')}</div>
-                <div class="promotion-preview-sku">SKU: ${escapeHtml(product.sku || '')}</div>
+                <div class="promotion-preview-sku">${escapeHtml(appT('promotions.preview.sku_label', { sku: product.sku || '' }))}</div>
             </td>
             <td class="promotion-preview-number">${formatPreviewMoney(product.original_price)}</td>
             <td class="promotion-preview-number promotion-preview-new-price">
@@ -1008,8 +1008,8 @@ async function updatePreview() {
             renderPreviewRows(previewProducts);
         }
     } catch (error) {
-        console.error('Preview error:', error);
-        document.getElementById('preview-table-body').innerHTML = '<tr><td colspan="4" class="promotion-preview-empty promotion-preview-error">Greška pri učitavanju.</td></tr>';
+        console.error(appT('promotions.preview.preview_error'), error);
+        document.getElementById('preview-table-body').innerHTML = `<tr><td colspan="4" class="promotion-preview-empty promotion-preview-error">${escapeHtml(appT('promotions.preview.load_error'))}</td></tr>`;
     }
 }
 

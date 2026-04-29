@@ -7,6 +7,7 @@ use App\Services\BigCommerceAPI;
 use App\Services\PromotionService;
 use App\Services\ProductCacheService;
 use App\Support\Csrf;
+use App\Support\StoreSettings;
 
 class PromotionController {
     private $promotionModel;
@@ -41,7 +42,7 @@ class PromotionController {
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!Csrf::validateRequest()) {
                 http_response_code(403);
-                echo 'Invalid CSRF token';
+                echo trans('common.csrf_invalid');
                 return;
             }
 
@@ -105,7 +106,7 @@ class PromotionController {
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!Csrf::validateRequest()) {
                 http_response_code(403);
-                echo 'Invalid CSRF token';
+                echo trans('common.csrf_invalid');
                 return;
             }
 
@@ -147,7 +148,7 @@ class PromotionController {
 
         if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
             http_response_code(403);
-            echo json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
+            echo json_encode(['success' => false, 'error' => trans('common.csrf_invalid')]);
             return;
         }
         
@@ -170,7 +171,7 @@ class PromotionController {
 
         if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
             http_response_code(403);
-            echo json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
+            echo json_encode(['success' => false, 'error' => trans('common.csrf_invalid')]);
             return;
         }
         
@@ -189,7 +190,7 @@ class PromotionController {
 
         if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
             http_response_code(403);
-            echo json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
+            echo json_encode(['success' => false, 'error' => trans('common.csrf_invalid')]);
             return;
         }
 
@@ -200,7 +201,7 @@ class PromotionController {
         $allowedCustomFields = $this->getStoreSettings()['allowed_filters'] ?? [];
         if ($fieldName === '' || !in_array($fieldName, $allowedCustomFields, true)) {
             http_response_code(400);
-            echo json_encode(['success' => false, 'error' => 'Invalid custom field']);
+            echo json_encode(['success' => false, 'error' => trans('promotions.api.invalid_custom_field')]);
             return;
         }
 
@@ -218,7 +219,7 @@ class PromotionController {
 
         if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
             http_response_code(403);
-            echo json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
+            echo json_encode(['success' => false, 'error' => trans('common.csrf_invalid')]);
             return;
         }
 
@@ -266,7 +267,7 @@ class PromotionController {
         $sourceName = trim((string)($promotion['name'] ?? ''));
 
         $duplicate['id'] = null;
-        $duplicate['name'] = ($sourceName !== '' ? $sourceName : 'Promocija') . ' (kopija)';
+        $duplicate['name'] = ($sourceName !== '' ? $sourceName : trans('promotions.form.default_name')) . ' ' . trans('promotions.form.duplicate_name_suffix');
         $duplicate['custom_field_value'] = $promotion['custom_field_value'] ?? $promotion['name'] ?? '';
         $duplicate['description'] = $promotion['description'] ?? '';
         $duplicate['filters'] = $promotion['filters'] ?? '{}';
@@ -340,8 +341,7 @@ class PromotionController {
 
     private function getStoreSettings() {
         $db = \App\Models\Database::getInstance();
-        $data = $db->fetchOne("SELECT settings FROM bigcommerce_stores WHERE store_hash = ?", [$db->getStoreContext()]);
-        $settings = json_decode($data['settings'] ?? '{}', true);
+        $settings = StoreSettings::load($db, $db->getStoreContext());
 
         if (!is_array($settings)) {
             return [];

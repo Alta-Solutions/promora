@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="sr">
+<html lang="<?= htmlspecialchars(\App\Support\Translator::locale(), ENT_QUOTES, 'UTF-8') ?>">
 <head>
     <?php
         $isPromotionFilterPage = ($_GET['route'] ?? '') === 'promotions'
@@ -8,7 +8,7 @@
     ?>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Promora</title>
+    <title><?= trans_e('common.app_name') ?></title>
     <link rel="stylesheet" href="public/css/style.css">
     <link rel="stylesheet" href="public/css/promotions.css?v=<?= filemtime(ROOT_PATH . 'public/css/promotions.css') ?>">
     <link rel="stylesheet" href="public/css/dashboard.css">
@@ -18,6 +18,21 @@
         <link rel="stylesheet" href="public/vendor/tom-select/tom-select.css">
         <script src="public/vendor/tom-select/tom-select.complete.min.js"></script>
     <?php endif; ?>
+    <script>
+        window.appLocale = <?= json_encode(\App\Support\Translator::browserLocale(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
+        window.appTranslations = <?= \App\Support\Translator::jsonExport() ?>;
+        window.appT = function(key, replacements) {
+            let text = Object.prototype.hasOwnProperty.call(window.appTranslations || {}, key)
+                ? window.appTranslations[key]
+                : key;
+
+            Object.entries(replacements || {}).forEach(function(entry) {
+                text = String(text).split('{' + entry[0] + '}').join(String(entry[1]));
+            });
+
+            return text;
+        };
+    </script>
     <?php if ($isPromotionFilterPage): ?>
         <script src="public/js/promotion-product-picker.js?v=<?= filemtime(ROOT_PATH . 'public/js/promotion-product-picker.js') ?>"></script>
     <?php endif; ?>
@@ -26,13 +41,13 @@
     <div class="app-header">
         <div class="header-content">
             <div class="header-left">
-                <a href="?route=dashboard" class="brand-logo"><img src="public/assets/icons/logo.png" alt="Promora Logo" /><span>Promora</span></a>
+                <a href="?route=dashboard" class="brand-logo"><img src="public/assets/icons/logo.png" alt="<?= trans_e('common.brand_logo_alt') ?>" /><span><?= trans_e('common.app_name') ?></span></a>
                 
                 <nav class="main-nav">
-                    <a href="?route=dashboard" class="<?= ($_GET['route'] ?? 'dashboard') === 'dashboard' ? 'active' : '' ?>">Dashboard</a>
-                    <a href="?route=promotions" class="<?= ($_GET['route'] ?? '') === 'promotions' ? 'active' : '' ?>">Promocije</a>
-                    <a href="?route=logs" class="<?= ($_GET['route'] ?? '') === 'logs' ? 'active' : '' ?>">Logovi</a>
-                    <a href="?route=settings" class="<?= ($_GET['route'] ?? '') === 'settings' ? 'active' : '' ?>">Podešavanja</a>
+                    <a href="?route=dashboard" class="<?= ($_GET['route'] ?? 'dashboard') === 'dashboard' ? 'active' : '' ?>"><?= trans_e('common.dashboard') ?></a>
+                    <a href="?route=promotions" class="<?= ($_GET['route'] ?? '') === 'promotions' ? 'active' : '' ?>"><?= trans_e('common.promotions') ?></a>
+                    <a href="?route=logs" class="<?= ($_GET['route'] ?? '') === 'logs' ? 'active' : '' ?>"><?= trans_e('common.logs') ?></a>
+                    <a href="?route=settings" class="<?= ($_GET['route'] ?? '') === 'settings' ? 'active' : '' ?>"><?= trans_e('common.settings') ?></a>
                 </nav>
             </div>
             
@@ -69,10 +84,10 @@
                     <div class="user-avatar">
                         <?= strtoupper(substr($_SESSION['username'] ?? 'A', 0, 1)) ?>
                     </div>
-                    <span style="font-weight: 500;"><?= $_SESSION['username'] ?? 'Admin' ?></span>
+                    <span style="font-weight: 500;"><?= htmlspecialchars($_SESSION['username'] ?? trans('common.admin'), ENT_QUOTES, 'UTF-8') ?></span>
                     
                     <?php if (isset($_SESSION['username'])): ?> 
-                        <a href="?route=auth&action=logout" class="btn-logout" title="Odjavi se" style="margin-left: 10px;">
+                        <a href="?route=auth&action=logout" class="btn-logout" title="<?= trans_e('common.logout') ?>" style="margin-left: 10px;">
                             ⏻
                         </a>
                     <?php endif; ?>

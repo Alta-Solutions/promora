@@ -103,7 +103,7 @@
         }
 
         if (product.is_variant && !product.option_label) {
-            parts.push('Variant');
+            parts.push(appT('product_picker.variant'));
         }
 
         return parts.join(' | ');
@@ -111,21 +111,21 @@
 
     function selectedSummary(count) {
         if (count === 0) {
-            return 'Nema izabranih proizvoda';
+            return appT('product_picker.none_selected');
         }
 
         if (count === 1) {
-            return '1 proizvod izabran';
+            return appT('product_picker.one_selected');
         }
 
-        return `${count} proizvoda izabrano`;
+        return appT('product_picker.many_selected', { count });
     }
 
     function selectedChipHtml(index, scope, sku) {
         return `
             <span class="promotion-product-picker-chip">
                 <span>${html(sku)}</span>
-                <button type="button" onclick="removeProductSkuSelection(${index}, ${jsArg(scope)}, ${jsArg(sku)})" aria-label="Remove ${html(sku)}">x</button>
+                <button type="button" onclick="removeProductSkuSelection(${index}, ${jsArg(scope)}, ${jsArg(sku)})" aria-label="${html(appT('product_picker.remove_sku', { sku }))}">x</button>
             </span>
         `;
     }
@@ -139,7 +139,7 @@
                 <div class="promotion-product-picker-chips">
                     ${visibleSkus.map(sku => selectedChipHtml(index, scope, sku)).join('')}
                     ${hiddenCount > 0 ? `<span class="promotion-product-picker-more">+${hiddenCount}</span>` : ''}
-                    <button type="button" class="promotion-product-picker-clear" onclick="clearProductSkuSelection(${index}, ${jsArg(scope)})">Obriši</button>
+                    <button type="button" class="promotion-product-picker-clear" onclick="clearProductSkuSelection(${index}, ${jsArg(scope)})">${html(appT('product_picker.clear'))}</button>
                 </div>
             `
             : '';
@@ -148,7 +148,7 @@
             <div class="promotion-product-picker-field">
                 <button type="button" class="promotion-product-picker-trigger" onclick="openProductSkuPicker(${index}, ${jsArg(scope)})">
                     <span class="promotion-product-picker-trigger-main">${html(selectedSummary(selectedSkus.length))}</span>
-                    <span class="promotion-product-picker-trigger-sub">Izaberite proizvode iz liste</span>
+                    <span class="promotion-product-picker-trigger-sub">${html(appT('product_picker.trigger_subtitle'))}</span>
                 </button>
                 ${chipsHtml}
             </div>
@@ -168,29 +168,29 @@
         modal.innerHTML = `
             <div class="promotion-product-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="promotion-product-picker-title">
                 <div class="promotion-product-picker-header">
-                    <h3 id="promotion-product-picker-title">Izaberite proizvode</h3>
-                    <button type="button" class="promotion-product-picker-close" data-product-picker-close aria-label="Close">x</button>
+                    <h3 id="promotion-product-picker-title">${html(appT('product_picker.title'))}</h3>
+                    <button type="button" class="promotion-product-picker-close" data-product-picker-close aria-label="${html(appT('product_picker.close'))}">x</button>
                 </div>
                 <div class="promotion-product-picker-search-wrap">
                     <span class="promotion-product-picker-search-icon" aria-hidden="true"></span>
-                    <input type="search" id="promotion-product-picker-search" class="promotion-product-picker-search" placeholder="Pretraga po nazivu ili SKU" autocomplete="off">
+                    <input type="search" id="promotion-product-picker-search" class="promotion-product-picker-search" placeholder="${html(appT('product_picker.search_placeholder'))}" autocomplete="off">
                 </div>
                 <div class="promotion-product-picker-meta">
-                    <span id="promotion-product-picker-count">0 proizvoda</span>
+                    <span id="promotion-product-picker-count">${html(appT('product_picker.count', { count: 0 }))}</span>
                     <div class="promotion-product-picker-bulk-actions">
-                        <button type="button" id="promotion-product-picker-select-page" class="promotion-product-picker-bulk-button">Sve sa stranice</button>
-                        <button type="button" id="promotion-product-picker-select-search" class="promotion-product-picker-bulk-button">Svi rezultati</button>
+                        <button type="button" id="promotion-product-picker-select-page" class="promotion-product-picker-bulk-button">${html(appT('product_picker.select_page'))}</button>
+                        <button type="button" id="promotion-product-picker-select-search" class="promotion-product-picker-bulk-button">${html(appT('product_picker.select_search'))}</button>
                     </div>
                     <div class="promotion-product-picker-pager">
-                        <span id="promotion-product-picker-range">0 - 0 od 0</span>
-                        <button type="button" id="promotion-product-picker-prev" class="promotion-product-picker-page-button" aria-label="Prethodna stranica">&lsaquo;</button>
-                        <button type="button" id="promotion-product-picker-next" class="promotion-product-picker-page-button" aria-label="Naredna stranica">&rsaquo;</button>
+                        <span id="promotion-product-picker-range">${html(appT('product_picker.range', { start: 0, end: 0, total: 0 }))}</span>
+                        <button type="button" id="promotion-product-picker-prev" class="promotion-product-picker-page-button" aria-label="${html(appT('product_picker.previous_page'))}">&lsaquo;</button>
+                        <button type="button" id="promotion-product-picker-next" class="promotion-product-picker-page-button" aria-label="${html(appT('product_picker.next_page'))}">&rsaquo;</button>
                     </div>
                 </div>
                 <div id="promotion-product-picker-list" class="promotion-product-picker-list"></div>
                 <div class="promotion-product-picker-footer">
-                    <button type="button" class="promotion-product-picker-cancel" data-product-picker-close>Odustani</button>
-                    <button type="button" class="promotion-product-picker-apply" id="promotion-product-picker-apply">Primeni</button>
+                    <button type="button" class="promotion-product-picker-cancel" data-product-picker-close>${html(appT('product_picker.cancel'))}</button>
+                    <button type="button" class="promotion-product-picker-apply" id="promotion-product-picker-apply">${html(appT('product_picker.apply'))}</button>
                 </div>
             </div>
         `;
@@ -372,8 +372,8 @@
             state.products = [];
             state.total = 0;
             state.totalPages = 1;
-            state.error = 'Greska pri ucitavanju proizvoda.';
-            console.error('Product picker error:', error);
+            state.error = appT('product_picker.error_loading_products');
+            console.error(appT('product_picker.error_console'), error);
         } finally {
             state.loading = false;
             renderModal();
@@ -384,7 +384,7 @@
         const modal = ensureModal();
         const list = modal.querySelector('#promotion-product-picker-list');
 
-        modal.querySelector('#promotion-product-picker-count').textContent = `${state.total} proizvoda`;
+        modal.querySelector('#promotion-product-picker-count').textContent = appT('product_picker.count', { count: state.total });
         modal.querySelector('#promotion-product-picker-prev').disabled = state.loading || state.page <= 1;
         modal.querySelector('#promotion-product-picker-next').disabled = state.loading || state.page >= state.totalPages;
         renderBulkActionState();
@@ -393,7 +393,7 @@
             list.innerHTML = `
                 <div class="promotion-product-picker-empty">
                     <span class="promotion-filter-loading-spinner" aria-hidden="true"></span>
-                    <span>Ucitavanje proizvoda...</span>
+                    <span>${html(appT('product_picker.loading_products'))}</span>
                 </div>
             `;
             renderFooterState();
@@ -407,7 +407,7 @@
         }
 
         if (state.groups.length === 0 && state.products.length === 0) {
-            list.innerHTML = '<div class="promotion-product-picker-empty">Nema proizvoda za prikaz.</div>';
+            list.innerHTML = `<div class="promotion-product-picker-empty">${html(appT('product_picker.empty'))}</div>`;
             renderFooterState();
             return;
         }
@@ -487,8 +487,8 @@
 
             addSkusToSelection(Array.isArray(result.data?.skus) ? result.data.skus : []);
         } catch (error) {
-            state.error = 'Greska pri izboru proizvoda iz pretrage.';
-            console.error('Product picker select all error:', error);
+            state.error = appT('product_picker.error_selecting_search');
+            console.error(appT('product_picker.select_all_error_console'), error);
         } finally {
             state.selectAllSearchLoading = false;
             renderModal();
@@ -534,7 +534,7 @@
         const subtitle = productSubtitle(product);
         const imageHtml = product.image_url
             ? `<img src="${html(product.image_url)}" alt="" loading="lazy">`
-            : '<span>Image<br>Coming<br>Soon</span>';
+            : `<span>${html(appT('product_picker.image_coming_soon')).replace(/\n/g, '<br>')}</span>`;
         const productId = String(context.productId || product.product_id || '');
         const expandHtml = context.hasVariants
             ? `
@@ -543,7 +543,7 @@
                     class="promotion-product-picker-expand"
                     data-product-id="${html(productId)}"
                     aria-expanded="${context.collapsed ? 'false' : 'true'}"
-                    aria-label="${context.collapsed ? 'Show variants' : 'Hide variants'}"
+                    aria-label="${html(context.collapsed ? appT('product_picker.show_variants') : appT('product_picker.hide_variants'))}"
                 >${context.collapsed ? '+' : '-'}</button>
             `
             : '<span class="promotion-product-picker-expand-spacer" aria-hidden="true"></span>';
@@ -571,8 +571,14 @@
         const end = state.total === 0 ? 0 : Math.min(state.page * PAGE_SIZE, state.total);
         const applyButton = modal.querySelector('#promotion-product-picker-apply');
 
-        modal.querySelector('#promotion-product-picker-range').textContent = `${start} - ${end} od ${state.total}`;
-        applyButton.textContent = state.selected.size > 0 ? `Primjeni (${state.selected.size})` : 'Primjeni';
+        modal.querySelector('#promotion-product-picker-range').textContent = appT('product_picker.range', {
+            start,
+            end,
+            total: state.total
+        });
+        applyButton.textContent = state.selected.size > 0
+            ? appT('product_picker.apply_with_count', { count: state.selected.size })
+            : appT('product_picker.apply');
     }
 
     function renderBulkActionState() {
@@ -587,7 +593,9 @@
         const currentPageSkus = getCurrentPageSkus();
         selectPageButton.disabled = state.loading || currentPageSkus.length === 0;
         selectSearchButton.disabled = state.loading || state.selectAllSearchLoading || state.total === 0;
-        selectSearchButton.textContent = state.selectAllSearchLoading ? 'Biranje...' : 'Izaberi pretragu';
+        selectSearchButton.textContent = state.selectAllSearchLoading
+            ? appT('product_picker.selecting')
+            : appT('product_picker.select_search_action');
     }
 
     function removeProductSkuSelection(index, scope, sku) {
