@@ -24,7 +24,7 @@ class QueueService {
         return $this->db->lastInsertId();
     }
 
-    public function createOmnibusSyncJob(int $totalItems): array {
+    public function createOmnibusSyncJob(int $totalItems, bool $deduplicateOpenJobs = true): array {
         $lockName = 'omnibus_sync:' . (string)$this->storeHash;
         $lockAcquired = $this->acquireLock($lockName, 5);
 
@@ -38,15 +38,17 @@ class QueueService {
         }
 
         try {
-            $existingJob = $this->findOpenJobByType('omnibus_sync');
-            if ($existingJob) {
-                return [
-                    'created' => false,
-                    'job_id' => (int)$existingJob['id'],
-                    'reason' => 'already_exists',
-                    'message' => 'Omnibus sync je vec zakazan ili u toku.',
-                    'job' => $existingJob,
-                ];
+            if ($deduplicateOpenJobs) {
+                $existingJob = $this->findOpenJobByType('omnibus_sync');
+                if ($existingJob) {
+                    return [
+                        'created' => false,
+                        'job_id' => (int)$existingJob['id'],
+                        'reason' => 'already_exists',
+                        'message' => 'Omnibus sync je vec zakazan ili u toku.',
+                        'job' => $existingJob,
+                    ];
+                }
             }
 
             $jobId = $this->createJob('omnibus_sync', null, $totalItems > 0 ? $totalItems : 1);
@@ -68,7 +70,7 @@ class QueueService {
             "SELECT * FROM sync_jobs
              WHERE status = 'pending'
              AND (next_run_at IS NULL OR next_run_at <= NOW())
-             ORDER BY created_at ASC LIMIT 1"
+             ORDER BY created_at ASC, id ASC LIMIT 1"
         );
     }
 

@@ -101,6 +101,7 @@ try {
             `filters` JSON NOT NULL,
             `status` VARCHAR(50) NOT NULL DEFAULT 'inactive',
             `color` VARCHAR(20) NULL,
+            `description` TEXT NULL,
             `created_at` DATETIME NOT NULL,
             `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX `idx_store_hash_status` (`store_hash`, `status`)

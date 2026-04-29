@@ -147,5 +147,17 @@ class Promotion {
                 "UPDATE promotions SET custom_field_value = name WHERE custom_field_value IS NULL OR custom_field_value = ''"
             );
         }
+
+        $descriptionColumn = $this->db->fetchOne(
+            "SELECT COLUMN_NAME
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'promotions' AND COLUMN_NAME = 'description'"
+        );
+
+        if (!$descriptionColumn) {
+            $this->db->query(
+                "ALTER TABLE promotions ADD COLUMN description TEXT NULL AFTER color"
+            );
+        }
     }
 }

@@ -941,6 +941,182 @@ class ProductCacheService {
         return $options;
     }
 
+    public function getProductFilterPage(string $search = '', int $page = 1, int $perPage = 50): array {
+        $search = $this->normalizeEscapedUnicodeString($search);
+        $page = max(1, $page);
+        $perPage = max(1, min(100, $perPage));
+        $searchFilter = $this->buildProductFilterSearchFilter($search);
+        $where = $searchFilter['where'];
+        $matchParams = $searchFilter['params'];
+
+        $countRow = $this->db->fetchOne(
+            "SELECT COUNT(DISTINCT product_id) AS total
+             FROM products_cache
+             WHERE {$where}",
+            $matchParams
+        );
+
+        $total = (int)($countRow['total'] ?? 0);
+        $totalPages = max(1, (int)ceil($total / $perPage));
+        $page = min($page, $totalPages);
+        $offset = ($page - 1) * $perPage;
+
+        $groupRows = $this->db->fetchAll(
+            "SELECT
+                product_id,
+                COALESCE(MAX(CASE WHEN variant_id IS NULL THEN name END), MIN(name)) AS sort_name,
+                COALESCE(MAX(CASE WHEN variant_id IS NULL THEN sku END), MIN(sku)) AS sort_sku
+             FROM products_cache
+             WHERE {$where}
+             GROUP BY product_id
+             ORDER BY sort_name ASC, sort_sku ASC, product_id ASC
+             LIMIT " . (int)$perPage . " OFFSET " . (int)$offset,
+            $matchParams
+        );
+
+        $productIds = array_values(array_filter(array_map(function($row) {
+            return (int)($row['product_id'] ?? 0);
+        }, $groupRows), function($productId) {
+            return $productId > 0;
+        }));
+
+        $groups = [];
+        $flatProducts = [];
+
+        if (!empty($productIds)) {
+            $placeholders = implode(',', array_fill(0, count($productIds), '?'));
+            $detailRows = $this->db->fetchAll(
+                "SELECT product_id, variant_id, type, name, sku, price, sale_price, option_values, images
+                 FROM products_cache
+                 WHERE store_hash = ?
+                   AND product_id IN ($placeholders)
+                   AND (
+                        variant_id IS NULL
+                        OR (sku IS NOT NULL AND TRIM(sku) <> '')
+                   )
+                 ORDER BY product_id ASC, variant_id IS NULL DESC, name ASC, sku ASC",
+                array_merge([$this->storeHash], $productIds)
+            );
+
+            $rowsByProductId = [];
+            foreach ($detailRows as $detailRow) {
+                $productId = (int)($detailRow['product_id'] ?? 0);
+                if ($productId <= 0) {
+                    continue;
+                }
+
+                if (!isset($rowsByProductId[$productId])) {
+                    $rowsByProductId[$productId] = [];
+                }
+
+                $rowsByProductId[$productId][] = $detailRow;
+            }
+
+            foreach ($productIds as $productId) {
+                $rows = $rowsByProductId[$productId] ?? [];
+                if (empty($rows)) {
+                    continue;
+                }
+
+                $parentRow = null;
+                $variantRows = [];
+
+                foreach ($rows as $row) {
+                    if (empty($row['variant_id'])) {
+                        $parentRow = $row;
+                        continue;
+                    }
+
+                    if (!empty($row['sku']) && trim((string)$row['sku']) !== '') {
+                        $variantRows[] = $row;
+                    }
+                }
+
+                if ($parentRow === null && !empty($variantRows)) {
+                    $parentRow = $this->buildSyntheticParentFilterRow($productId, $variantRows[0]);
+                }
+
+                $variants = array_map(function($row) use ($parentRow) {
+                    $variant = $this->mapProductFilterOptionRow($row);
+                    $variant['is_parent'] = false;
+                    $variant['parent_name'] = (string)($parentRow['name'] ?? '');
+                    $variant['is_selectable'] = trim((string)($variant['sku'] ?? '')) !== '';
+                    return $variant;
+                }, $variantRows);
+
+                $parent = $parentRow ? $this->mapProductFilterOptionRow($parentRow) : null;
+                if ($parent) {
+                    $parent['is_parent'] = true;
+                    $parent['has_variants'] = !empty($variants);
+                    $parent['variant_count'] = count($variants);
+                    $parent['is_selectable'] = trim((string)($parent['sku'] ?? '')) !== '';
+                }
+
+                $groupSkus = [];
+                if ($parent && !empty($parent['is_selectable'])) {
+                    $groupSkus[] = (string)$parent['sku'];
+                    $flatProducts[] = $parent;
+                }
+
+                foreach ($variants as $variant) {
+                    if (!empty($variant['is_selectable'])) {
+                        $groupSkus[] = (string)$variant['sku'];
+                        $flatProducts[] = $variant;
+                    }
+                }
+
+                $groups[] = [
+                    'product_id' => $productId,
+                    'parent' => $parent,
+                    'variants' => $variants,
+                    'has_variants' => !empty($variants),
+                    'variant_count' => count($variants),
+                    'skus' => array_values(array_unique($groupSkus)),
+                ];
+            }
+        }
+
+        return [
+            'groups' => $groups,
+            'products' => $flatProducts,
+            'total' => $total,
+            'page' => $page,
+            'per_page' => $perPage,
+            'total_pages' => $totalPages,
+        ];
+    }
+
+    public function getProductFilterSkusForSearch(string $search = ''): array {
+        $search = $this->normalizeEscapedUnicodeString($search);
+        $searchFilter = $this->buildProductFilterSearchFilter($search);
+
+        $rows = $this->db->fetchAll(
+            "SELECT DISTINCT pc.sku
+             FROM products_cache pc
+             WHERE pc.store_hash = ?
+               AND pc.product_id IN (
+                    SELECT DISTINCT product_id
+                    FROM products_cache
+                    WHERE {$searchFilter['where']}
+               )
+               AND pc.sku IS NOT NULL
+               AND TRIM(pc.sku) <> ''
+             ORDER BY pc.sku ASC",
+            array_merge([$this->storeHash], $searchFilter['params'])
+        );
+
+        $skus = array_values(array_filter(array_map(function($row) {
+            return trim((string)($row['sku'] ?? ''));
+        }, $rows), function($sku) {
+            return $sku !== '';
+        }));
+
+        return [
+            'skus' => $skus,
+            'count' => count($skus),
+        ];
+    }
+
     private function mapProductFilterOptionRow(array $row): array {
         $salePrice = $row['sale_price'];
         $hasSalePrice = is_numeric($salePrice) && (float)$salePrice > 0;
@@ -955,7 +1131,122 @@ class ProductCacheService {
             'product_id' => isset($row['product_id']) ? (int)$row['product_id'] : null,
             'variant_id' => isset($row['variant_id']) ? (int)$row['variant_id'] : null,
             'type' => (string)($row['type'] ?? 'product'),
+            'image_url' => $this->extractProductImageUrl($row['images'] ?? null),
+            'option_label' => $this->extractProductOptionLabel($row['option_values'] ?? null),
+            'is_variant' => !empty($row['variant_id']),
+            'is_selectable' => trim((string)($row['sku'] ?? '')) !== '',
         ];
+    }
+
+    private function buildSyntheticParentFilterRow(int $productId, array $variantRow): array {
+        return [
+            'product_id' => $productId,
+            'variant_id' => null,
+            'type' => 'product',
+            'name' => (string)($variantRow['name'] ?? ''),
+            'sku' => '',
+            'price' => null,
+            'sale_price' => null,
+            'option_values' => null,
+            'images' => $variantRow['images'] ?? null,
+        ];
+    }
+
+    private function buildProductFilterSearchFilter(string $search): array {
+        $search = $this->normalizeEscapedUnicodeString($search);
+        $searchTerms = $this->parseProductSearchTerms($search);
+        $where = "store_hash = ?
+                  AND sku IS NOT NULL
+                  AND TRIM(sku) <> ''";
+        $params = [$this->storeHash];
+
+        if ($search !== '') {
+            $searchLike = '%' . $search . '%';
+            $searchConditions = [
+                "sku LIKE ?",
+                "name LIKE ?",
+            ];
+            $params[] = $searchLike;
+            $params[] = $searchLike;
+
+            if (count($searchTerms) > 1) {
+                $placeholders = implode(',', array_fill(0, count($searchTerms), '?'));
+                $searchConditions[] = "sku IN ($placeholders)";
+                foreach ($searchTerms as $term) {
+                    $params[] = $term;
+                }
+
+                foreach ($searchTerms as $term) {
+                    $searchConditions[] = "sku LIKE ?";
+                    $params[] = $term . '%';
+                }
+            }
+
+            $where .= " AND (" . implode(' OR ', $searchConditions) . ")";
+        }
+
+        return [
+            'where' => $where,
+            'params' => $params,
+        ];
+    }
+
+    private function extractProductImageUrl($images): string {
+        if (is_string($images)) {
+            $decodedImages = json_decode($images, true);
+            $images = is_array($decodedImages) ? $decodedImages : [];
+        }
+
+        if (!is_array($images) || empty($images)) {
+            return '';
+        }
+
+        foreach ($images as $image) {
+            if (is_string($image) && trim($image) !== '') {
+                return trim($image);
+            }
+
+            if (!is_array($image)) {
+                continue;
+            }
+
+            foreach (['url_thumbnail', 'url_standard', 'url_tiny', 'url_zoom', 'image_url', 'url'] as $key) {
+                if (!empty($image[$key])) {
+                    return (string)$image[$key];
+                }
+            }
+        }
+
+        return '';
+    }
+
+    private function extractProductOptionLabel($optionValues): string {
+        if (is_string($optionValues)) {
+            $decodedValues = json_decode($optionValues, true);
+            $optionValues = is_array($decodedValues) ? $decodedValues : [];
+        }
+
+        if (!is_array($optionValues) || empty($optionValues)) {
+            return '';
+        }
+
+        $labels = [];
+        foreach ($optionValues as $optionValue) {
+            if (!is_array($optionValue)) {
+                continue;
+            }
+
+            $displayName = trim((string)($optionValue['option_display_name'] ?? $optionValue['display_name'] ?? $optionValue['option_name'] ?? ''));
+            $label = trim((string)($optionValue['label'] ?? $optionValue['value'] ?? ''));
+
+            if ($label === '') {
+                continue;
+            }
+
+            $labels[] = $displayName !== '' ? "{$displayName}: {$label}" : $label;
+        }
+
+        return implode(', ', $labels);
     }
 
     private function parseProductSearchTerms(string $search): array {

@@ -31,14 +31,14 @@ public function __construct(Database $db = null) {
     }
     
     /**
-     * Kreira novu promociju i ODMAH zakazuje posao za sinhronizaciju.
-     * Ovo rešava problem da promocija bude "Aktivna" a neprimenjena.
+     * Kreira novu promociju i zakazuje sync samo ako promocija pocinje odmah.
      */
     public function createPromotion(array $data) {
+        $status = $this->determinePromotionStatus($data['start_date'] ?? null, $data['end_date'] ?? null);
+
         // 1. Unos promocije u bazu
-        // Status postavljamo na 'active', ali odmah kreiramo posao da to opravdamo
-        $sql = "INSERT INTO promotions (store_hash, name, custom_field_value, discount_percent, start_date, end_date, priority, filters, status, color, created_at) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NOW())";
+        $sql = "INSERT INTO promotions (store_hash, name, custom_field_value, discount_percent, start_date, end_date, priority, filters, status, color, description, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())";
         
         $filtersJson = is_array($data['filters']) ? json_encode($data['filters']) : $data['filters'];
         
@@ -51,24 +51,171 @@ public function __construct(Database $db = null) {
             $data['end_date'],
             $data['priority'] ?? 0,
             $filtersJson,
-            $data['color'] ?? '#3b82f6'
+            $status,
+            $data['color'] ?? '#3b82f6',
+            $data['description'] ?? ''
         ]);
         
         $promotionId = $this->db->lastInsertId();
         
-        // 2. Odmah kreiraj Job za sinhronizaciju
-        $this->queueJobForPromotion($promotionId, $data['filters']);
+        if ($status === 'active') {
+            $this->queueActivationJobsForPromotion($promotionId, $data['filters'] ?? []);
+        }
         
         return $promotionId;
     }
 
-    private function queueJobForPromotion($promotionId, $filters) {
-        $filtersArray = is_array($filters) ? $filters : json_decode($filters, true);
-        $totalItems = $this->cacheService->countProductsByFilters($filtersArray);
-        
+    public function updatePromotion($promotionId, array $data) {
+        $status = $this->determinePromotionStatus($data['start_date'] ?? null, $data['end_date'] ?? null);
+        $data['status'] = $status;
+
+        $result = $this->promotionModel->update($promotionId, $data);
+
+        if ($status === 'active') {
+            $this->queueActivationJobsForPromotion($promotionId, $data['filters'] ?? []);
+        }
+
+        return $result;
+    }
+
+    public function deletePromotion($promotionId) {
+        $totalItems = $this->countPromotionProducts($promotionId);
+
+        if ($totalItems > 0) {
+            $this->queuePromotionCleanup($promotionId, $totalItems);
+            return $this->promotionModel->update($promotionId, ['status' => 'expired']);
+        }
+
+        return $this->promotionModel->delete($promotionId);
+    }
+
+    public function queuePromotionCleanup($promotionId, ?int $totalItems = null, bool $queueOmnibus = true): array {
+        $totalItems = $totalItems ?? $this->countPromotionProducts($promotionId);
+        if ($totalItems <= 0) {
+            return ['created' => false, 'job_id' => null, 'total' => 0];
+        }
+
+        $existingJob = $this->findOpenJob('cleanup_single', $promotionId);
+        if ($existingJob) {
+            return [
+                'created' => false,
+                'job_id' => (int)$existingJob['id'],
+                'total' => (int)$existingJob['total_items'],
+            ];
+        }
+
         $queue = new QueueService($this->storeHash);
+        $jobId = $queue->createJob('cleanup_single', $promotionId, $totalItems > 0 ? $totalItems : 1);
+
+        if ($queueOmnibus) {
+            $this->queueOmnibusSyncJobIfEnabled($queue);
+        }
+
+        return ['created' => true, 'job_id' => (int)$jobId, 'total' => $totalItems];
+    }
+
+    private function queueActivationJobsForPromotion($promotionId, $filters): void {
+        $queue = new QueueService($this->storeHash);
+
+        $this->queueJobForPromotion($queue, $promotionId, $filters);
+        $this->queueOmnibusSyncJobIfEnabled($queue);
+    }
+
+    private function queueJobForPromotion(QueueService $queue, $promotionId, $filters): void {
+        $filtersArray = is_array($filters) ? $filters : json_decode($filters, true);
+        if (!is_array($filtersArray)) {
+            $filtersArray = [];
+        }
+
+        $totalItems = $this->cacheService->countProductsByFilters($filtersArray);
+
         // Kreiramo posao odmah
         $queue->createJob('sync_promotion', $promotionId, $totalItems > 0 ? $totalItems : 1);
+    }
+
+    private function queueOmnibusSyncJobIfEnabled(QueueService $queue): void {
+        $storeConfig = $this->db->fetchOne(
+            "SELECT enable_omnibus FROM bigcommerce_stores WHERE store_hash = ?",
+            [$this->storeHash]
+        );
+
+        if (!$storeConfig || empty($storeConfig['enable_omnibus'])) {
+            return;
+        }
+
+        $queue->createOmnibusSyncJob($this->countOmnibusParentProducts(), false);
+    }
+
+    private function countOmnibusParentProducts(): int {
+        $typeColumn = $this->db->fetchOne("SHOW COLUMNS FROM products_cache LIKE 'type'");
+        $baseProductClause = $typeColumn ? " AND type = 'product'" : '';
+        $row = $this->db->fetchOne(
+            "SELECT COUNT(DISTINCT product_id) AS total FROM products_cache WHERE store_hash = ?" . $baseProductClause,
+            [$this->storeHash]
+        );
+
+        return (int)($row['total'] ?? 0);
+    }
+
+    private function countPromotionProducts($promotionId): int {
+        $row = $this->db->fetchOne(
+            "SELECT COUNT(*) AS cnt FROM promotion_products WHERE store_hash = ? AND promotion_id = ?",
+            [$this->storeHash, $promotionId]
+        );
+
+        return (int)($row['cnt'] ?? 0);
+    }
+
+    private function countAllPromotionProducts(): int {
+        $row = $this->db->fetchOne(
+            "SELECT COUNT(*) AS cnt FROM promotion_products WHERE store_hash = ?",
+            [$this->storeHash]
+        );
+
+        return (int)($row['cnt'] ?? 0);
+    }
+
+    private function findOpenJob(string $jobType, $promotionId = null) {
+        return $this->db->fetchOne(
+            "SELECT *
+             FROM sync_jobs
+             WHERE store_hash = ?
+               AND job_type = ?
+               AND promotion_id <=> ?
+               AND status IN ('pending', 'processing')
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1",
+            [$this->storeHash, $jobType, $promotionId]
+        );
+    }
+
+    private function findOpenJobByType(string $jobType) {
+        return $this->db->fetchOne(
+            "SELECT *
+             FROM sync_jobs
+             WHERE store_hash = ?
+               AND job_type = ?
+               AND status IN ('pending', 'processing')
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1",
+            [$this->storeHash, $jobType]
+        );
+    }
+
+    private function determinePromotionStatus($startDate, $endDate): string {
+        $now = time();
+        $startTimestamp = strtotime((string)$startDate);
+        $endTimestamp = strtotime((string)$endDate);
+
+        if ($endTimestamp !== false && $endTimestamp < $now) {
+            return 'expired';
+        }
+
+        if ($startTimestamp !== false && $startTimestamp > $now) {
+            return 'scheduled';
+        }
+
+        return 'active';
     }
 
     /**
@@ -77,18 +224,26 @@ public function __construct(Database $db = null) {
      */
     public function queueAllPromotions() {
         // 1. Održavanje: Ažuriraj statuse i obriši istekle
-        $this->updateExpiredPromotions();
+        $queue = new QueueService($this->storeHash);
         $this->promotionModel->updateStatuses();
         
         $promotions = $this->promotionModel->findActive();
-        $queue = new QueueService($this->storeHash);
+        $expiredCleanupJobs = 0;
         $jobsCreated = 0;
 
         if (empty($promotions)) {
             // Ako nema promocija, kreiraj posao za čišćenje svega
-            $queue->createJob('cleanup', null, 1);
-            return ['message' => 'Nema aktivnih promocija. Zakazan posao čišćenja.', 'jobs' => 1];
+            $totalItems = $this->countAllPromotionProducts();
+            if ($totalItems > 0 && !$this->findOpenJobByType('cleanup_single') && !$this->findOpenJob('cleanup')) {
+                $queue->createJob('cleanup', null, $totalItems);
+                $jobsCreated++;
+                $this->queueOmnibusSyncJobIfEnabled($queue);
+            }
+            return ['message' => 'Nema aktivnih promocija. Zakazan posao čišćenja.', 'jobs' => $jobsCreated];
         }
+
+        $expiredCleanupJobs = $this->queueExpiredPromotionCleanupJobs($queue);
+        $jobsCreated += $expiredCleanupJobs;
 
         foreach ($promotions as $promo) {
             $filters = json_decode($promo['filters'], true);
@@ -99,7 +254,42 @@ public function __construct(Database $db = null) {
             $jobsCreated++;
         }
 
+        if ($expiredCleanupJobs > 0) {
+            $this->queueOmnibusSyncJobIfEnabled($queue);
+        }
+
         return ['message' => "Uspešno zakazano {$jobsCreated} poslova sinhronizacije.", 'jobs' => $jobsCreated];
+    }
+
+    /**
+     * Zakazuje cleanup jobove za istekle promocije koje jos imaju vezane proizvode.
+     */
+    private function queueExpiredPromotionCleanupJobs(QueueService $queue): int {
+        $expiredPromotions = $this->db->fetchAll(
+            "SELECT p.id, COUNT(pp.id) AS total_items
+             FROM promotions p
+             INNER JOIN promotion_products pp
+                ON pp.store_hash = p.store_hash
+               AND pp.promotion_id = p.id
+             WHERE p.store_hash = ?
+               AND p.status = 'expired'
+               AND p.end_date < NOW()
+             GROUP BY p.id",
+            [$this->storeHash]
+        );
+
+        $jobsCreated = 0;
+        foreach ($expiredPromotions as $promotion) {
+            $totalItems = (int)($promotion['total_items'] ?? 0);
+            if ($totalItems <= 0 || $this->findOpenJob('cleanup_single', $promotion['id'])) {
+                continue;
+            }
+
+            $queue->createJob('cleanup_single', $promotion['id'], $totalItems);
+            $jobsCreated++;
+        }
+
+        return $jobsCreated;
     }
 
     /**
@@ -127,6 +317,10 @@ public function __construct(Database $db = null) {
             $debugLog[] = "No active promotions - cleaning up all promotional products";
             $cleanedCount = $this->cleanupAllProductsBatch();
             $debugLog[] = "Cleaned {$cleanedCount} products";
+
+            if (($cleanedCount + $expiredCleanedCount) > 0) {
+                $this->queueOmnibusSyncJobIfEnabled(new QueueService($this->storeHash));
+            }
             
             $duration = microtime(true) - $startTime;
             $message = implode("\n", $debugLog);
@@ -290,6 +484,10 @@ public function __construct(Database $db = null) {
         
         // 🚀 OPTIMIZACIJA: Direktno ažuriranje lokalnog keša (bez API poziva)
         $this->cacheService->updatePriceCacheDirectly($cachePriceUpdates);
+
+        if (($cleanedCount + $expiredCleanedCount) > 0) {
+            $this->queueOmnibusSyncJobIfEnabled(new QueueService($this->storeHash));
+        }
         
         // Log sync
         $duration = microtime(true) - $startTime;

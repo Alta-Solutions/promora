@@ -6,7 +6,6 @@ use App\Models\Promotion;
 use App\Services\BigCommerceAPI;
 use App\Services\PromotionService;
 use App\Services\ProductCacheService;
-use App\Services\QueueService;
 use App\Support\Csrf;
 
 class PromotionController {
@@ -67,6 +66,33 @@ class PromotionController {
         include __DIR__ . '/../Views/promotions/create.php';
         include __DIR__ . '/../Views/layouts/footer.php';
     }
+
+    public function duplicate() {
+        $id = $_GET['id'] ?? null;
+
+        if (!$id) {
+            header('Location: ?route=promotions');
+            exit;
+        }
+
+        $sourcePromotion = $this->promotionModel->findById($id);
+
+        if (!$sourcePromotion) {
+            header('Location: ?route=promotions');
+            exit;
+        }
+
+        $settings = $this->getStoreSettings();
+        $allowedCustomFields = $settings['allowed_filters'] ?? [];
+        $categories = $this->api->getCategories();
+        $brands = $this->api->getBrands();
+        $cacheStats = $this->cacheService->getCacheStats();
+        $duplicatePromotion = $this->buildDuplicatePromotionDraft($sourcePromotion);
+
+        include __DIR__ . '/../Views/layouts/header.php';
+        include __DIR__ . '/../Views/promotions/create.php';
+        include __DIR__ . '/../Views/layouts/footer.php';
+    }
     
     public function edit() {
         $id = $_GET['id'] ?? null;
@@ -84,7 +110,7 @@ class PromotionController {
             }
 
             $data = $this->getFormData();
-            $this->promotionModel->update($id, $data);
+            $this->promotionService->updatePromotion($id, $data);
             
             header('Location: ?route=promotions&success=updated');
             exit;
@@ -106,24 +132,7 @@ class PromotionController {
         $id = $_GET['id'] ?? null;
         
         if ($id) {
-            // 1. Provera da li ima proizvoda vezanih za ovu promociju
-            $db = \App\Models\Database::getInstance();
-            $count = $db->fetchOne(
-                "SELECT COUNT(*) as cnt FROM promotion_products WHERE promotion_id = ?", 
-                [$id]
-            );
-            
-            if ($count['cnt'] > 0) {
-                // 2. Ako ima proizvoda, kreiraj posao za čišćenje (Async)
-                $queue = new QueueService();
-                $queue->createJob('cleanup_single', $id, $count['cnt']);
-                
-                // 3. Postavi status na 'expired' umesto brisanja (dok worker ne završi)
-                $this->promotionModel->update($id, ['status' => 'expired']);
-            } else {
-                // 4. Ako nema proizvoda, brišemo odmah
-                $this->promotionModel->delete($id);
-            }
+            $this->promotionService->deletePromotion($id);
         }
         
         header('Location: ?route=promotions&success=deleted');
@@ -217,6 +226,18 @@ class PromotionController {
         $limit = max(1, min(100, (int)($_POST['limit'] ?? 50)));
 
         try {
+            if (!empty($_POST['select_all_search'])) {
+                echo json_encode(['success' => true, 'data' => $this->cacheService->getProductFilterSkusForSearch($query)]);
+                return;
+            }
+
+            if (isset($_POST['page']) || isset($_POST['per_page'])) {
+                $page = max(1, (int)($_POST['page'] ?? 1));
+                $perPage = max(1, min(100, (int)($_POST['per_page'] ?? 50)));
+                echo json_encode(['success' => true, 'data' => $this->cacheService->getProductFilterPage($query, $page, $perPage)]);
+                return;
+            }
+
             $options = $this->cacheService->getProductFilterOptions($query, $limit);
             echo json_encode(['success' => true, 'data' => ['options' => $options]]);
         } catch (\Throwable $e) {
@@ -238,6 +259,19 @@ class PromotionController {
             'description' => $_POST['description'] ?? '',
             'target_category_id' => $_POST['target_category_id'] ?? null
         ];
+    }
+
+    private function buildDuplicatePromotionDraft(array $promotion): array {
+        $duplicate = $promotion;
+        $sourceName = trim((string)($promotion['name'] ?? ''));
+
+        $duplicate['id'] = null;
+        $duplicate['name'] = ($sourceName !== '' ? $sourceName : 'Promocija') . ' (kopija)';
+        $duplicate['custom_field_value'] = $promotion['custom_field_value'] ?? $promotion['name'] ?? '';
+        $duplicate['description'] = $promotion['description'] ?? '';
+        $duplicate['filters'] = $promotion['filters'] ?? '{}';
+
+        return $duplicate;
     }
 
     private function getSubmittedFilters() {

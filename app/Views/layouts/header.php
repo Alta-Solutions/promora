@@ -3,20 +3,23 @@
 <head>
     <?php
         $isPromotionFilterPage = ($_GET['route'] ?? '') === 'promotions'
-            && in_array($_GET['action'] ?? '', ['create', 'edit'], true);
+            && in_array($_GET['action'] ?? '', ['create', 'edit', 'duplicate'], true);
         $usesTomSelect = $isPromotionFilterPage || ($_GET['route'] ?? '') === 'settings';
     ?>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Promora</title>
     <link rel="stylesheet" href="public/css/style.css">
-    <link rel="stylesheet" href="public/css/promotions.css">
+    <link rel="stylesheet" href="public/css/promotions.css?v=<?= filemtime(ROOT_PATH . 'public/css/promotions.css') ?>">
     <link rel="stylesheet" href="public/css/dashboard.css">
     <link rel="stylesheet" href="public/css/settings.css">
     <link rel="stylesheet" href="public/css/logs.css">
     <?php if ($usesTomSelect): ?>
         <link rel="stylesheet" href="public/vendor/tom-select/tom-select.css">
         <script src="public/vendor/tom-select/tom-select.complete.min.js"></script>
+    <?php endif; ?>
+    <?php if ($isPromotionFilterPage): ?>
+        <script src="public/js/promotion-product-picker.js?v=<?= filemtime(ROOT_PATH . 'public/js/promotion-product-picker.js') ?>"></script>
     <?php endif; ?>
 </head>
 <body>
