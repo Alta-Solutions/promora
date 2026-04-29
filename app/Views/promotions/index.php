@@ -87,6 +87,9 @@
                                 <button onclick="syncSingle(<?= $promo['id'] ?>)" class="btn-icon" title="Sinhronizuj odmah">
                                     🔄
                                 </button>
+                                <a href="?route=promotions&action=duplicate&id=<?= $promo['id'] ?>" class="btn-icon" title="Dupliraj">
+                                    &#x2398;
+                                </a>
                                 <a href="?route=promotions&action=edit&id=<?= $promo['id'] ?>" class="btn-icon" title="Izmeni">
                                     ✏️
                                 </a>

@@ -9,107 +9,165 @@ if (isset($filters['exclude']) && is_array($filters['exclude'])) {
     $excludeFilters = $filters['exclude'];
     unset($filters['exclude']);
 }
+
+$startDateTime = strtotime($promotion['start_date']);
+$endDateTime = strtotime($promotion['end_date']);
+$nameValue = $promotion['name'] ?? '';
+$customFieldValue = $promotion['custom_field_value'] ?? $nameValue;
+$descriptionValue = $promotion['description'] ?? '';
+$discountValue = $promotion['discount_percent'] ?? 0;
+$priorityValue = $promotion['priority'] ?? 0;
+$colorValue = $promotion['color'] ?: '#3b82f6';
 ?>
 
-<div class="card">
-    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #e5e7eb;">
-        <h3 class="card-title" style="font-size: 1.25rem; font-weight: 600; color: #111827; margin: 0;">Izmeni promociju</h3>
-        <a href="?route=promotions" class="btn btn-secondary" style="background: white; border: 1px solid #d1d5db; color: #374151; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-size: 0.9rem;">← Nazad</a>
+<div class="promotion-create-page">
+    <div class="promotion-page-heading">
+        <h2>Izmeni promociju</h2>
+        <div class="promotion-page-actions">
+            <a href="?route=promotions&action=duplicate&id=<?= $promotion['id'] ?>" class="promotion-back-link">Dupliraj</a>
+            <a href="?route=promotions" class="promotion-back-link">← Nazad</a>
+        </div>
     </div>
-    
-    <form method="POST" action="?route=promotions&action=edit&id=<?= $promotion['id'] ?>" id="promotionForm">
+
+    <form method="POST" action="?route=promotions&action=edit&id=<?= $promotion['id'] ?>" id="promotionForm" class="promotion-create-form">
         <?= \App\Support\Csrf::inputField() ?>
-        <!-- Osnovne informacije -->
-        <div style="background: #f9fafb; padding: 20px; border-radius: 8px; border: 1px solid #e5e7eb; margin-bottom: 20px;">
-            <h4 style="margin-top: 0; margin-bottom: 15px; font-size: 0.85rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">Osnovne informacije</h4>
-            
-            <div class="form-group" style="margin-bottom: 15px;">
-                <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: 500; color: #374151;">Interni naziv promocije <span style="color: #ef4444">*</span></label>
-                <input type="text" name="name" class="form-input" value="<?= htmlspecialchars($promotion['name']) ?>" required placeholder="npr. Letnja rasprodaja" style="width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px;">
-                <small style="color: #6b7280; font-size: 0.85em; display: block; margin-top: 4px;">Ovaj naziv se koristi samo unutar aplikacije.</small>
-            </div>
 
-            <div class="form-group" style="margin-bottom: 15px;">
-                <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: 500; color: #374151;">Vrijednost za BigCommerce custom field <span style="color: #ef4444">*</span></label>
-                <input type="text" name="custom_field_value" class="form-input" value="<?= htmlspecialchars($promotion['custom_field_value'] ?? $promotion['name']) ?>" required placeholder="npr. Akcija -20%" style="width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px;">
-                <small style="color: #6b7280; font-size: 0.85em; display: block; margin-top: 4px;">Ova vrijednost se šalje na BigCommerce kao sadržaj promotion custom field-a.</small>
-            </div>
+        <section class="promotion-card promotion-setup-card">
+            <div class="promotion-setup-grid">
+                <div class="promotion-setup-column">
+                    <h4 class="promotion-section-title">Osnovne informacije</h4>
 
-            <div class="form-group">
-                <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: 500; color: #374151;">Opis</label>
-                <textarea name="description" class="form-textarea" placeholder="Interna napomena..." style="width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px; min-height: 80px; font-family: inherit;"><?= htmlspecialchars($promotion['description'] ?? '') ?></textarea>
-            </div>
-        </div>
+                    <div class="form-group promotion-field">
+                        <label class="form-label">Interni naziv promocije <span class="required-marker">*</span></label>
+                        <input type="text" name="name" class="form-input" value="<?= htmlspecialchars($nameValue) ?>" required placeholder="npr. Letnja rasprodaja">
+                        <small class="promotion-field-help">Ovaj naziv se koristi samo unutar aplikacije.</small>
+                    </div>
 
-        <!-- Podešavanja -->
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-            <div style="background: white; padding: 20px; border-radius: 8px; border: 1px solid #e5e7eb;">
-                <h4 style="margin-top: 0; margin-bottom: 15px; font-size: 0.85rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">Detalji popusta</h4>
-                
-                <div class="form-group" style="margin-bottom: 15px;">
-                    <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: 500; color: #374151;">Popust (%) <span style="color: #ef4444">*</span></label>
-                    <div style="position: relative;">
-                        <input type="number" name="discount_percent" id="promo-discount" class="form-input" 
-                               value="<?= $promotion['discount_percent'] ?>"
-                               min="0" max="100" step="0.01" required style="width: 100%; padding: 10px; padding-right: 30px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 1.1em; font-weight: bold; color: #10b981;">
-                        <span style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: #6b7280;">%</span>
+                    <div class="form-group promotion-field">
+                        <label class="form-label">Vrijednost za BigCommerce custom field <span class="required-marker">*</span></label>
+                        <input type="text" name="custom_field_value" class="form-input" value="<?= htmlspecialchars($customFieldValue) ?>" required placeholder="npr. Akcija -20%">
+                        <small class="promotion-field-help">Ova vrijednost se šalje na BigCommerce kao sadržaj promotion custom field-a.</small>
+                    </div>
+
+                    <div class="form-group promotion-field">
+                        <label class="form-label">Opis</label>
+                        <textarea name="description" class="form-textarea promotion-description-input" placeholder="Interna napomena..."><?= htmlspecialchars($descriptionValue) ?></textarea>
                     </div>
                 </div>
 
-                <div class="form-group" style="margin-bottom: 15px;">
-                    <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: 500; color: #374151;">Prioritet</label>
-                    <input type="number" name="priority" class="form-input" value="<?= $promotion['priority'] ?>" min="0" style="width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px;">
-                    <small style="color: #6b7280; font-size: 0.85em; display: block; margin-top: 4px;">Veći broj = viši prioritet primene.</small>
-                </div>
-                
-                <div class="form-group">
-                    <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: 500; color: #374151;">Oznaka boje</label>
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <input type="color" name="color" class="color-picker" value="<?= $promotion['color'] ?>" style="height: 40px; width: 60px; padding: 0; border: none; border-radius: 4px; cursor: pointer;">
-                        <span style="font-size: 0.9em; color: #6b7280;">Koristi se za prikaz u kalendaru/listi.</span>
+                <div class="promotion-setup-column promotion-technical-column">
+                    <h4 class="promotion-section-title">Tehničke postavke promocije</h4>
+
+                    <div class="promotion-technical-grid">
+                        <div class="form-group promotion-field">
+                            <label class="form-label">Popust (%) <span class="required-marker">*</span></label>
+                            <div class="promotion-input-suffix">
+                                <input type="number" name="discount_percent" id="promo-discount" class="form-input" min="0" max="100" step="0.01" value="<?= htmlspecialchars($discountValue) ?>" required>
+                                <span>%</span>
+                            </div>
+                        </div>
+
+                        <div class="form-group promotion-field">
+                            <label class="form-label">Prioritet</label>
+                            <input type="number" name="priority" class="form-input" value="<?= htmlspecialchars($priorityValue) ?>" min="0">
+                        </div>
+
+                        <div class="form-group promotion-field promotion-full-field">
+                            <label class="form-label">Oznaka boje</label>
+                            <div class="promotion-color-row">
+                                <input type="color" name="color" class="color-picker promotion-color-input" value="<?= htmlspecialchars($colorValue) ?>">
+                                <span class="promotion-color-value" id="promotion-color-value"><?= htmlspecialchars(strtoupper($colorValue)) ?></span>
+                            </div>
+                        </div>
+
+                        <div class="form-group promotion-field promotion-full-field">
+                            <label class="form-label">Početak <span class="required-marker">*</span></label>
+                            <input type="hidden" name="start_date" id="start-date" value="<?= date('Y-m-d\TH:i', $startDateTime) ?>">
+                            <div class="promotion-datetime-picker js-promotion-datetime-picker" data-target="start-date">
+                                <input type="date" class="form-input js-promotion-date" value="<?= date('Y-m-d', $startDateTime) ?>" required>
+                                <select class="form-input promotion-time-select js-promotion-hour" data-selected="<?= date('H', $startDateTime) ?>" aria-label="Sat početka"></select>
+                                <span class="promotion-time-separator">:</span>
+                                <select class="form-input promotion-time-select js-promotion-minute" data-selected="<?= date('i', $startDateTime) ?>" aria-label="Minut početka"></select>
+                            </div>
+                        </div>
+
+                        <div class="form-group promotion-field promotion-full-field">
+                            <label class="form-label">Kraj <span class="required-marker">*</span></label>
+                            <input type="hidden" name="end_date" id="end-date" value="<?= date('Y-m-d\TH:i', $endDateTime) ?>">
+                            <div class="promotion-datetime-picker js-promotion-datetime-picker" data-target="end-date">
+                                <input type="date" class="form-input js-promotion-date" value="<?= date('Y-m-d', $endDateTime) ?>" required>
+                                <select class="form-input promotion-time-select js-promotion-hour" data-selected="<?= date('H', $endDateTime) ?>" aria-label="Sat kraja"></select>
+                                <span class="promotion-time-separator">:</span>
+                                <select class="form-input promotion-time-select js-promotion-minute" data-selected="<?= date('i', $endDateTime) ?>" aria-label="Minut kraja"></select>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
+        </section>
 
-            <div style="background: white; padding: 20px; border-radius: 8px; border: 1px solid #e5e7eb;">
-                <h4 style="margin-top: 0; margin-bottom: 15px; font-size: 0.85rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">Trajanje</h4>
-                
-                <div class="form-group" style="margin-bottom: 15px;">
-                    <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: 500; color: #374151;">Početak <span style="color: #ef4444">*</span></label>
-                    <input type="datetime-local" name="start_date" class="form-input" 
-                           value="<?= date('Y-m-d\TH:i', strtotime($promotion['start_date'])) ?>" required style="width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px;">
+        <div class="promotion-workspace-grid">
+            <section class="promotion-card promotion-filter-card">
+                <h3 class="promotion-card-title">Filteri proizvoda</h3>
+
+                <div class="promotion-filter-box">
+                    <div class="promotion-filter-box-header">
+                        <span>Koji proizvodi su na akciji?</span>
+                        <span class="promotion-info-dot" title="Uslovi koji uključuju proizvode u promociju.">i</span>
+                    </div>
+                    <div id="filter-list"></div>
+                    <button type="button" onclick="addFilter()" class="promotion-add-filter-button">
+                        + Dodaj uslov
+                    </button>
                 </div>
-                
-                <div class="form-group">
-                    <label class="form-label" style="display: block; margin-bottom: 5px; font-weight: 500; color: #374151;">Kraj <span style="color: #ef4444">*</span></label>
-                    <input type="datetime-local" name="end_date" class="form-input" 
-                           value="<?= date('Y-m-d\TH:i', strtotime($promotion['end_date'])) ?>" required style="width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px;">
+
+                <div class="promotion-filter-box promotion-filter-box-exclude">
+                    <div class="promotion-filter-box-header">
+                        <span>Exclude pravila</span>
+                        <span class="promotion-info-dot" title="Uslovi koji izuzimaju proizvode iz promocije.">i</span>
+                    </div>
+                    <div id="exclude-filter-list"></div>
+                    <button type="button" onclick="addFilter('exclude')" class="promotion-add-filter-button promotion-add-filter-button-exclude">
+                        + Dodaj exclude uslov
+                    </button>
                 </div>
-            </div>
-        </div>
 
-        <!-- Filteri -->
-        <div class="form-group">
-            <label class="form-label" style="display: block; margin-bottom: 10px; font-weight: 600; color: #111827; font-size: 1.1em;">Koji proizvodi su na akciji?</label>
-            <div class="filter-builder" style="background: #f9fafb; padding: 20px; border-radius: 8px; border: 1px solid #e5e7eb;">
-                <div id="filter-list"></div>
-                <button type="button" onclick="addFilter()" class="btn btn-secondary btn-sm" style="width: 100%; margin-top: 15px; border: 1px dashed #d1d5db; background: white; color: #6b7280; padding: 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">+ Dodaj uslov</button>
-            </div>
-        </div>
+                <input type="hidden" name="filters" id="filters-json">
 
-        <div class="form-group" style="margin-top: 20px;">
-            <label class="form-label" style="display: block; margin-bottom: 10px; font-weight: 600; color: #111827; font-size: 1.1em;">Exclude pravila</label>
-            <div class="filter-builder" style="background: #fff7ed; padding: 20px; border-radius: 8px; border: 1px solid #fed7aa;">
-                <div id="exclude-filter-list"></div>
-                <button type="button" onclick="addFilter('exclude')" class="btn btn-secondary btn-sm" style="width: 100%; margin-top: 15px; border: 1px dashed #fdba74; background: white; color: #9a3412; padding: 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">+ Dodaj exclude uslov</button>
-            </div>
-        </div>
-        
-        <input type="hidden" name="filters" id="filters-json">
+                <div class="promotion-form-actions">
+                    <a href="?route=promotions" class="btn btn-secondary">Otkaži</a>
+                    <button type="submit" class="btn btn-primary">Sačuvaj izmene</button>
+                </div>
+            </section>
 
-        <div style="display: flex; gap: 15px; justify-content: flex-end; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
-            <a href="?route=promotions" class="btn btn-secondary" style="padding: 10px 20px; background: white; border: 1px solid #d1d5db; color: #374151; border-radius: 6px; text-decoration: none;">Otkaži</a>
-            <button type="submit" class="btn btn-primary" style="padding: 10px 25px; background: #3b82f6; color: white; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 4px rgba(59, 130, 246, 0.3);">Sačuvaj izmene</button>
+            <section class="promotion-card promotion-preview-card">
+                <div class="promotion-preview-header">
+                    <h3 class="promotion-card-title">Pregled proizvoda (<span id="preview-count">0</span>)</h3>
+                    <button type="button" onclick="updatePreview()" class="btn btn-secondary promotion-refresh-button">
+                        Osveži listu
+                    </button>
+                </div>
+
+                <div class="promotion-preview-toolbar">
+                    <input type="search" id="preview-search" class="form-input promotion-preview-search" placeholder="Pretraži proizvod">
+                </div>
+
+                <div class="promotion-preview-table-wrap">
+                    <table class="table promotion-preview-table">
+                        <thead>
+                            <tr>
+                                <th>Naziv / SKU</th>
+                                <th>Cena</th>
+                                <th>Nova cena</th>
+                                <th>Zaliha</th>
+                            </tr>
+                        </thead>
+                        <tbody id="preview-table-body">
+                            <tr><td colspan="4" class="promotion-preview-empty">Učitavanje...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
         </div>
     </form>
 </div>
@@ -132,7 +190,85 @@ let isDestroyingTomSelectInstances = false;
 const PRODUCT_SKU_FILTER_TYPE = 'sku:in';
 const PRODUCT_SELECT_ALL_VALUE = '__promotion_select_all_product_search__';
 const PRODUCT_PARENT_SELECT_ALL_PREFIX = '__promotion_select_all_parent_variants__:';
-const STATIC_TOM_SELECT_FILTER_TYPES = ['categories:in', 'brand_id', PRODUCT_SKU_FILTER_TYPE];
+const STATIC_TOM_SELECT_FILTER_TYPES = ['categories:in', 'brand_id'];
+
+function padDateTimePart(value) {
+    return String(value).padStart(2, '0');
+}
+
+function populatePromotionTimeSelect(select, maxValue) {
+    if (!select || select.options.length > 0) {
+        return;
+    }
+
+    const selectedValue = padDateTimePart(select.dataset.selected || 0);
+    for (let value = 0; value <= maxValue; value++) {
+        const optionValue = padDateTimePart(value);
+        const option = new Option(optionValue, optionValue, false, optionValue === selectedValue);
+        select.add(option);
+    }
+}
+
+function syncPromotionDateTimePicker(picker) {
+    const target = document.getElementById(picker.dataset.target || '');
+    const dateInput = picker.querySelector('.js-promotion-date');
+    const hourSelect = picker.querySelector('.js-promotion-hour');
+    const minuteSelect = picker.querySelector('.js-promotion-minute');
+
+    if (!target || !dateInput || !hourSelect || !minuteSelect) {
+        return;
+    }
+
+    target.value = dateInput.value
+        ? `${dateInput.value}T${hourSelect.value}:${minuteSelect.value}`
+        : '';
+}
+
+function initializePromotionDateTimePickers() {
+    const pickers = document.querySelectorAll('.js-promotion-datetime-picker');
+
+    pickers.forEach(picker => {
+        const dateInput = picker.querySelector('.js-promotion-date');
+        const hourSelect = picker.querySelector('.js-promotion-hour');
+        const minuteSelect = picker.querySelector('.js-promotion-minute');
+
+        populatePromotionTimeSelect(hourSelect, 23);
+        populatePromotionTimeSelect(minuteSelect, 59);
+        syncPromotionDateTimePicker(picker);
+
+        [dateInput, hourSelect, minuteSelect].forEach(control => {
+            if (!control || control.dataset.datetimeBound === '1') {
+                return;
+            }
+
+            control.addEventListener('change', () => syncPromotionDateTimePicker(picker));
+            control.addEventListener('input', () => syncPromotionDateTimePicker(picker));
+            control.dataset.datetimeBound = '1';
+        });
+    });
+
+    const form = document.getElementById('promotionForm');
+    if (form && form.dataset.datetimeBound !== '1') {
+        form.addEventListener('submit', () => {
+            pickers.forEach(syncPromotionDateTimePicker);
+        });
+        form.dataset.datetimeBound = '1';
+    }
+}
+
+initializePromotionDateTimePickers();
+
+const promotionColorInput = document.querySelector('.promotion-color-input');
+const promotionColorValue = document.getElementById('promotion-color-value');
+
+if (promotionColorInput && promotionColorValue) {
+    const syncPromotionColorValue = () => {
+        promotionColorValue.textContent = promotionColorInput.value.toUpperCase();
+    };
+
+    promotionColorInput.addEventListener('input', syncPromotionColorValue);
+    syncPromotionColorValue();
+}
 
 function isCustomFieldFilter(type) {
     return String(type).startsWith('custom_field:');
@@ -146,6 +282,10 @@ function isProductSkuFilter(type) {
     return type === PRODUCT_SKU_FILTER_TYPE;
 }
 
+function isMultiValueFilter(type) {
+    return isTomSelectFilter(type) || isProductSkuFilter(type);
+}
+
 function isProductPseudoValue(value) {
     return value === PRODUCT_SELECT_ALL_VALUE || String(value).startsWith(PRODUCT_PARENT_SELECT_ALL_PREFIX);
 }
@@ -155,7 +295,7 @@ function getCustomFieldName(type) {
 }
 
 function getDefaultFilterValue(type) {
-    if (isTomSelectFilter(type)) {
+    if (isMultiValueFilter(type)) {
         return [];
     }
 
@@ -283,7 +423,7 @@ async function fetchProductOptions(query = '') {
     const params = new URLSearchParams();
     params.append('_csrf_token', csrfToken);
     params.append('q', query);
-    params.append('limit', '100');
+    params.append('limit', '200');
 
     const response = await fetch('?route=promotions&action=productOptions', {
         method: 'POST',
@@ -557,9 +697,9 @@ function initializeTomSelectInstances() {
                 render: {
                     option: function(data, escape) {
                         const countHtml = typeof data.count === 'number'
-                            ? `<span style="margin-left: auto; color: #6b7280; font-size: 12px;">${escape(String(data.count))}</span>`
+                            ? `<span class="promotion-filter-option-count">${escape(String(data.count))}</span>`
                             : '';
-                        return `<div style="display: flex; align-items: center; gap: 10px; width: 100%;"><span>${escape(data.label)}</span>${countHtml}</div>`;
+                        return `<div class="promotion-filter-option-row"><span>${escape(data.label)}</span>${countHtml}</div>`;
                     },
                     loading: function() {
                         return `
@@ -588,7 +728,7 @@ function initializeTomSelectInstances() {
 currentFilters = currentFilters.map(filter => ({
     ...filter,
     type: normalizeCustomFieldFilterType(filter.type),
-    value: isTomSelectFilter(normalizeCustomFieldFilterType(filter.type))
+    value: isMultiValueFilter(normalizeCustomFieldFilterType(filter.type))
         ? normalizeTomSelectValues(normalizeCustomFieldFilterType(filter.type), filter.value)
         : filter.value
 }));
@@ -596,7 +736,7 @@ currentFilters = currentFilters.map(filter => ({
 currentExcludeFilters = currentExcludeFilters.map(filter => ({
     ...filter,
     type: normalizeCustomFieldFilterType(filter.type),
-    value: isTomSelectFilter(normalizeCustomFieldFilterType(filter.type))
+    value: isMultiValueFilter(normalizeCustomFieldFilterType(filter.type))
         ? normalizeTomSelectValues(normalizeCustomFieldFilterType(filter.type), filter.value)
         : filter.value
 }));
@@ -668,7 +808,12 @@ function renderFilters() {
         return filterCollection.map((filter, index) => {
         let inputHtml = '';
         
-        if (isTomSelectFilter(filter.type)) {
+        if (isProductSkuFilter(filter.type)) {
+            const selectedSkus = normalizeTomSelectValues(filter.type, filter.value);
+            inputHtml = typeof renderProductSkuPickerControl === 'function'
+                ? renderProductSkuPickerControl(index, scopeAttribute, selectedSkus)
+                : `<input type="text" value="${escapeHtml(selectedSkus.join(', '))}" onchange="updateFilterValue(${index}, this.value, '${scopeAttribute}')" class="form-input">`;
+        } else if (isTomSelectFilter(filter.type)) {
             const selectedIds = new Set(normalizeTomSelectValues(filter.type, filter.value));
             const options = filter.type === 'categories:in'
                 ? categories
@@ -715,29 +860,29 @@ function renderFilters() {
                 <option value="false" ${String(filter.value) === 'false' ? 'selected' : ''}>Ne</option>
             </select>`;
         } else if (filter.type.includes('custom_field:') || filter.type === 'sku:in'){
-            inputHtml = `<input type="text" value="${filter.value || ''}" onchange="updateFilterValue(${index}, this.value, '${scopeAttribute}')" class="form-input">`;
+            inputHtml = `<input type="text" value="${escapeHtml(filter.value || '')}" onchange="updateFilterValue(${index}, this.value, '${scopeAttribute}')" class="form-input">`;
         } else {
-            inputHtml = `<input type="number" value="${filter.value || ''}" onchange="updateFilterValue(${index}, this.value, '${scopeAttribute}')" class="form-input">`;
+            inputHtml = `<input type="number" value="${escapeHtml(filter.value || '')}" onchange="updateFilterValue(${index}, this.value, '${scopeAttribute}')" class="form-input">`;
         }
         
         return `
-            <div class="filter-item promotion-filter-item" style="display: grid; grid-template-columns: 200px minmax(0, 1fr) 32px; gap: 10px; align-items: start; margin-bottom: 10px; background: white; padding: 10px; border: 1px solid #e5e7eb; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
-                <div>
-                    <label style="font-size: 11px; font-weight: 600; color: #6b7280; display: block; margin-bottom: 4px;">Tip uslova</label>
+            <div class="filter-item promotion-filter-item">
+                <div class="promotion-filter-type-field">
+                    <label class="promotion-filter-item-label">Tip uslova</label>
                     <select onchange="updateFilterType(${index}, this.value, '${scopeAttribute}')" class="form-input">
                         ${filterTypes.map(t => `
-                            <option value="${t.value}" ${filter.type === t.value ? 'selected' : ''}>
-                                ${t.label}
+                            <option value="${escapeHtml(t.value)}" ${filter.type === t.value ? 'selected' : ''}>
+                                ${escapeHtml(t.label)}
                             </option>
                         `).join('')}
                     </select>
                 </div>
-                <div style="min-width: 0;">
-                    <label style="font-size: 11px; font-weight: 600; color: #6b7280; display: block; margin-bottom: 4px;">Vrednost</label>
+                <div class="promotion-filter-value-field">
+                    <label class="promotion-filter-item-label">Vrednost</label>
                     ${inputHtml}
                 </div>
-                <div style="padding-top: 22px;">
-                    <button type="button" onclick="removeFilter(${index}, '${scopeAttribute}')" class="btn btn-danger btn-sm" style="width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center;" title="Ukloni">
+                <div class="promotion-filter-remove-field">
+                    <button type="button" onclick="removeFilter(${index}, '${scopeAttribute}')" class="promotion-filter-remove-button" title="Ukloni">
                         ×
                     </button>
                 </div>
@@ -778,48 +923,63 @@ document.getElementById('promotionForm').addEventListener('submit', function(e) 
 renderFilters();
 </script>
 
-<div class="card" style="margin-top: 20px; background: #f9fafb;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-        <h4>📦 Pregled proizvoda (<span id="preview-count">0</span>)</h4>
-        <div id="preview-total-savings" style="font-size: 14px; color: #10b981; font-weight: bold;"></div>
-    </div>
-    
-    <div style="max-height: 400px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; background: white;">
-        <table class="table" style="margin: 0; font-size: 13px;">
-            <thead style="position: sticky; top: 0; background: #f3f4f6; z-index: 1;">
-                <tr>
-                    <th>Naziv / SKU</th>
-                    <th style="text-align: right;">Cena</th>
-                    <th style="text-align: right;">Nova cena</th>
-                    <th style="text-align: center;">Zaliha</th>
-                </tr>
-            </thead>
-            <tbody id="preview-table-body">
-                <tr><td colspan="4" style="text-align: center; padding: 20px; color: #6b7280;">Učitavanje...</td></tr>
-            </tbody>
-        </table>
-    </div>
-    
-    <div style="margin-top: 10px; text-align: right;">
-        <button type="button" onclick="updatePreview()" class="btn btn-secondary btn-sm">
-            🔄 Osveži listu
-        </button>
-    </div>
-</div>
-
 <script>
 // Auto-update preview when filters change
 let previewTimeout;
+let previewProducts = [];
+
 function schedulePreviewUpdate() {
     clearTimeout(previewTimeout);
     previewTimeout = setTimeout(updatePreview, 1000); // Update after 1s of inactivity
 }
 
+function formatPreviewMoney(value) {
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? numericValue.toFixed(2) : '0.00';
+}
+
+function renderPreviewRows(products) {
+    const tbody = document.getElementById('preview-table-body');
+    const searchInput = document.getElementById('preview-search');
+    const searchTerm = (searchInput?.value || '').trim().toLowerCase();
+
+    if (!tbody) {
+        return;
+    }
+
+    const visibleProducts = searchTerm
+        ? products.filter(product => `${product.name || ''} ${product.sku || ''}`.toLowerCase().includes(searchTerm))
+        : products;
+
+    if (visibleProducts.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="promotion-preview-empty">Nema proizvoda koji odgovaraju filterima.</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = visibleProducts.map(product => `
+        <tr>
+            <td>
+                <div class="promotion-preview-name">${escapeHtml(product.name || '')}</div>
+                <div class="promotion-preview-sku">SKU: ${escapeHtml(product.sku || '')}</div>
+            </td>
+            <td class="promotion-preview-number">${formatPreviewMoney(product.original_price)}</td>
+            <td class="promotion-preview-number promotion-preview-new-price">
+                ${formatPreviewMoney(product.promo_price)}
+                <div class="promotion-preview-saving">-${formatPreviewMoney(product.savings)}</div>
+            </td>
+            <td class="promotion-preview-stock">${escapeHtml(product.inventory ?? '')}</td>
+        </tr>
+    `).join('');
+}
+
+function applyPreviewSearch() {
+    renderPreviewRows(previewProducts);
+}
+
 async function updatePreview() {
     const filtersObj = buildFiltersPayload();
-    
     const discount = document.getElementById('promo-discount').value || 0;
-    
+
     try {
         const params = new URLSearchParams();
         params.append('_csrf_token', csrfToken);
@@ -831,41 +991,23 @@ async function updatePreview() {
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: params
         });
-        
+
         const result = await response.json();
-        const tbody = document.getElementById('preview-table-body');
-        
+
         if (result.success) {
             const data = result.data;
-            const products = data.products || [];
-            
+            previewProducts = data.products || [];
             document.getElementById('preview-count').textContent = data.total_products;
-            
-            if (products.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; padding: 20px; color: #6b7280;">Nema proizvoda koji odgovaraju filterima.</td></tr>';
-                return;
-            }
-
-            tbody.innerHTML = products.map(p => `
-                <tr>
-                    <td>
-                        <div style="font-weight: 600;">${p.name}</div>
-                        <div style="color: #6b7280; font-size: 11px;">SKU: ${p.sku}</div>
-                    </td>
-                    <td style="text-align: right;">${parseFloat(p.original_price).toFixed(2)}</td>
-                    <td style="text-align: right; color: #10b981; font-weight: bold;">
-                        ${parseFloat(p.promo_price).toFixed(2)}
-                        <div style="font-size: 10px; color: #ef4444;">-${parseFloat(p.savings).toFixed(2)}</div>
-                    </td>
-                    <td style="text-align: center;">${p.inventory}</td>
-                </tr>
-            `).join('');
+            renderPreviewRows(previewProducts);
         }
     } catch (error) {
         console.error('Preview error:', error);
-        document.getElementById('preview-table-body').innerHTML = '<tr><td colspan="4" style="text-align: center; color: red;">Greška pri učitavanju.</td></tr>';
+        document.getElementById('preview-table-body').innerHTML = '<tr><td colspan="4" class="promotion-preview-empty promotion-preview-error">Greška pri učitavanju.</td></tr>';
     }
 }
+
+document.getElementById('preview-search')?.addEventListener('input', applyPreviewSearch);
+document.getElementById('promo-discount')?.addEventListener('input', schedulePreviewUpdate);
 
 setTimeout(updatePreview, 500);
 </script>

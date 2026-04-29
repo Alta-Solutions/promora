@@ -133,7 +133,7 @@
 .ts-dropdown .optgroup-header,
 .ts-dropdown .no-results,
 .ts-dropdown .create {
-  padding: 5px 8px;
+  padding: 7px 8px;
 }
 .ts-dropdown .option, .ts-dropdown [data-disabled], .ts-dropdown [data-disabled] [data-selectable].option {
   cursor: inherit;

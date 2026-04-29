@@ -105,7 +105,13 @@ class SyncController {
         }
         
         // Kreiraj Job u bazi (Queue) sa odgovarajućim tipom
-        $jobId = $queue->createJob($jobType, $promotionId, $totalItems > 0 ? $totalItems : 1);
+        if ($jobType === 'cleanup_single') {
+            $cleanupJob = $this->promotionService->queuePromotionCleanup($promotionId);
+            $jobId = $cleanupJob['job_id'];
+            $totalItems = $cleanupJob['total'];
+        } else {
+            $jobId = $queue->createJob($jobType, $promotionId, $totalItems > 0 ? $totalItems : 1);
+        }
         
         header('Content-Type: application/json');
         echo json_encode([
