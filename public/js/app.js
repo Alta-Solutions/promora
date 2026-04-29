@@ -29,7 +29,7 @@ function showLoading(elementId) {
         element.innerHTML = `
             <div class="app-loading">
                 <div class="spinner"></div>
-                Učitavanje...
+                ${appT('common.loading')}
             </div>
         `;
     }
@@ -38,7 +38,7 @@ function showLoading(elementId) {
 // Format date
 function formatDate(dateString) {
     const date = new Date(dateString);
-    return date.toLocaleDateString('sr-RS', {
+    return date.toLocaleDateString(window.appLocale || 'sr-RS', {
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
@@ -49,7 +49,7 @@ function formatDate(dateString) {
 
 // Format number
 function formatNumber(num) {
-    return new Intl.NumberFormat('sr-RS').format(num);
+    return new Intl.NumberFormat(window.appLocale || 'sr-RS').format(num);
 }
 
 // Confirm dialog

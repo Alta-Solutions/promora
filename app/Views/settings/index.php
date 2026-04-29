@@ -5,8 +5,8 @@ $cacheStats = $cacheService->getCacheStats();
 
 <div class="page-header">
     <div>
-        <h2 class="page-title">Podesavanja</h2>
-        <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;">Konfiguracija aplikacije i odrzavanje sistema</p>
+        <h2 class="page-title"><?= trans_e('settings.title') ?></h2>
+        <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;"><?= trans_e('settings.subtitle') ?></p>
     </div>
 </div>
 
@@ -22,31 +22,44 @@ $cacheStats = $cacheService->getCacheStats();
         <?= \App\Support\Csrf::inputField() ?>
         <div class="settings-card" style="margin-bottom: 30px;">
             <div class="settings-header">
-                <h3 style="margin: 0; font-size: 1.1rem; color: #111827;">Konfiguracija Modula</h3>
-                <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 0.85rem;">Podesavanja za pracenje cena i filtere za promocije.</p>
+                <h3 style="margin: 0; font-size: 1.1rem; color: #111827;"><?= trans_e('settings.module_configuration') ?></h3>
+                <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 0.85rem;"><?= trans_e('settings.module_configuration_help') ?></p>
             </div>
 
             <div class="settings-body">
                 <div class="settings-group" style="padding-bottom: 24px; margin-bottom: 24px; border-bottom: 1px solid #e5e7eb;">
-                    <label class="settings-label">Omnibus Price Tracker</label>
+                    <label class="settings-label" for="settings-language"><?= trans_e('settings.language_label') ?></label>
+                    <select id="settings-language" name="language" class="form-input" style="max-width: 280px;">
+                        <?php foreach (($availableLanguages ?? []) as $languageCode => $language): ?>
+                            <option value="<?= htmlspecialchars($languageCode, ENT_QUOTES, 'UTF-8') ?>" <?= ($currentLanguage ?? '') === $languageCode ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($language['native_name'] ?? $language['name'] ?? strtoupper($languageCode), ENT_QUOTES, 'UTF-8') ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <div class="settings-helper" style="margin-top: 8px;">
+                        <?= trans_e('settings.language_helper') ?>
+                    </div>
+                </div>
+
+                <div class="settings-group" style="padding-bottom: 24px; margin-bottom: 24px; border-bottom: 1px solid #e5e7eb;">
+                    <label class="settings-label"><?= trans_e('settings.omnibus_tracker') ?></label>
                     <p class="settings-helper" style="margin-bottom: 16px;">
-                        Prati promene cena i automatski prikazuje najnizu cenu u poslednjih 30 dana kao custom field pod nazivom <code>lowest_price_30d</code>.
+                        <?= trans_e('settings.omnibus_help') ?> <code>lowest_price_30d</code>.
                     </p>
                     <label class="switch">
                         <input type="checkbox" name="enable_omnibus" <?= $enableOmnibus ? 'checked' : '' ?>>
                         <span class="slider round"></span>
                     </label>
                     <span style="margin-left: 12px; vertical-align: middle; color: #374151; position: relative; top: -7px;">
-                        Aktiviraj Omnibus Price Tracker
+                        <?= trans_e('settings.enable_omnibus') ?>
                     </span>
 
                     <div style="margin-top: 20px; padding-top: 20px; border-top: 1px dashed #d1d5db;">
                         <div style="display: flex; justify-content: space-between; gap: 16px; align-items: center; flex-wrap: wrap;">
                             <div>
-                                <div class="settings-label" style="margin-bottom: 6px;">Rucni Omnibus Sync</div>
+                                <div class="settings-label" style="margin-bottom: 6px;"><?= trans_e('settings.manual_omnibus_sync') ?></div>
                                 <div class="settings-helper" style="margin: 0;">
-                                    Kreira queue job za osvezavanje <code>lowest_price_30d</code> za sve parent proizvode u ovoj instanci.
-                                    Worker mora biti dostupan da bi job bio obradjen.
+                                    <?= trans_e('settings.manual_omnibus_sync_help') ?>
                                 </div>
                             </div>
 
@@ -56,13 +69,13 @@ $cacheStats = $cacheService->getCacheStats();
                                     class="btn btn-secondary"
                                     style="background: white; color: #374151; border: 1px solid #d1d5db;"
                                     <?= (!$enableOmnibus || !empty($activeOmnibusJob)) ? 'disabled' : '' ?>>
-                                Pokreni Omnibus Sync
+                                <?= trans_e('settings.start_omnibus_sync') ?>
                             </button>
                         </div>
 
                         <?php if (!$enableOmnibus): ?>
                             <div class="settings-helper" style="margin-top: 12px; color: #991b1b;">
-                                Rucni sync nije dostupan dok Omnibus Price Tracker nije aktiviran.
+                                <?= trans_e('settings.manual_sync_disabled') ?>
                             </div>
                         <?php elseif (!empty($activeOmnibusJob)): ?>
                             <?php
@@ -71,27 +84,31 @@ $cacheStats = $cacheService->getCacheStats();
                                 : 0;
                             ?>
                             <div style="margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8;">
-                                Omnibus job #<?= (int)$activeOmnibusJob['id'] ?> je trenutno
+                                <?= trans_e('settings.job_status', ['id' => (int)$activeOmnibusJob['id']]) ?>
                                 <strong><?= htmlspecialchars($activeOmnibusJob['status']) ?></strong>.
-                                Obrada: <?= (int)$activeOmnibusJob['processed_items'] ?>/<?= (int)$activeOmnibusJob['total_items'] ?> (<?= $jobPercentage ?>%).
+                                <?= trans_e('settings.job_progress', [
+                                    'processed' => (int)$activeOmnibusJob['processed_items'],
+                                    'total' => (int)$activeOmnibusJob['total_items'],
+                                    'percentage' => $jobPercentage,
+                                ]) ?>
                             </div>
                         <?php else: ?>
                             <div class="settings-helper" style="margin-top: 12px;">
-                                Trenutno nema aktivnog Omnibus sync job-a za ovu instancu.
+                                <?= trans_e('settings.no_active_job') ?>
                             </div>
                         <?php endif; ?>
                     </div>
                 </div>
 
                 <div class="settings-group">
-                    <label class="settings-label">Filteri za Promocije</label>
+                    <label class="settings-label"><?= trans_e('settings.promotion_filters') ?></label>
                     <?php $selectedAllowedFilters = $settings['allowed_filters'] ?? []; ?>
                     <select
                         id="settings-custom-fields"
                         name="custom_fields[]"
                         multiple
                         class="settings-custom-fields-select"
-                        placeholder="Izaberite custom field filtere">
+                        placeholder="<?= trans_e('settings.custom_fields_placeholder') ?>">
                         <?php foreach (($availableCustomFieldFilters ?? []) as $filter): ?>
                             <?php
                             $filterName = (string)($filter['name'] ?? '');
@@ -110,13 +127,12 @@ $cacheStats = $cacheService->getCacheStats();
                     </select>
 
                     <div class="settings-helper">
-                        Izaberite custom field nazive pronadjene u lokalnom cache-u proizvoda.
-                        Ako lista nije azurna, pokrenite Product Cache sync.
+                        <?= trans_e('settings.custom_fields_helper') ?>
                     </div>
                 </div>
 
                 <div class="settings-group" style="margin-top: 24px;">
-                    <label class="settings-label">Naziv Promotion Custom Field-a</label>
+                    <label class="settings-label"><?= trans_e('settings.promotion_custom_field_name') ?></label>
                     <input type="text"
                            name="promotion_custom_field_name"
                            class="form-input"
@@ -124,16 +140,16 @@ $cacheStats = $cacheService->getCacheStats();
                            placeholder="<?= htmlspecialchars(\Config::$CUSTOM_FIELD_NAME) ?>">
 
                     <div class="settings-helper">
-                        Naziv custom field-a koji se koristi na BigCommerce proizvodima za promocije.<br>
-                        Ako ostane prazno, koristi se default iz <code>.env</code>: <code><?= htmlspecialchars(\Config::$CUSTOM_FIELD_NAME) ?></code>.<br>
-                        Promena naziva nije dozvoljena dok postoje aktivne promocije za ovu instancu.
+                        <?= trans_e('settings.promotion_custom_field_helper_1') ?><br>
+                        <?= trans_e('settings.promotion_custom_field_helper_2') ?> <code><?= htmlspecialchars(\Config::$CUSTOM_FIELD_NAME) ?></code>.<br>
+                        <?= trans_e('settings.promotion_custom_field_helper_3') ?>
                     </div>
                 </div>
             </div>
 
             <div style="background: #f9fafb; padding: 16px 24px; border-top: 1px solid #e5e7eb; text-align: right;">
                 <button type="submit" class="btn btn-primary">
-                    Sacuvaj izmene
+                    <?= trans_e('common.save_changes') ?>
                 </button>
             </div>
         </div>
@@ -141,22 +157,22 @@ $cacheStats = $cacheService->getCacheStats();
 
     <div class="settings-card" style="margin-bottom: 30px;">
         <div class="settings-header">
-            <h3 style="margin: 0; font-size: 1.1rem; color: #111827;">Product Cache</h3>
-            <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 0.85rem;">Status lokalne baze proizvoda.</p>
+            <h3 style="margin: 0; font-size: 1.1rem; color: #111827;"><?= trans_e('settings.product_cache') ?></h3>
+            <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 0.85rem;"><?= trans_e('settings.product_cache_help') ?></p>
         </div>
 
         <div class="settings-body">
             <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 20px;">
                 <div style="background: #f9fafb; padding: 15px; border-radius: 8px; border: 1px solid #e5e7eb;">
-                    <div style="font-size: 0.75rem; color: #6b7280; text-transform: uppercase; font-weight: 600;">Ukupno</div>
+                    <div style="font-size: 0.75rem; color: #6b7280; text-transform: uppercase; font-weight: 600;"><?= trans_e('settings.total') ?></div>
                     <div style="font-size: 1.5rem; font-weight: 700; color: #111827;"><?= number_format($cacheStats['total_products']) ?></div>
                 </div>
                 <div style="background: #f9fafb; padding: 15px; border-radius: 8px; border: 1px solid #e5e7eb;">
-                    <div style="font-size: 0.75rem; color: #6b7280; text-transform: uppercase; font-weight: 600;">Vidljivi</div>
+                    <div style="font-size: 0.75rem; color: #6b7280; text-transform: uppercase; font-weight: 600;"><?= trans_e('settings.visible') ?></div>
                     <div style="font-size: 1.5rem; font-weight: 700; color: #10b981;"><?= number_format($cacheStats['visible_products']) ?></div>
                 </div>
                 <div style="background: #f9fafb; padding: 15px; border-radius: 8px; border: 1px solid #e5e7eb;">
-                    <div style="font-size: 0.75rem; color: #6b7280; text-transform: uppercase; font-weight: 600;">Azurirano</div>
+                    <div style="font-size: 0.75rem; color: #6b7280; text-transform: uppercase; font-weight: 600;"><?= trans_e('settings.updated') ?></div>
                     <div style="font-size: 1rem; font-weight: 600; color: #374151; margin-top: 5px;">
                         <?= $cacheStats['last_cached'] ? date('d.m. H:i', strtotime($cacheStats['last_cached'])) : '-' ?>
                     </div>
@@ -164,14 +180,14 @@ $cacheStats = $cacheService->getCacheStats();
             </div>
 
             <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                <a href="?route=cache&action=fullSync" class="btn btn-primary" onclick="return confirm('Full sync moze trajati nekoliko minuta. Nastaviti?')">
-                    Full Sync
+                <a href="?route=cache&action=fullSync" class="btn btn-primary" onclick="return confirm(appT('settings.confirm_full_sync'))">
+                    <?= trans_e('settings.full_sync') ?>
                 </a>
                 <button onclick="quickSync()" class="btn btn-secondary" style="background: white; color: #374151; border: 1px solid #d1d5db;">
-                    Quick Sync
+                    <?= trans_e('settings.quick_sync') ?>
                 </button>
                 <button onclick="clearCache()" class="btn btn-danger" style="margin-left: auto;">
-                    Ocisti
+                    <?= trans_e('settings.clear') ?>
                 </button>
             </div>
         </div>
@@ -180,15 +196,15 @@ $cacheStats = $cacheService->getCacheStats();
     <div class="settings-card" style="margin-bottom: 30px;">
         <div class="settings-header" style="display: flex; justify-content: space-between; align-items: center;">
             <div>
-                <h3 style="margin: 0; font-size: 1.1rem; color: #111827;">Webhooks</h3>
-                <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 0.85rem;">Automatska sinhronizacija izmena.</p>
+                <h3 style="margin: 0; font-size: 1.1rem; color: #111827;"><?= trans_e('settings.webhooks') ?></h3>
+                <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 0.85rem;"><?= trans_e('settings.webhooks_help') ?></p>
             </div>
             <div>
                 <a href="?route=cache&action=debugWebhooks" class="btn btn-sm btn-secondary" style="margin-right: 5px;">
-                    Proveri na BC
+                    <?= trans_e('settings.check_on_bc') ?>
                 </a>
-                <a href="?route=cache&action=registerWebhooks" class="btn btn-sm btn-success" onclick="return confirm('Registrovati webhook-ove?')">
-                    Registruj
+                <a href="?route=cache&action=registerWebhooks" class="btn btn-sm btn-success" onclick="return confirm(appT('settings.confirm_register_webhooks'))">
+                    <?= trans_e('settings.register') ?>
                 </a>
             </div>
         </div>
@@ -203,9 +219,9 @@ $cacheStats = $cacheService->getCacheStats();
                 <table class="table" style="margin: 0;">
                     <thead style="background: #f9fafb;">
                         <tr>
-                            <th style="padding: 12px 24px; font-size: 0.75rem; color: #6b7280;">Scope</th>
-                            <th style="padding: 12px 24px; font-size: 0.75rem; color: #6b7280;">Status</th>
-                            <th style="padding: 12px 24px; font-size: 0.75rem; color: #6b7280; text-align: right;">Akcija</th>
+                            <th style="padding: 12px 24px; font-size: 0.75rem; color: #6b7280;"><?= trans_e('common.scope') ?></th>
+                            <th style="padding: 12px 24px; font-size: 0.75rem; color: #6b7280;"><?= trans_e('common.status') ?></th>
+                            <th style="padding: 12px 24px; font-size: 0.75rem; color: #6b7280; text-align: right;"><?= trans_e('settings.action') ?></th>
                         </tr>
                     </thead>
                     <tbody>
@@ -215,12 +231,12 @@ $cacheStats = $cacheService->getCacheStats();
                                     <code style="background: #eff6ff; color: #1e40af; padding: 2px 6px; border-radius: 4px; font-size: 0.85em;"><?= htmlspecialchars($webhook['scope']) ?></code>
                                 </td>
                                 <td style="padding: 16px 24px; border-bottom: 1px solid #e5e7eb;">
-                                    <span class="badge badge-success">Aktivan</span>
+                                    <span class="badge badge-success"><?= trans_e('settings.active') ?></span>
                                 </td>
                                 <td style="padding: 16px 24px; border-bottom: 1px solid #e5e7eb; text-align: right;">
                                     <form action="?route=cache&action=unregisterWebhooks" method="POST" style="display: inline;">
                                         <input type="hidden" name="id" value="<?= (int)$webhook['id'] ?>">
-                                        <button type="submit" class="btn btn-sm btn-danger" style="padding: 4px 8px; font-size: 0.75rem;" onclick="return confirm('Obrisi?')">Obrisi</button>
+                                        <button type="submit" class="btn btn-sm btn-danger" style="padding: 4px 8px; font-size: 0.75rem;" onclick="return confirm(appT('settings.confirm_delete'))"><?= trans_e('common.delete') ?></button>
                                     </form>
                                 </td>
                             </tr>
@@ -229,7 +245,7 @@ $cacheStats = $cacheService->getCacheStats();
                 </table>
             <?php else: ?>
                 <div style="padding: 30px; text-align: center; color: #6b7280;">
-                    Nema aktivnih webhook-ova.
+                    <?= trans_e('settings.no_webhooks') ?>
                 </div>
             <?php endif; ?>
         </div>
@@ -237,20 +253,20 @@ $cacheStats = $cacheService->getCacheStats();
 
     <div class="settings-card">
         <div class="settings-header">
-            <h3 style="margin: 0; font-size: 1.1rem; color: #111827;">Sistemske informacije</h3>
+            <h3 style="margin: 0; font-size: 1.1rem; color: #111827;"><?= trans_e('settings.system_information') ?></h3>
         </div>
         <div class="settings-body">
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
                 <div>
-                    <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 4px;">Store Hash</div>
+                    <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 4px;"><?= trans_e('common.store_hash') ?></div>
                     <code style="background: #f3f4f6; padding: 4px 8px; border-radius: 4px;"><?= $_SESSION['store_hash'] ?? '-' ?></code>
                 </div>
                 <div>
-                    <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 4px;">PHP Verzija</div>
+                    <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 4px;"><?= trans_e('common.php_version') ?></div>
                     <div style="font-weight: 500;"><?= phpversion() ?></div>
                 </div>
                 <div>
-                    <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 4px;">App URL</div>
+                    <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 4px;"><?= trans_e('common.app_url') ?></div>
                     <div style="font-size: 0.9rem; color: #374151; word-break: break-all;"><?= \Config::$APP_URL ?></div>
                 </div>
             </div>
@@ -258,31 +274,31 @@ $cacheStats = $cacheService->getCacheStats();
     </div>
 
     <div style="margin-top: 30px; text-align: center; color: #9ca3af; font-size: 0.8rem;">
-        Promotion Manager v1.0.2 | Powered by BigCommerce
+        <?= trans_e('settings.footer') ?>
     </div>
 </div>
 
 <script>
 async function quickSync() {
-    if (!confirm('Sinhronizovati izmenjene proizvode?')) return;
+    if (!confirm(appT('settings.confirm_quick_sync'))) return;
 
     const btn = event.target;
     const originalText = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = 'Sync...';
+    btn.innerHTML = appT('settings.sync_loading');
 
     try {
         const response = await fetch('?route=cache&action=quickSync');
         const result = await response.json();
 
         if (result.success) {
-            alert('Sync zavrsen.\n\nAzurirano: ' + result.updated + ' proizvoda');
+            alert(appT('settings.sync_done', { updated: result.updated }));
             location.reload();
         } else {
-            alert('Greska: ' + result.error);
+            alert(appT('common.error') + ': ' + result.error);
         }
     } catch (error) {
-        alert('Greska: ' + error.message);
+        alert(appT('common.error') + ': ' + error.message);
     } finally {
         btn.disabled = false;
         btn.innerHTML = originalText;
@@ -290,18 +306,18 @@ async function quickSync() {
 }
 
 async function clearCache() {
-    if (!confirm('Ovo ce obrisati sve kesirane proizvode. Nastaviti?')) return;
+    if (!confirm(appT('settings.confirm_clear_cache'))) return;
 
     try {
         const response = await fetch('?route=cache&action=clearCache', { method: 'POST' });
         const result = await response.json();
 
         if (result.success) {
-            alert('Cache ociscen.');
+            alert(appT('settings.cache_cleared'));
             location.reload();
         }
     } catch (error) {
-        alert('Greska: ' + error.message);
+        alert(appT('common.error') + ': ' + error.message);
     }
 }
 
@@ -330,7 +346,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const customFieldsTomSelect = new TomSelect(customFieldsSelect, {
         plugins: {
             remove_button: {
-                title: 'Ukloni filter'
+                title: appT('settings.remove_filter')
             }
         },
         copyClassesToDropdown: false,
@@ -338,7 +354,7 @@ document.addEventListener('DOMContentLoaded', function() {
         closeAfterSelect: false,
         hideSelected: false,
         maxItems: null,
-        placeholder: customFieldsSelect.getAttribute('placeholder') || 'Izaberite custom field filtere',
+        placeholder: customFieldsSelect.getAttribute('placeholder') || appT('settings.custom_fields_placeholder'),
         onChange: function(values) {
             selectedCustomFields.clear();
             (Array.isArray(values) ? values : [values]).forEach(value => {
@@ -358,7 +374,7 @@ document.addEventListener('DOMContentLoaded', function() {
             option: function(data, escape) {
                 const count = Number(data.count || customFieldCounts[data.value] || 0);
                 const countHtml = count > 0
-                    ? `<span class="settings-custom-field-count">${escape(String(count))} proizvoda</span>`
+                    ? `<span class="settings-custom-field-count">${escape(appT('settings.products_count', { count }))}</span>`
                     : '';
                 const checked = selectedCustomFields.has(String(data.value)) ? 'checked' : '';
 

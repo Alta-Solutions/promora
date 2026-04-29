@@ -1,7 +1,7 @@
 <div class="page-header">
     <div>
-        <h2 class="page-title">Dashboard</h2>
-        <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;">Pregled stanja prodavnice i aktivnih akcija</p>
+        <h2 class="page-title"><?= trans_e('dashboard.title') ?></h2>
+        <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;"><?= trans_e('dashboard.subtitle') ?></p>
     </div>
     <div style="font-size: 0.85rem; color: #6b7280; background: white; padding: 6px 12px; border-radius: 20px; border: 1px solid #e5e7eb;">
         📅 <?= date('d.m.Y') ?>
@@ -11,21 +11,21 @@
 <!-- Statistika -->
 <div class="stats-grid">
     <div class="stat-card">
-        <div class="stat-label">Ukupno promocija</div>
+        <div class="stat-label"><?= trans_e('dashboard.stats_total_promotions') ?></div>
         <div class="stat-value"><?= $stats['total_promotions'] ?></div>
     </div>
     <div class="stat-card">
-        <div class="stat-label" style="color: #10b981;">Aktivne promocije</div>
+        <div class="stat-label" style="color: #10b981;"><?= trans_e('dashboard.stats_active_promotions') ?></div>
         <div class="stat-value" style="color: #10b981;"><?= $stats['active_promotions'] ?></div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Proizvoda u promociji</div>
+        <div class="stat-label"><?= trans_e('dashboard.stats_products_in_promotion') ?></div>
         <div class="stat-value"><?= $stats['total_products'] ?></div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Poslednja sinhronizacija</div>
+        <div class="stat-label"><?= trans_e('dashboard.stats_last_sync') ?></div>
         <div class="stat-value" style="font-size: 1.2rem; margin-top: 8px;">
-            <?= $stats['last_sync'] ? date('d.m.Y H:i', strtotime($stats['last_sync'])) : 'Nikad' ?>
+            <?= $stats['last_sync'] ? date('d.m.Y H:i', strtotime($stats['last_sync'])) : trans_e('common.never') ?>
         </div>
     </div>
 </div>
@@ -35,7 +35,7 @@
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
         <div style="display: flex; align-items: center; gap: 10px;">
             <div class="spinner" style="width: 20px; height: 20px; border-width: 2px; margin: 0;"></div>
-            <h4 id="sync-title" style="margin: 0; font-size: 1rem;">Sinhronizacija u toku...</h4>
+            <h4 id="sync-title" style="margin: 0; font-size: 1rem;"><?= trans_e('dashboard.sync_in_progress') ?></h4>
         </div>
         <span id="sync-stats" style="font-weight: bold; color: #3b82f6;">0 / 0</span>
     </div>
@@ -43,7 +43,7 @@
     <div class="progress-track">
         <div id="sync-bar" class="progress-fill"></div>
     </div>
-    <p id="sync-msg" style="font-size: 12px; color: #6b7280; margin-top: 8px;">Proces neće biti prekinut ukoliko zatvorite aplikaciju.</p>
+    <p id="sync-msg" style="font-size: 12px; color: #6b7280; margin-top: 8px;"><?= trans_e('dashboard.sync_not_interrupted') ?></p>
 </div>
 
 <!-- Glavni sadržaj -->
@@ -51,7 +51,7 @@
     
     <!-- Lista aktivnih promocija -->
     <div>
-        <h3 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; color: #374151;">Aktivne promocije</h3>
+        <h3 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; color: #374151;"><?= trans_e('dashboard.active_promotions') ?></h3>
         <div class="active-promos-list">
             <?php if (!empty($activePromotions)): ?>
                 <?php foreach ($activePromotions as $promo): ?>
@@ -67,14 +67,14 @@
                         </div>
                         <div style="text-align: right;">
                             <div style="font-weight: 700; color: #10b981; font-size: 1.1rem;"><?= $promo['discount_percent'] ?>%</div>
-                            <div style="font-size: 0.75rem; color: #6b7280;">Prioritet: <?= $promo['priority'] ?></div>
+                            <div style="font-size: 0.75rem; color: #6b7280;"><?= trans_e('dashboard.priority_label', ['priority' => $promo['priority']]) ?></div>
                         </div>
                     </div>
                 <?php endforeach; ?>
             <?php else: ?>
                 <div style="padding: 40px; text-align: center; color: #6b7280;">
                     <div style="font-size: 2rem; margin-bottom: 10px;">💤</div>
-                    Trenutno nema aktivnih promocija.
+                    <?= trans_e('dashboard.no_active_promotions') ?>
                 </div>
             <?php endif; ?>
         </div>
@@ -82,24 +82,24 @@
 
     <!-- Brze akcije -->
     <div>
-        <h3 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; color: #374151;">Brze akcije</h3>
+        <h3 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; color: #374151;"><?= trans_e('dashboard.quick_actions') ?></h3>
         <div class="action-card" style="flex-direction: column; align-items: flex-start; gap: 15px;">
             <div>
-                <div style="font-weight: 600; margin-bottom: 4px;">Globalna sinhronizacija</div>
-                <p style="font-size: 0.85rem; color: #6b7280; margin: 0;">Osvežite cene za sve aktivne promocije odjednom.</p>
+                <div style="font-weight: 600; margin-bottom: 4px;"><?= trans_e('dashboard.global_sync') ?></div>
+                <p style="font-size: 0.85rem; color: #6b7280; margin: 0;"><?= trans_e('dashboard.global_sync_help') ?></p>
             </div>
             <button onclick="syncAll()" class="btn btn-primary" style="width: 100%; justify-content: center; display: flex; align-items: center; gap: 8px;">
-                🔄 Sinhronizuj sve
+                🔄 <?= trans_e('dashboard.sync_all') ?>
             </button>
         </div>
         
         <div class="action-card" style="margin-top: 20px; flex-direction: column; align-items: flex-start; gap: 15px;">
             <div>
-                <div style="font-weight: 600; margin-bottom: 4px;">Nova promocija</div>
-                <p style="font-size: 0.85rem; color: #6b7280; margin: 0;">Kreirajte novu kampanju sa popustima.</p>
+                <div style="font-weight: 600; margin-bottom: 4px;"><?= trans_e('dashboard.new_promotion') ?></div>
+                <p style="font-size: 0.85rem; color: #6b7280; margin: 0;"><?= trans_e('dashboard.new_promotion_help') ?></p>
             </div>
             <a href="?route=promotions&action=create" class="btn btn-secondary" style="width: 100%; text-align: center; background: white; color: #374151; border: 1px solid #d1d5db;">
-                + Kreiraj
+                + <?= trans_e('common.create') ?>
             </a>
         </div>
     </div>
@@ -109,23 +109,23 @@
 let syncInterval = null;
 
 async function syncAll() {
-    if (!confirm('Da li želite da sinhronizujete sve aktivne promocije?')) return;
+    if (!confirm(appT('dashboard.confirm_sync_all'))) return;
     
     const btn = event.target;
     const originalText = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = '⏳ Pokretanje...';
+    btn.innerHTML = '⏳ ' + appT('dashboard.starting');
     
     try {
         const response = await fetch('?route=api&action=sync_all');
         const result = await response.json();
         
         if (result.success) {
-            alert('✅ ' + result.result.message + '\n\nPoslovi su dodati u red i biće obrađeni u pozadini.');
+            alert('✅ ' + result.result.message + '\n\n' + appT('dashboard.sync_all_added'));
             startPolling(); // Restartujemo proveru statusa
         }
     } catch (error) {
-        alert('❌ Greška: ' + error.message);
+        alert('❌ ' + appT('common.error') + ': ' + error.message);
     } finally {
         btn.disabled = false;
         btn.innerHTML = originalText;
@@ -158,17 +158,17 @@ async function checkSyncStatus() {
             document.getElementById('sync-bar').style.width = percent + '%';
             document.getElementById('sync-stats').textContent = `${data.processed} / ${data.total} (${percent}%)`;
             
-            let statusText = 'Sinhronizacija u toku...';
+            let statusText = appT('dashboard.sync_in_progress');
             let barColor = '#3b82f6'; // Blue
 
             if (data.status === 'pending') {
-                statusText = '⏳ Na čekanju...';
+                statusText = '⏳ ' + appT('dashboard.status_pending');
                 barColor = '#f59e0b'; // Orange
             } else if (data.status === 'processing') {
-                statusText = '🔄 Sinhronizacija u toku...';
+                statusText = '🔄 ' + appT('dashboard.status_processing');
                 barColor = '#3b82f6'; // Blue
             } else if (data.status === 'completed') {
-                statusText = '✅ Sinhronizacija završena!';
+                statusText = '✅ ' + appT('dashboard.status_completed');
                 barColor = '#10b981'; // Green
             }
             
@@ -183,7 +183,7 @@ async function checkSyncStatus() {
             }
         }
     } catch (e) {
-        console.error('Greška pri proveri statusa:', e);
+        console.error(appT('dashboard.status_check_error'), e);
     }
 }
 

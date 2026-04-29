@@ -1,35 +1,35 @@
 <div class="page-header">
     <div>
-        <h2 class="page-title">Sistemski Logovi</h2>
-        <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;">Istorija sinhronizacija i grešaka (Poslednjih 100 zapisa)</p>
+        <h2 class="page-title"><?= trans_e('logs.system_title') ?></h2>
+        <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;"><?= trans_e('logs.system_subtitle') ?></p>
     </div>
     <button onclick="location.reload()" class="btn btn-secondary" style="background: white; color: #374151; border: 1px solid #d1d5db;">
-        🔄 Osveži
+        🔄 <?= trans_e('common.refresh') ?>
     </button>
 </div>
 
 <div class="log-tabs">
-    <a href="?route=logs" class="log-tab active">Sync Logs</a>
-    <a href="?route=logs&action=webhooks" class="log-tab">Webhook Events</a>
+    <a href="?route=logs" class="log-tab active"><?= trans_e('common.sync_logs') ?></a>
+    <a href="?route=logs&action=webhooks" class="log-tab"><?= trans_e('common.webhook_events') ?></a>
 </div>
 
 <?php if (empty($logs)): ?>
     <div class="empty-state">
         <span class="empty-icon">📋</span>
-        <h3>Nema zapisa u logovima</h3>
-        <p>Sinhronizacije će se pojaviti ovde nakon izvršavanja.</p>
+        <h3><?= trans_e('logs.empty_title') ?></h3>
+        <p><?= trans_e('logs.empty_text') ?></p>
     </div>
 <?php else: ?>
     <div style="overflow-x: auto;">
         <table class="logs-table">
             <thead>
                 <tr>
-                    <th style="width: 160px;">Vreme</th>
-                    <th style="width: 120px;">Tip</th>
-                    <th>Promocija ID</th>
-                    <th>Rezultat</th>
-                    <th>Trajanje</th>
-                    <th>Detalji</th>
+                    <th style="width: 160px;"><?= trans_e('common.time') ?></th>
+                    <th style="width: 120px;"><?= trans_e('common.type') ?></th>
+                    <th><?= trans_e('logs.promotion_id') ?></th>
+                    <th><?= trans_e('common.result') ?></th>
+                    <th><?= trans_e('common.duration') ?></th>
+                    <th><?= trans_e('common.details') ?></th>
                 </tr>
             </thead>
             <tbody>
@@ -58,7 +58,7 @@
                     <td>
                         <div class="status-success">✓ <?= $log['products_synced'] ?></div>
                         <?php if ($log['errors'] > 0): ?>
-                            <div class="status-error">⚠ <?= $log['errors'] ?> grešaka</div>
+                            <div class="status-error">⚠ <?= trans_e('logs.errors_count', ['count' => $log['errors']]) ?></div>
                         <?php endif; ?>
                     </td>
                     <td style="font-family: monospace;"><?= $log['duration_seconds'] ?>s</td>

@@ -1,8 +1,22 @@
 <?php
 session_start();
-require_once 'config.php';
 
 define('ROOT_PATH', __DIR__ . '/');
+require_once ROOT_PATH . 'config.php';
+
+$configuredLocale = null;
+if (!empty($_SESSION['store_hash'])) {
+    try {
+        $db = \App\Models\Database::getInstance();
+        $db->setStoreContext($_SESSION['store_hash']);
+        $storeSettings = \App\Support\StoreSettings::load($db, $_SESSION['store_hash']);
+        $configuredLocale = $storeSettings['language'] ?? null;
+    } catch (Throwable $e) {
+        error_log('Locale boot failed: ' . $e->getMessage());
+    }
+}
+
+\App\Support\Translator::initialize($configuredLocale);
 
 $route = $_GET['route'] ?? 'dashboard';
 $action = $_GET['action'] ?? 'index';
@@ -72,7 +86,7 @@ try {
         default:
             if (!isset($controllerMap[$route]) || !in_array($action, $controllerMap[$route]['actions'], true)) {
                 http_response_code(404);
-                echo "404 - Page not found";
+                echo trans('common.page_not_found');
                 exit;
             }
 
@@ -84,5 +98,5 @@ try {
 } catch (Throwable $e) {
     error_log($e->getMessage());
     http_response_code(500);
-    echo "An internal error occurred.";
+    echo trans('common.internal_error');
 }
