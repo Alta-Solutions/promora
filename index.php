@@ -1,8 +1,9 @@
 <?php
-session_start();
-
 define('ROOT_PATH', __DIR__ . '/');
 require_once ROOT_PATH . 'config.php';
+require_once ROOT_PATH . 'app/Support/session.php';
+
+appStartSession();
 
 $configuredLocale = null;
 if (!empty($_SESSION['store_hash'])) {
@@ -21,7 +22,7 @@ if (!empty($_SESSION['store_hash'])) {
 $route = $_GET['route'] ?? 'dashboard';
 $action = $_GET['action'] ?? 'index';
 
-if (!isset($_SESSION['authenticated']) && (isset($_GET['signed_payload_jwt']) || isset($_GET['signed_payload']))) {
+if (isset($_GET['signed_payload_jwt']) || isset($_GET['signed_payload'])) {
     $params = http_build_query($_GET);
     $loadUrl = Config::$APP_URL . '/bigcommerce-app/load.php?' . $params;
     header("Location: " . $loadUrl);
