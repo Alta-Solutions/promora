@@ -36,6 +36,18 @@ if (!in_array($currentRoute, $publicRoutes, true) && !isset($_SESSION['authentic
     exit;
 }
 
+if (
+    isset($_SESSION['authenticated'])
+    && $_SESSION['authenticated'] === true
+    && empty($_SESSION['store_hash'])
+    && !in_array($currentRoute, $publicRoutes, true)
+    && $currentRoute !== 'auth/selectStore'
+    && $currentRoute !== 'auth/setStore'
+) {
+    header('Location: ?route=auth&action=selectStore');
+    exit;
+}
+
 $controllerMap = [
     'auth' => [
         'class' => \App\Controllers\AuthController::class,
@@ -96,7 +108,14 @@ try {
             break;
     }
 } catch (Throwable $e) {
-    error_log($e->getMessage());
+    error_log(sprintf(
+        'Unhandled app error on route=%s action=%s: %s in %s:%d',
+        $route,
+        $action,
+        $e->getMessage(),
+        $e->getFile(),
+        $e->getLine()
+    ));
     http_response_code(500);
     echo trans('common.internal_error');
 }

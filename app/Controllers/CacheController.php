@@ -23,7 +23,7 @@ class CacheController {
 
         echo '<div class="container">';
         echo '<div class="card">';
-        echo '<h2>' . htmlspecialchars(trans('cache.full_sync_title'), ENT_QUOTES, 'UTF-8') . '</h2>';
+        echo '<h2>' . htmlspecialchars(\trans('cache.full_sync_title'), ENT_QUOTES, 'UTF-8') . '</h2>';
         echo '<pre id="sync-output" style="background: #1f2937; color: #fff; padding: 20px; border-radius: 8px; max-height: 600px; overflow-y: auto;">';
 
         ob_implicit_flush(true);
@@ -33,7 +33,7 @@ class CacheController {
 
         echo '</pre>';
         echo '<div style="margin-top: 20px;">';
-        echo '<a href="?route=settings" class="btn btn-primary">' . htmlspecialchars(trans('cache.back_to_settings'), ENT_QUOTES, 'UTF-8') . '</a>';
+        echo '<a href="?route=settings" class="btn btn-primary">' . htmlspecialchars(\trans('cache.back_to_settings'), ENT_QUOTES, 'UTF-8') . '</a>';
         echo '</div>';
         echo '</div>';
         echo '</div>';
@@ -49,7 +49,7 @@ class CacheController {
         $storeHash = $db->getStoreContext();
 
         if (!$storeHash) {
-            $_SESSION['flash_message'] = trans('cache.store_missing');
+            $_SESSION['flash_message'] = \trans('cache.store_missing');
             $_SESSION['flash_type'] = 'error';
             header('Location: ?route=settings');
             exit;
@@ -60,13 +60,13 @@ class CacheController {
             $count = count($registered);
 
             if ($count > 0) {
-                $_SESSION['flash_message'] = trans('cache.webhooks_registered', ['count' => $count]);
+                $_SESSION['flash_message'] = \trans('cache.webhooks_registered', ['count' => $count]);
             } else {
-                $_SESSION['flash_message'] = trans('cache.webhooks_already_registered');
+                $_SESSION['flash_message'] = \trans('cache.webhooks_already_registered');
             }
             $_SESSION['flash_type'] = 'success';
         } catch (\Exception $e) {
-            $_SESSION['flash_message'] = trans('cache.error_prefix', ['message' => $e->getMessage()]);
+            $_SESSION['flash_message'] = \trans('cache.error_prefix', ['message' => $e->getMessage()]);
             $_SESSION['flash_type'] = 'error';
         }
 
@@ -83,7 +83,7 @@ class CacheController {
         $webhookRowId = isset($_POST['id']) ? (int)$_POST['id'] : (isset($_GET['id']) ? (int)$_GET['id'] : 0);
 
         if (!$storeHash) {
-            $_SESSION['flash_message'] = trans('cache.store_missing');
+            $_SESSION['flash_message'] = \trans('cache.store_missing');
             $_SESSION['flash_type'] = 'error';
             header('Location: ?route=settings');
             exit;
@@ -95,24 +95,24 @@ class CacheController {
 
                 if (!empty($result['deleted'])) {
                     if (($result['reason'] ?? '') === 'missing_on_bc') {
-                        $_SESSION['flash_message'] = trans('cache.webhook_missing_deleted');
+                        $_SESSION['flash_message'] = \trans('cache.webhook_missing_deleted');
                     } else {
-                        $_SESSION['flash_message'] = trans('cache.webhook_deleted');
+                        $_SESSION['flash_message'] = \trans('cache.webhook_deleted');
                     }
                 } else {
-                    $_SESSION['flash_message'] = trans('cache.webhook_not_found');
+                    $_SESSION['flash_message'] = \trans('cache.webhook_not_found');
                 }
             } else {
                 $deletedCount = $this->webhookService->unregisterWebhooks($storeHash);
                 if ($deletedCount > 0) {
-                    $_SESSION['flash_message'] = trans('cache.webhooks_deleted', ['count' => $deletedCount]);
+                    $_SESSION['flash_message'] = \trans('cache.webhooks_deleted', ['count' => $deletedCount]);
                 } else {
-                    $_SESSION['flash_message'] = trans('cache.webhooks_none_deleted');
+                    $_SESSION['flash_message'] = \trans('cache.webhooks_none_deleted');
                 }
             }
             $_SESSION['flash_type'] = 'success';
         } catch (\Exception $e) {
-            $_SESSION['flash_message'] = trans('cache.webhook_delete_failed', ['message' => $e->getMessage()]);
+            $_SESSION['flash_message'] = \trans('cache.webhook_delete_failed', ['message' => $e->getMessage()]);
             $_SESSION['flash_type'] = 'error';
         }
 
@@ -173,17 +173,17 @@ class CacheController {
         include __DIR__ . '/../Views/layouts/header.php';
 
         echo '<div class="card">';
-        echo '<h3>' . htmlspecialchars(trans('cache.bc_webhook_status'), ENT_QUOTES, 'UTF-8') . '</h3>';
+        echo '<h3>' . htmlspecialchars(\trans('cache.bc_webhook_status'), ENT_QUOTES, 'UTF-8') . '</h3>';
 
         try {
             $bcWebhooks = $this->webhookService->getBigCommerceWebhooks($storeHash);
-            echo '<p>' . htmlspecialchars(trans('cache.bc_webhook_status_help'), ENT_QUOTES, 'UTF-8') . '</p>';
+            echo '<p>' . htmlspecialchars(\trans('cache.bc_webhook_status_help'), ENT_QUOTES, 'UTF-8') . '</p>';
             echo '<pre style="background: #f3f4f6; padding: 15px; border-radius: 6px; overflow: auto;">' . print_r($bcWebhooks, true) . '</pre>';
         } catch (\Exception $e) {
-            echo '<div class="alert alert-error">' . htmlspecialchars(trans('cache.error_prefix', ['message' => $e->getMessage()]), ENT_QUOTES, 'UTF-8') . '</div>';
+            echo '<div class="alert alert-error">' . htmlspecialchars(\trans('cache.error_prefix', ['message' => $e->getMessage()]), ENT_QUOTES, 'UTF-8') . '</div>';
         }
 
-        echo '<a href="?route=settings" class="btn btn-secondary" style="margin-top: 15px;">' . htmlspecialchars(trans('cache.back_to_settings'), ENT_QUOTES, 'UTF-8') . '</a>';
+        echo '<a href="?route=settings" class="btn btn-secondary" style="margin-top: 15px;">' . htmlspecialchars(\trans('cache.back_to_settings'), ENT_QUOTES, 'UTF-8') . '</a>';
         echo '</div>';
 
         include __DIR__ . '/../Views/layouts/footer.php';

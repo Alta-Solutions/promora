@@ -187,7 +187,16 @@ return [
             'search_placeholder' => 'Pretraži proizvod',
             'name_sku' => 'Naziv / SKU',
             'price' => 'Cena',
+            'lowest_30d' => 'Najniža 30d',
             'new_price' => 'Nova cena',
+            'omnibus_status' => 'Omnibus',
+            'omnibus_valid' => 'Ispravno',
+            'omnibus_invalid' => 'Blokirano',
+            'omnibus_not_checked' => 'Nije provereno',
+            'omnibus_disabled' => 'Omnibus tracker nije aktiviran; najniža cena u 30 dana nije proverena.',
+            'omnibus_not_below_reference' => 'Akcijska cena mora biti niža od najniže cene u prethodnih 30 dana.',
+            'omnibus_not_reduction' => 'Ovo nije sniženje cene.',
+            'omnibus_missing_reference' => 'Nedostaje kompletna istorija cena za prethodnih 30 dana za ovu stavku.',
             'stock' => 'Zaliha',
             'empty_loading' => 'Učitavanje...',
             'empty_filtered' => 'Nema proizvoda koji odgovaraju filterima.',
@@ -197,6 +206,10 @@ return [
         ],
         'api' => [
             'invalid_custom_field' => 'Nevažeći custom field',
+        ],
+        'validation' => [
+            'discount_numeric' => 'Popust mora biti broj.',
+            'discount_range' => 'Popust mora biti veći od 0 i manji od 100.',
         ],
     ],
     'product_picker' => [

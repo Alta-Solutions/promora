@@ -8,10 +8,12 @@ class WebhookService {
     private $api;
     private $lastStatusCode = 200;
     private $lastError = null;
+    private $suppressionService;
 
-    public function __construct($db = null, $api = null) {
+    public function __construct($db = null, $api = null, $suppressionService = null) {
         $this->db = $db ?? Database::getInstance();
         $this->api = $api;
+        $this->suppressionService = $suppressionService;
     }
 
     public function registerWebhooks($storeHash) {
@@ -222,6 +224,12 @@ class WebhookService {
         $eventId = $this->createWebhookEvent($storeHash, $scope, $productId, $payload);
 
         try {
+            if ($this->isSuppressedProductUpdate($storeHash, $scope, $productId)) {
+                $this->markWebhookEventProcessed($eventId);
+                $this->lastStatusCode = 202;
+                return true;
+            }
+
             switch ($scope) {
                 case 'store/product/updated':
                 case 'store/product/created':
@@ -346,6 +354,27 @@ class WebhookService {
 
     protected function createPromotionService() {
         return new PromotionService($this->db);
+    }
+
+    protected function isSuppressedProductUpdate(string $storeHash, string $scope, int $productId): bool {
+        if ($scope !== 'store/product/updated') {
+            return false;
+        }
+
+        try {
+            return $this->createWebhookSuppressionService()->consumeProductUpdate($storeHash, $productId, $scope);
+        } catch (\Throwable $e) {
+            error_log("Webhook suppression check failed: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    protected function createWebhookSuppressionService(): WebhookSuppressionService {
+        if (!$this->suppressionService) {
+            $this->suppressionService = new WebhookSuppressionService($this->db);
+        }
+
+        return $this->suppressionService;
     }
 
     private function extractStoreHash(array $payload): ?string {

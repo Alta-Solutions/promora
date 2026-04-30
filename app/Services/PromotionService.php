@@ -12,6 +12,8 @@ class PromotionService {
     private $db;
     private $cacheService;
     private $storeHash;
+    private $omnibusPricingService;
+    private $storeConfigCache = null;
     private const API_PRODUCT_LIMIT = 250;
     
 public function __construct(Database $db = null) {
@@ -28,12 +30,14 @@ public function __construct(Database $db = null) {
         
         // ISPRAVKA: Prosleđujemo DB instancu, a ne storeHash, da bi se delila konekcija.
         $this->cacheService = new ProductCacheService($this->db);
+        $this->omnibusPricingService = new OmnibusPricingService($this->db);
     }
     
     /**
      * Kreira novu promociju i zakazuje sync samo ako promocija pocinje odmah.
      */
     public function createPromotion(array $data) {
+        $data['discount_percent'] = $this->validateDiscountPercent($data['discount_percent'] ?? null);
         $status = $this->determinePromotionStatus($data['start_date'] ?? null, $data['end_date'] ?? null);
 
         // 1. Unos promocije u bazu
@@ -66,6 +70,7 @@ public function __construct(Database $db = null) {
     }
 
     public function updatePromotion($promotionId, array $data) {
+        $data['discount_percent'] = $this->validateDiscountPercent($data['discount_percent'] ?? null);
         $status = $this->determinePromotionStatus($data['start_date'] ?? null, $data['end_date'] ?? null);
         $data['status'] = $status;
 
@@ -341,6 +346,7 @@ public function __construct(Database $db = null) {
         // Map: product/variant key => [promotion details]
         $productPromotions = [];
         $existingFieldsMap = [];
+        $omnibusSkippedCount = 0;
         
         // Process each promotion using LOCAL CACHE
         foreach ($promotions as $promotion) {
@@ -364,38 +370,28 @@ public function __construct(Database $db = null) {
                         : $product['custom_fields'];
                 }
 
-                $productId = $product['product_id'];
-                $variantId = $product['variant_id'] ?? null;
-                $originalPrice = (float)$product['price'];
-                
-                if ($originalPrice <= 0) continue;
-                
-                $discount = (float)$promotion['discount_percent'];
-                $promoPrice = round($originalPrice * (1 - $discount / 100), 2);
-                
-                $itemKey = $this->getPromotionItemKey($productId, $variantId);
+                $candidate = $this->buildPromotionCandidate($product, $promotion);
+                if (!$candidate || empty($candidate['will_apply'])) {
+                    if ($candidate && ($candidate['omnibus_status'] ?? '') === 'invalid') {
+                        $omnibusSkippedCount++;
+                    }
+                    continue;
+                }
+
+                $itemKey = $this->getPromotionItemKey($candidate['product_id'], $candidate['variant_id'] ?? null);
 
                 if (!isset($productPromotions[$itemKey]) || 
-                    $this->isBetterPromotion($promotion, $productPromotions[$itemKey])) {
-                    
-                    $productPromotions[$itemKey] = [
-                        'promotion_id' => $promotion['id'],
-                        'promotion_name' => $promotion['name'],
-                        'custom_field_value' => $promotion['custom_field_value'] ?? $promotion['name'],
-                        'product_name' => $product['name'],
-                        'product_id' => $productId,
-                        'variant_id' => $variantId,
-                        'original_price' => $originalPrice,
-                        'discount_percent' => $discount,
-                        'promo_price' => $promoPrice,
-                        'priority' => $promotion['priority']
-                    ];
+                    $this->isBetterPromotion($candidate, $productPromotions[$itemKey])) {
+                    $productPromotions[$itemKey] = $candidate;
                 }
             }
         }
         
         $debugLog[] = "\n=== Batch Processing to BigCommerce ===";
         $debugLog[] = "Total products to update: " . count($productPromotions);
+        if ($omnibusSkippedCount > 0) {
+            $debugLog[] = "Skipped {$omnibusSkippedCount} products because promo price is not below the Omnibus reference price.";
+        }
         
         // BATCH UPDATE: Apply prices to BigCommerce
         $productUpdates = [];
@@ -536,37 +532,22 @@ public function __construct(Database $db = null) {
     /**
      * Preview products that match promotion filters (WITHOUT applying promotion)
      */
-    public function previewPromotionProducts($filters, $discountPercent) {
+    public function previewPromotionProducts($filters, $discountPercent, $referenceAt = null) {
+        $discountPercent = $this->validateDiscountPercent($discountPercent);
         // getProductsByFilters sada vraća i proizvode i varijante
         $items = $this->cacheService->getProductsByFilters($filters);
         
         $preview = [];
         foreach ($items as $item) {
-            // Preskačemo stavke bez cene (npr. neki osnovni proizvodi)
-            if (empty($item['price']) || (float)$item['price'] <= 0) {
-                continue;
+            $row = $this->buildPromotionPreviewRow($item, $discountPercent, $referenceAt);
+            if ($row !== null) {
+                $preview[] = $row;
             }
-
-            $originalPrice = (float)$item['price'];
-            $promoPrice = round($originalPrice * (1 - $discountPercent / 100), 2);
-            $savings = $originalPrice - $promoPrice;
-            
-            $preview[] = [
-                'id' => $item['id'], // Ovo je kompozitni ID
-                'name' => $item['name'], // Ime je već formatirano za varijante
-                'sku' => $item['sku'],
-                'original_price' => $originalPrice,
-                'promo_price' => $promoPrice,
-                'savings' => $savings,
-                'savings_percent' => $discountPercent,
-                'inventory' => $item['inventory_level'],
-                'brand' => $item['brand_name'],
-                'is_visible' => $item['is_visible']
-            ];
         }
         
         return [
             'total_products' => count($preview),
+            'total_invalid_products' => count(array_filter($preview, fn($row) => empty($row['will_apply']))),
             'total_savings' => array_sum(array_column($preview, 'savings')),
             'products' => $preview
         ];
@@ -892,10 +873,10 @@ public function __construct(Database $db = null) {
         // 2. Priprema podataka (samo logika, bez API poziva)
         foreach ($items as $item) {
             // Provera da li postoji bolja promocija od ove trenutne
-            $bestPromo = $this->calculateBestPromotion($item, $activePromotions);
+            $bestPromo = $this->calculateBestPromotionCandidate($item, $activePromotions);
             
             // Ako je ova promocija ($promotion) ta koja je najbolja (ili jednako dobra), primeni je
-            if ($bestPromo && $bestPromo['id'] == $promotion['id']) {
+            if ($bestPromo && $bestPromo['promotion_id'] == $promotion['id']) {
                 $originalPrice = (float)$item['price'];
                 if ($originalPrice <= 0) {
                     continue;
@@ -1038,7 +1019,7 @@ public function __construct(Database $db = null) {
         foreach ($products as $product) {
             try {
                 // Pronađi najbolju promociju za ovaj konkretan proizvod
-                $bestPromo = $this->calculateBestPromotion($product, $activePromotions);
+                $bestPromo = $this->calculateBestPromotionCandidate($product, $activePromotions);
                 
                 if ($bestPromo) {
                     // Primeni cenu i custom field
@@ -1072,6 +1053,250 @@ public function __construct(Database $db = null) {
         // 2. Pozovi postojeću logiku za obradu (kao niz od 1 elementa)
         // Ovo će automatski naći najbolju promociju ili ukloniti postojeću
         return $this->processProductsBatch($items);
+    }
+
+    public function validateDiscountPercent($discountPercent): float {
+        $normalized = is_string($discountPercent)
+            ? str_replace(',', '.', trim($discountPercent))
+            : $discountPercent;
+
+        if (!is_numeric($normalized)) {
+            throw new \InvalidArgumentException($this->translateMessage(
+                'promotions.validation.discount_numeric',
+                [],
+                'Discount must be a number.'
+            ));
+        }
+
+        $value = (float)$normalized;
+        if ($value <= 0 || $value >= 100) {
+            throw new \InvalidArgumentException($this->translateMessage(
+                'promotions.validation.discount_range',
+                [],
+                'Discount must be greater than 0 and lower than 100.'
+            ));
+        }
+
+        return round($value, 2);
+    }
+
+    private function buildPromotionPreviewRow(array $item, float $discountPercent, $referenceAt = null): ?array {
+        if (empty($item['price']) || (float)$item['price'] <= 0) {
+            return null;
+        }
+
+        $originalPrice = (float)$item['price'];
+        $promoPrice = $this->calculatePromoPrice($originalPrice, $discountPercent);
+        $savings = $originalPrice - $promoPrice;
+        $omnibus = $this->validatePromotionPriceAgainstOmnibus($item, $promoPrice, $referenceAt);
+
+        return [
+            'id' => $item['id'],
+            'name' => $item['name'],
+            'sku' => $item['sku'],
+            'product_id' => (int)$item['product_id'],
+            'variant_id' => isset($item['variant_id']) ? (int)$item['variant_id'] : null,
+            'original_price' => $originalPrice,
+            'promo_price' => $promoPrice,
+            'savings' => $savings,
+            'savings_percent' => $discountPercent,
+            'inventory' => $item['inventory_level'],
+            'brand' => $item['brand_name'],
+            'is_visible' => $item['is_visible'],
+        ] + $omnibus;
+    }
+
+    private function buildPromotionCandidate(array $product, array $promotion): ?array {
+        if (empty($product['price']) || (float)$product['price'] <= 0) {
+            return null;
+        }
+
+        try {
+            $discount = $this->validateDiscountPercent($promotion['discount_percent'] ?? null);
+        } catch (\InvalidArgumentException $e) {
+            return null;
+        }
+
+        $originalPrice = (float)$product['price'];
+        $promoPrice = $this->calculatePromoPrice($originalPrice, $discount);
+        $omnibus = $this->validatePromotionPriceAgainstOmnibus(
+            $product,
+            $promoPrice,
+            $promotion['start_date'] ?? null
+        );
+
+        return [
+            'id' => $promotion['id'],
+            'promotion_id' => $promotion['id'],
+            'promotion_name' => $promotion['name'],
+            'custom_field_value' => $promotion['custom_field_value'] ?? $promotion['name'],
+            'product_name' => $product['name'],
+            'product_id' => $product['product_id'],
+            'variant_id' => $product['variant_id'] ?? null,
+            'original_price' => $originalPrice,
+            'discount_percent' => $discount,
+            'promo_price' => $promoPrice,
+            'priority' => $promotion['priority']
+        ] + $omnibus;
+    }
+
+    private function calculateBestPromotionCandidate($product, $activePromotions) {
+        $bestCandidate = null;
+
+        foreach ($activePromotions as $promo) {
+            $filters = json_decode($promo['filters'], true) ?: [];
+            if (!$this->productMatchesFilters($product, $filters)) {
+                continue;
+            }
+
+            $candidate = $this->buildPromotionCandidate($product, $promo);
+            if (!$candidate || empty($candidate['will_apply'])) {
+                continue;
+            }
+
+            if (!$bestCandidate || $this->isBetterPromotion($candidate, $bestCandidate)) {
+                $bestCandidate = $candidate;
+            }
+        }
+
+        return $bestCandidate;
+    }
+
+    private function validatePromotionPriceAgainstOmnibus(array $item, float $promoPrice, $referenceAt = null): array {
+        $base = [
+            'lowest_price_30d' => null,
+            'rolling_lowest_price_30d' => null,
+            'omnibus_reference_price' => null,
+            'omnibus_valid' => true,
+            'will_apply' => true,
+            'omnibus_status' => 'disabled',
+            'omnibus_warning' => $this->translateMessage(
+                'promotions.preview.omnibus_disabled',
+                [],
+                'Omnibus tracker is disabled; 30-day lowest price was not checked.'
+            ),
+            'omnibus_invalid_reason' => null,
+        ];
+
+        if (!$this->isOmnibusEnabled()) {
+            return $base;
+        }
+
+        $dto = $this->omnibusPricingService->getDisplayData(
+            $this->storeHash,
+            (int)$item['product_id'],
+            isset($item['variant_id']) ? (int)$item['variant_id'] : null,
+            $this->getStoreCurrency(),
+            $promoPrice,
+            $this->normalizeReferenceAt($referenceAt),
+            ['require_full_30_days_history' => true]
+        );
+
+        $referencePrice = $dto['candidate_omnibus_reference_price']
+            ?? $dto['omnibus_reference_price']
+            ?? null;
+        $reason = $dto['invalid_reduction_reason'] ?? null;
+        if ($referencePrice === null) {
+            $reason = 'missing_reference_price';
+        } elseif (empty($dto['is_price_drop_candidate']) && empty($dto['is_valid_omnibus_reduction'])) {
+            $reason = $reason ?: 'not_price_reduction';
+        }
+
+        $isValid = !empty($dto['is_valid_omnibus_reduction']);
+        return [
+            'lowest_price_30d' => $referencePrice !== null ? (float)$referencePrice : null,
+            'rolling_lowest_price_30d' => isset($dto['rolling_lowest_price_last_30_days']) && $dto['rolling_lowest_price_last_30_days'] !== null
+                ? (float)$dto['rolling_lowest_price_last_30_days']
+                : null,
+            'omnibus_reference_price' => $referencePrice !== null ? (float)$referencePrice : null,
+            'omnibus_valid' => $isValid,
+            'will_apply' => $isValid,
+            'omnibus_status' => $isValid ? 'valid' : 'invalid',
+            'omnibus_warning' => $isValid ? '' : $this->buildOmnibusWarning($reason, $referencePrice),
+            'omnibus_invalid_reason' => $isValid ? null : $reason,
+        ];
+    }
+
+    private function calculatePromoPrice(float $originalPrice, float $discountPercent): float {
+        return round($originalPrice * (1 - $discountPercent / 100), 2);
+    }
+
+    private function buildOmnibusWarning(?string $reason, $referencePrice = null): string {
+        if ($reason === 'not_below_30_day_lowest') {
+            return $this->translateMessage(
+                'promotions.preview.omnibus_not_below_reference',
+                [],
+                'Promo price must be lower than the lowest price in the previous 30 days.'
+            );
+        }
+
+        if ($reason === 'not_price_reduction') {
+            return $this->translateMessage(
+                'promotions.preview.omnibus_not_reduction',
+                [],
+                'This is not a price reduction.'
+            );
+        }
+
+        return $this->translateMessage(
+            'promotions.preview.omnibus_missing_reference',
+            [],
+            'Missing complete 30-day price history for this item.'
+        );
+    }
+
+    private function isOmnibusEnabled(): bool {
+        $config = $this->getStoreConfig();
+        return !empty($config['enable_omnibus']);
+    }
+
+    private function getStoreCurrency(): string {
+        $config = $this->getStoreConfig();
+        return $config['currency'] ?? 'USD';
+    }
+
+    private function getStoreConfig(): array {
+        if ($this->storeConfigCache !== null) {
+            return $this->storeConfigCache;
+        }
+
+        $config = $this->db->fetchOne(
+            "SELECT enable_omnibus, currency FROM bigcommerce_stores WHERE store_hash = ?",
+            [$this->storeHash]
+        );
+
+        $this->storeConfigCache = is_array($config) ? $config : [
+            'enable_omnibus' => 0,
+            'currency' => 'USD',
+        ];
+
+        return $this->storeConfigCache;
+    }
+
+    private function normalizeReferenceAt($referenceAt): \DateTimeImmutable {
+        if ($referenceAt instanceof \DateTimeImmutable) {
+            return $referenceAt;
+        }
+
+        if ($referenceAt instanceof \DateTimeInterface) {
+            return \DateTimeImmutable::createFromInterface($referenceAt);
+        }
+
+        $value = trim((string)$referenceAt);
+        if ($value === '') {
+            $value = 'now';
+        }
+
+        return new \DateTimeImmutable($value);
+    }
+
+    private function translateMessage(string $key, array $replace, string $fallback): string {
+        if (!function_exists('trans')) {
+            return $fallback;
+        }
+
+        $message = \trans($key, $replace);
+        return $message === $key ? $fallback : $message;
     }
 
     // --- NEDOSTAJUĆE METODE ---

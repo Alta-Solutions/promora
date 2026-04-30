@@ -24,7 +24,7 @@ class AuthController {
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!Csrf::validateRequest()) {
                 http_response_code(403);
-                $this->renderLoginView(trans('auth.csrf_expired'));
+                $this->renderLoginView(\trans('auth.csrf_expired'));
                 return;
             }
 
@@ -41,7 +41,7 @@ class AuthController {
                 header('Location: ?route=auth&action=selectStore');
                 exit;
             } else {
-                $error = trans('auth.invalid_credentials');
+                $error = \trans('auth.invalid_credentials');
             }
         }
         
@@ -72,7 +72,7 @@ class AuthController {
         // Prikaži stranicu za izbor
         $error = $_GET['error'] ?? null;
         if ($error === 'invalid_hash') {
-            $error = trans('auth.store_invalid');
+            $error = \trans('auth.store_invalid');
         }
         
         $this->renderStoreSelectionView($stores, $error);
@@ -155,7 +155,7 @@ class AuthController {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title><?= trans_e('auth.login_title') ?></title>
+            <title><?= \trans_e('auth.login_title') ?></title>
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
                 
@@ -257,8 +257,8 @@ class AuthController {
         <body>
             <div class="login-container">
                 <div class="login-header">
-                    <h1>🛍️ <?= trans_e('auth.login_heading') ?></h1>
-                    <p><?= trans_e('auth.login_subtitle') ?></p>
+                    <h1>🛍️ <?= \trans_e('auth.login_heading') ?></h1>
+                    <p><?= \trans_e('auth.login_subtitle') ?></p>
                 </div>
                 
                 <?php if ($error): ?>
@@ -268,7 +268,7 @@ class AuthController {
                 <form method="POST" action="?route=auth&action=login">
                     <?= Csrf::inputField() ?>
                     <div class="form-group">
-                        <label class="form-label" for="username"><?= trans_e('auth.username') ?></label>
+                        <label class="form-label" for="username"><?= \trans_e('auth.username') ?></label>
                         <input type="text" 
                                id="username" 
                                name="username" 
@@ -279,7 +279,7 @@ class AuthController {
                     </div>
                     
                     <div class="form-group">
-                        <label class="form-label" for="password"><?= trans_e('auth.password') ?></label>
+                        <label class="form-label" for="password"><?= \trans_e('auth.password') ?></label>
                         <input type="password" 
                                id="password" 
                                name="password" 
@@ -289,12 +289,12 @@ class AuthController {
                     </div>
                     
                     <button type="submit" class="btn-login">
-                        <?= trans_e('auth.login_button') ?>
+                        <?= \trans_e('auth.login_button') ?>
                     </button>
                 </form>
                 
                 <div class="login-footer">
-                    <?= trans_e('auth.login_footer') ?>
+                    <?= \trans_e('auth.login_footer') ?>
                 </div>
             </div>
         </body>
@@ -309,7 +309,7 @@ class AuthController {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title><?= trans_e('auth.store_select_title') ?></title>
+            <title><?= \trans_e('auth.store_select_title') ?></title>
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
                 body {
@@ -388,8 +388,8 @@ class AuthController {
         <body>
             <div class="container">
                 <div class="login-header">
-                    <h1><?= trans_e('auth.store_select_heading') ?></h1>
-                    <p><?= trans_e('auth.store_select_subtitle') ?></p>
+                    <h1><?= \trans_e('auth.store_select_heading') ?></h1>
+                    <p><?= \trans_e('auth.store_select_subtitle') ?></p>
                 </div>
                 
                 <?php if ($error): ?>
@@ -398,7 +398,7 @@ class AuthController {
 
                 <?php if (empty($stores)): ?>
                     <div class="alert" style="background: #fffbeb; color: #92400e;">
-                        <?= trans_e('auth.no_stores') ?>
+                        <?= \trans_e('auth.no_stores') ?>
                     </div>
                 <?php else: ?>
                     <div class="store-list">
@@ -409,16 +409,16 @@ class AuthController {
                             <a href="?route=auth&action=setStore&store_hash=<?= htmlspecialchars($store['store_hash']) ?>">
                                 <div class="store-name">
                                     <span style="color: #667eea;">#<?= htmlspecialchars($displayContext) ?></span>
-                                    (<?= trans_e('auth.installed') ?>: <?= date('d.m.Y.', strtotime($store['installed_at'])) ?>)
+                                    (<?= \trans_e('auth.installed') ?>: <?= date('d.m.Y.', strtotime($store['installed_at'])) ?>)
                                 </div>
-                                <div class="store-hash"><?= trans_e('auth.hash') ?>: <?= htmlspecialchars($store['store_hash']) ?></div>
+                                <div class="store-hash"><?= \trans_e('auth.hash') ?>: <?= htmlspecialchars($store['store_hash']) ?></div>
                             </a>
                         <?php endforeach; ?>
                     </div>
                 <?php endif; ?>
                 
                 <div style="margin-top: 30px; text-align: center;">
-                    <a href="?route=auth&action=logout" class="btn-login" style="display: inline-block; width: auto; background: #9ca3af;"><?= trans_e('common.logout') ?></a>
+                    <a href="?route=auth&action=logout" class="btn-login" style="display: inline-block; width: auto; background: #9ca3af;"><?= \trans_e('common.logout') ?></a>
                 </div>
             </div>
         </body>

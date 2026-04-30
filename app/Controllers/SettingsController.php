@@ -52,7 +52,7 @@ class SettingsController {
 
         if (!Csrf::validateRequest()) {
             http_response_code(403);
-            $_SESSION['flash_message'] = trans('settings.flash.csrf_expired_settings');
+            $_SESSION['flash_message'] = \trans('settings.flash.csrf_expired_settings');
             $_SESSION['flash_type'] = 'error';
             header('Location: index.php?route=settings');
             exit;
@@ -96,7 +96,7 @@ class SettingsController {
                 );
 
                 if ($activePromotion) {
-                    $_SESSION['flash_message'] = trans('settings.flash.custom_field_locked');
+                    $_SESSION['flash_message'] = \trans('settings.flash.custom_field_locked');
                     $_SESSION['flash_type'] = 'error';
                     header('Location: index.php?route=settings');
                     exit;
@@ -113,13 +113,13 @@ class SettingsController {
             );
 
             Translator::setLocale($language);
-            $_SESSION['flash_message'] = trans('settings.flash.saved');
+            $_SESSION['flash_message'] = \trans('settings.flash.saved');
             $_SESSION['flash_type'] = 'success';
             header('Location: index.php?route=settings');
             exit;
         } catch (\Exception $e) {
             error_log("Settings save failed: " . $e->getMessage());
-            $_SESSION['flash_message'] = trans('settings.flash.save_failed');
+            $_SESSION['flash_message'] = \trans('settings.flash.save_failed');
             $_SESSION['flash_type'] = 'error';
             header('Location: index.php?route=settings');
             exit;
@@ -128,7 +128,7 @@ class SettingsController {
 
     public function triggerOmnibusSync() {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $_SESSION['flash_message'] = trans('settings.flash.manual_sync_post_only');
+            $_SESSION['flash_message'] = \trans('settings.flash.manual_sync_post_only');
             $_SESSION['flash_type'] = 'error';
             header('Location: index.php?route=settings');
             exit;
@@ -136,7 +136,7 @@ class SettingsController {
 
         if (!Csrf::validateRequest()) {
             http_response_code(403);
-            $_SESSION['flash_message'] = trans('settings.flash.csrf_expired_omnibus');
+            $_SESSION['flash_message'] = \trans('settings.flash.csrf_expired_omnibus');
             $_SESSION['flash_type'] = 'error';
             header('Location: index.php?route=settings');
             exit;
@@ -153,7 +153,7 @@ class SettingsController {
             );
 
             if (!$store || empty($store['enable_omnibus'])) {
-                $_SESSION['flash_message'] = trans('settings.flash.omnibus_not_enabled');
+                $_SESSION['flash_message'] = \trans('settings.flash.omnibus_not_enabled');
                 $_SESSION['flash_type'] = 'error';
                 header('Location: index.php?route=settings');
                 exit;
@@ -164,15 +164,15 @@ class SettingsController {
             $result = $queueService->createOmnibusSyncJob($totalItems);
 
             if (!empty($result['created'])) {
-                $_SESSION['flash_message'] = trans('settings.flash.omnibus_scheduled', ['job_id' => (int)$result['job_id']]);
+                $_SESSION['flash_message'] = \trans('settings.flash.omnibus_scheduled', ['job_id' => (int)$result['job_id']]);
                 $_SESSION['flash_type'] = 'success';
             } else {
-                $_SESSION['flash_message'] = $result['message'] ?? trans('settings.flash.omnibus_not_started');
+                $_SESSION['flash_message'] = $result['message'] ?? \trans('settings.flash.omnibus_not_started');
                 $_SESSION['flash_type'] = 'error';
             }
         } catch (\Throwable $e) {
             error_log("Manual omnibus sync scheduling failed: " . $e->getMessage());
-            $_SESSION['flash_message'] = trans('settings.flash.omnibus_start_failed');
+            $_SESSION['flash_message'] = \trans('settings.flash.omnibus_start_failed');
             $_SESSION['flash_type'] = 'error';
         }
 

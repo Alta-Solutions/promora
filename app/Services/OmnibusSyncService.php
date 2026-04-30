@@ -91,9 +91,9 @@ class OmnibusSyncService {
 
         $placeholders = str_repeat('?,', count($productIds) - 1) . '?';
         $cachedProducts = $this->db->fetchAll(
-            "SELECT product_id, price, sale_price, custom_fields, cached_at
+            "SELECT product_id, variant_id, type, price, sale_price, custom_fields, cached_at
              FROM products_cache
-             WHERE store_hash = ? AND product_id IN ($placeholders)" . $this->baseProductClause(),
+             WHERE store_hash = ? AND product_id IN ($placeholders)",
             array_merge([$this->storeHash], $productIds)
         );
 
@@ -101,46 +101,16 @@ class OmnibusSyncService {
             return ['success' => 0, 'errors' => 0, 'message' => 'No cached products found for this batch.'];
         }
 
-        $productsCacheMap = array_column($cachedProducts, null, 'product_id');
+        $productsCacheMap = $this->buildParentProductsCacheMap($cachedProducts);
+        $productsById = [];
+        foreach ($cachedProducts as $product) {
+            $productsById[(int)$product['product_id']][] = $product;
+        }
+
         $updates = [];
 
-        foreach ($cachedProducts as $product) {
-            $currentPrice = null;
-            if (isset($product['sale_price']) && $product['sale_price'] !== null && (float)$product['sale_price'] > 0) {
-                $currentPrice = (float)$product['sale_price'];
-            } elseif (isset($product['price'])) {
-                $currentPrice = (float)$product['price'];
-            }
-
-            if ($currentPrice === null || $currentPrice <= 0) {
-                $updates[] = [
-                    'product_id' => (int)$product['product_id'],
-                    'omnibus_reference_price' => null,
-                ];
-                continue;
-            }
-
-            $dto = $this->omnibusPricingService->getDisplayData(
-                $this->storeHash,
-                (int)$product['product_id'],
-                null,
-                $currency,
-                $currentPrice,
-                null,
-                [
-                    'current_price_observed_at' => $product['cached_at'] ?? null,
-                ]
-            );
-
-            $updates[] = [
-                'product_id' => (int)$product['product_id'],
-                'current_price' => $dto['current_price'],
-                'rolling_lowest_price_last_30_days' => $dto['rolling_lowest_price_last_30_days'],
-                'lowest_price_last_30_days' => $dto['lowest_price_last_30_days'],
-                'is_discounted_now' => $dto['is_discounted_now'],
-                'omnibus_reference_price' => $dto['omnibus_reference_price'],
-                'effective_currency' => $dto['effective_currency'] ?? $currency,
-            ];
+        foreach ($productsById as $productId => $productRows) {
+            $updates[] = $this->buildAggregatedUpdateForProduct($productId, $productRows, $currency);
         }
 
         try {
@@ -162,6 +132,86 @@ class OmnibusSyncService {
             error_log("Omnibus Sync API Error for store {$this->storeHash}: " . $e->getMessage());
             return ['processed' => count($updates), 'success' => 0, 'errors' => count($updates)];
         }
+    }
+
+    private function buildAggregatedUpdateForProduct(int $productId, array $productRows, string $currency): array {
+        $rowsForPricing = $this->selectRowsForPricing($productRows);
+        $lowestReference = null;
+        $lastDto = null;
+
+        foreach ($rowsForPricing as $row) {
+            $currentPrice = $this->resolveCurrentPrice($row);
+            if ($currentPrice === null || $currentPrice <= 0) {
+                continue;
+            }
+
+            $variantId = isset($row['variant_id']) && $row['variant_id'] !== null
+                ? (int)$row['variant_id']
+                : null;
+
+            $dto = $this->omnibusPricingService->getDisplayData(
+                $this->storeHash,
+                $productId,
+                $variantId,
+                $currency,
+                $currentPrice,
+                null,
+                [
+                    'current_price_observed_at' => $row['cached_at'] ?? null,
+                    'require_full_30_days_history' => true,
+                ]
+            );
+            $lastDto = $dto;
+
+            if (empty($dto['is_valid_omnibus_reduction']) || $dto['omnibus_reference_price'] === null) {
+                continue;
+            }
+
+            $referencePrice = (float)$dto['omnibus_reference_price'];
+            if ($lowestReference === null || $referencePrice < $lowestReference) {
+                $lowestReference = $referencePrice;
+            }
+        }
+
+        return [
+            'product_id' => $productId,
+            'current_price' => $lastDto['current_price'] ?? null,
+            'rolling_lowest_price_last_30_days' => $lastDto['rolling_lowest_price_last_30_days'] ?? null,
+            'lowest_price_last_30_days' => $lastDto['lowest_price_last_30_days'] ?? null,
+            'is_discounted_now' => $lowestReference !== null,
+            'omnibus_reference_price' => $lowestReference,
+            'effective_currency' => $lastDto['effective_currency'] ?? $currency,
+        ];
+    }
+
+    private function selectRowsForPricing(array $productRows): array {
+        $variantRows = array_values(array_filter($productRows, static function (array $row): bool {
+            return isset($row['variant_id']) && $row['variant_id'] !== null;
+        }));
+
+        return !empty($variantRows) ? $variantRows : $productRows;
+    }
+
+    private function resolveCurrentPrice(array $product): ?float {
+        if (isset($product['sale_price']) && $product['sale_price'] !== null && (float)$product['sale_price'] > 0) {
+            return (float)$product['sale_price'];
+        }
+
+        return isset($product['price']) ? (float)$product['price'] : null;
+    }
+
+    private function buildParentProductsCacheMap(array $cachedProducts): array {
+        $map = [];
+
+        foreach ($cachedProducts as $product) {
+            $productId = (int)$product['product_id'];
+            $isParent = empty($product['variant_id']) || ($product['type'] ?? null) === 'product';
+            if ($isParent || !isset($map[$productId])) {
+                $map[$productId] = $product;
+            }
+        }
+
+        return $map;
     }
 
     private function baseProductClause(): string {

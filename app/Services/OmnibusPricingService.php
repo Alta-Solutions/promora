@@ -62,6 +62,10 @@ class OmnibusPricingService {
                 'lowest_price_last_30_days' => null,
                 'is_discounted_now' => false,
                 'omnibus_reference_price' => null,
+                'candidate_omnibus_reference_price' => null,
+                'is_price_drop_candidate' => false,
+                'is_valid_omnibus_reduction' => false,
+                'invalid_reduction_reason' => null,
                 'has_full_30_day_history' => false,
                 'discount_started_at' => null,
                 'omnibus_window_start' => null,
@@ -114,7 +118,7 @@ class OmnibusPricingService {
         $currentState = $states[count($states) - 1];
         $previousState = count($states) > 1 ? $states[count($states) - 2] : null;
         $previousDistinctPrice = $previousState['price'] ?? null;
-        $isDiscountedNow = $previousDistinctPrice !== null
+        $isPriceDropCandidate = $previousDistinctPrice !== null
             && $this->comparePrices($currentPrice, $previousDistinctPrice) < 0;
 
         $rollingWindowStart = $referenceAt->sub(new \DateInterval('P30D'));
@@ -130,13 +134,16 @@ class OmnibusPricingService {
         }
 
         $omnibusReferencePrice = null;
+        $candidateOmnibusReferencePrice = null;
         $discountStartedAt = null;
         $omnibusWindowStart = null;
+        $isValidOmnibusReduction = false;
+        $invalidReductionReason = null;
 
-        if ($isDiscountedNow) {
+        if ($isPriceDropCandidate) {
             $discountStartedAt = new \DateTimeImmutable($currentState['recorded_at'], $this->timeZone);
             $omnibusWindowStart = $discountStartedAt->sub(new \DateInterval('P30D'));
-            $omnibusReferencePrice = $this->calculateWindowMinimum(
+            $candidateOmnibusReferencePrice = $this->calculateWindowMinimum(
                 $normalizedRows,
                 $omnibusWindowStart,
                 $discountStartedAt,
@@ -144,7 +151,16 @@ class OmnibusPricingService {
             );
 
             if ($requireFullWindowHistory && !$this->hasHistoryAtOrBefore($normalizedRows, $omnibusWindowStart)) {
-                $omnibusReferencePrice = null;
+                $candidateOmnibusReferencePrice = null;
+            }
+
+            if ($candidateOmnibusReferencePrice === null) {
+                $invalidReductionReason = 'missing_reference_price';
+            } elseif ($this->comparePrices($currentPrice, $candidateOmnibusReferencePrice) < 0) {
+                $isValidOmnibusReduction = true;
+                $omnibusReferencePrice = $candidateOmnibusReferencePrice;
+            } else {
+                $invalidReductionReason = 'not_below_30_day_lowest';
             }
         }
 
@@ -152,8 +168,12 @@ class OmnibusPricingService {
             'current_price' => $currentPrice,
             'rolling_lowest_price_last_30_days' => $rollingLowest,
             'lowest_price_last_30_days' => $rollingLowest,
-            'is_discounted_now' => $isDiscountedNow,
+            'is_discounted_now' => $isValidOmnibusReduction,
             'omnibus_reference_price' => $omnibusReferencePrice,
+            'candidate_omnibus_reference_price' => $candidateOmnibusReferencePrice,
+            'is_price_drop_candidate' => $isPriceDropCandidate,
+            'is_valid_omnibus_reduction' => $isValidOmnibusReduction,
+            'invalid_reduction_reason' => $invalidReductionReason,
             'has_full_30_day_history' => $hasFull30DayHistory,
             'discount_started_at' => $discountStartedAt ? $discountStartedAt->format('Y-m-d H:i:s') : null,
             'omnibus_window_start' => $omnibusWindowStart ? $omnibusWindowStart->format('Y-m-d H:i:s') : null,

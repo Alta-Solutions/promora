@@ -42,16 +42,22 @@ class PromotionController {
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!Csrf::validateRequest()) {
                 http_response_code(403);
-                echo trans('common.csrf_invalid');
+                echo \trans('common.csrf_invalid');
                 return;
             }
 
             $data = $this->getFormData();
-            // Umesto direktnog upisa u model, koristimo servis koji kreira i Job za sync
-            $id = $this->promotionService->createPromotion($data);
-            
-            header('Location: ?route=promotions&success=created');
-            exit;
+            try {
+                // Umesto direktnog upisa u model, koristimo servis koji kreira i Job za sync
+                $id = $this->promotionService->createPromotion($data);
+
+                header('Location: ?route=promotions&success=created');
+                exit;
+            } catch (\InvalidArgumentException $e) {
+                http_response_code(422);
+                $formError = $e->getMessage();
+                $formDefaults = $this->buildFormDefaultsFromData($data);
+            }
         }
         
         $settings = $this->getStoreSettings();
@@ -106,21 +112,32 @@ class PromotionController {
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!Csrf::validateRequest()) {
                 http_response_code(403);
-                echo trans('common.csrf_invalid');
+                echo \trans('common.csrf_invalid');
                 return;
             }
 
             $data = $this->getFormData();
-            $this->promotionService->updatePromotion($id, $data);
-            
-            header('Location: ?route=promotions&success=updated');
-            exit;
+            try {
+                $this->promotionService->updatePromotion($id, $data);
+
+                header('Location: ?route=promotions&success=updated');
+                exit;
+            } catch (\InvalidArgumentException $e) {
+                http_response_code(422);
+                $formError = $e->getMessage();
+                $promotion = array_merge(
+                    $this->promotionModel->findById($id) ?: ['id' => $id],
+                    $this->buildFormDefaultsFromData($data)
+                );
+            }
         }
 
         $settings = $this->getStoreSettings();
         $allowedCustomFields = $settings['allowed_filters'] ?? [];
         
-        $promotion = $this->promotionModel->findById($id);
+        if (!isset($promotion)) {
+            $promotion = $this->promotionModel->findById($id);
+        }
         $categories = $this->api->getCategories();
         $brands = $this->api->getBrands();
         
@@ -148,7 +165,7 @@ class PromotionController {
 
         if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
             http_response_code(403);
-            echo json_encode(['success' => false, 'error' => trans('common.csrf_invalid')]);
+            echo json_encode(['success' => false, 'error' => \trans('common.csrf_invalid')]);
             return;
         }
         
@@ -156,7 +173,11 @@ class PromotionController {
         $discountPercent = floatval($_POST['discount_percent'] ?? 0);
         
         try {
-            $preview = $this->promotionService->previewPromotionProducts($filters, $discountPercent);
+            $preview = $this->promotionService->previewPromotionProducts(
+                $filters,
+                $discountPercent,
+                $_POST['start_date'] ?? null
+            );
             echo json_encode(['success' => true, 'data' => $preview]);
         } catch (\Exception $e) {
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
@@ -171,7 +192,7 @@ class PromotionController {
 
         if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
             http_response_code(403);
-            echo json_encode(['success' => false, 'error' => trans('common.csrf_invalid')]);
+            echo json_encode(['success' => false, 'error' => \trans('common.csrf_invalid')]);
             return;
         }
         
@@ -190,7 +211,7 @@ class PromotionController {
 
         if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
             http_response_code(403);
-            echo json_encode(['success' => false, 'error' => trans('common.csrf_invalid')]);
+            echo json_encode(['success' => false, 'error' => \trans('common.csrf_invalid')]);
             return;
         }
 
@@ -201,7 +222,7 @@ class PromotionController {
         $allowedCustomFields = $this->getStoreSettings()['allowed_filters'] ?? [];
         if ($fieldName === '' || !in_array($fieldName, $allowedCustomFields, true)) {
             http_response_code(400);
-            echo json_encode(['success' => false, 'error' => trans('promotions.api.invalid_custom_field')]);
+            echo json_encode(['success' => false, 'error' => \trans('promotions.api.invalid_custom_field')]);
             return;
         }
 
@@ -219,7 +240,7 @@ class PromotionController {
 
         if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::validateRequest()) {
             http_response_code(403);
-            echo json_encode(['success' => false, 'error' => trans('common.csrf_invalid')]);
+            echo json_encode(['success' => false, 'error' => \trans('common.csrf_invalid')]);
             return;
         }
 
@@ -267,12 +288,18 @@ class PromotionController {
         $sourceName = trim((string)($promotion['name'] ?? ''));
 
         $duplicate['id'] = null;
-        $duplicate['name'] = ($sourceName !== '' ? $sourceName : trans('promotions.form.default_name')) . ' ' . trans('promotions.form.duplicate_name_suffix');
+        $duplicate['name'] = ($sourceName !== '' ? $sourceName : \trans('promotions.form.default_name')) . ' ' . \trans('promotions.form.duplicate_name_suffix');
         $duplicate['custom_field_value'] = $promotion['custom_field_value'] ?? $promotion['name'] ?? '';
         $duplicate['description'] = $promotion['description'] ?? '';
         $duplicate['filters'] = $promotion['filters'] ?? '{}';
 
         return $duplicate;
+    }
+
+    private function buildFormDefaultsFromData(array $data): array {
+        $defaults = $data;
+        $defaults['filters'] = json_encode($data['filters'] ?? [], JSON_UNESCAPED_UNICODE);
+        return $defaults;
     }
 
     private function getSubmittedFilters() {
