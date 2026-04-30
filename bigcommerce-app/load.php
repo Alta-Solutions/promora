@@ -1,8 +1,9 @@
 <?php
-session_start();
 require_once '../config.php';
+require_once __DIR__ . '/../app/Support/session.php';
 
-// Ako koristiš composer autoload:
+appStartSession();
+
 if (file_exists(__DIR__ . '/../vendor/autoload.php')) {
     require_once __DIR__ . '/../vendor/autoload.php';
 }
@@ -10,110 +11,186 @@ if (file_exists(__DIR__ . '/../vendor/autoload.php')) {
 use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
 
-/**
- * App Load Endpoint
- * Called when merchant opens the app from BigCommerce control panel
- */
+function bcLoadBase64Decode(string $value) {
+    $normalized = strtr($value, '-_', '+/');
+    $padding = strlen($normalized) % 4;
+
+    if ($padding > 0) {
+        $normalized .= str_repeat('=', 4 - $padding);
+    }
+
+    return base64_decode($normalized, true);
+}
+
+function bcLoadDecodeJson(string $json): array {
+    $data = json_decode($json, true);
+
+    if (!is_array($data)) {
+        throw new Exception('Invalid payload JSON');
+    }
+
+    return $data;
+}
+
+function bcLoadDecodeLegacyPayload(string $signedPayload, string $clientSecret): array {
+    $parts = explode('.', $signedPayload, 2);
+
+    if (count($parts) !== 2) {
+        throw new Exception('Invalid signed_payload format');
+    }
+
+    [$dataPart, $signaturePart] = $parts;
+
+    $expectedRaw = hash_hmac('sha256', $dataPart, $clientSecret, true);
+    $expectedHex = hash_hmac('sha256', $dataPart, $clientSecret);
+    $signatureIsValid = hash_equals($expectedHex, $signaturePart);
+
+    if (!$signatureIsValid) {
+        $decodedSignature = bcLoadBase64Decode($signaturePart);
+
+        if ($decodedSignature !== false && ctype_xdigit($decodedSignature)) {
+            $decodedSignature = hex2bin($decodedSignature);
+        } elseif (ctype_xdigit($signaturePart) && strlen($signaturePart) === 64) {
+            $decodedSignature = hex2bin($signaturePart);
+        }
+
+        $signatureIsValid = is_string($decodedSignature)
+            && hash_equals($expectedRaw, $decodedSignature);
+    }
+
+    if (!$signatureIsValid) {
+        throw new Exception('Invalid signed_payload signature');
+    }
+
+    $json = bcLoadBase64Decode($dataPart);
+
+    if ($json === false) {
+        throw new Exception('Could not decode signed_payload data');
+    }
+
+    return bcLoadDecodeJson($json);
+}
+
+function bcLoadDecodeJwtPayload(string $signedPayloadJwt, string $clientSecret): array {
+    $payload = JWT::decode($signedPayloadJwt, new Key($clientSecret, 'HS256'));
+    $data = json_decode(json_encode($payload), true);
+
+    if (!is_array($data)) {
+        throw new Exception('Invalid signed_payload_jwt data');
+    }
+
+    $clientId = trim((string) (Config::$BC_CLIENT_ID ?? ''));
+    $audience = $data['aud'] ?? null;
+
+    if ($clientId !== '' && $audience !== $clientId) {
+        throw new Exception('Invalid signed_payload_jwt audience');
+    }
+
+    if (($data['iss'] ?? null) !== 'bc') {
+        throw new Exception('Invalid signed_payload_jwt issuer');
+    }
+
+    return $data;
+}
+
+function bcLoadExtractStoreContext(array $data): array {
+    $context = $data['context'] ?? $data['sub'] ?? null;
+
+    if (is_string($context) && preg_match('#^stores/([^/]+)$#', $context, $matches)) {
+        return [$matches[1], $context];
+    }
+
+    if (!empty($data['store_hash']) && is_string($data['store_hash'])) {
+        return [$data['store_hash'], 'stores/' . $data['store_hash']];
+    }
+
+    throw new Exception('Missing valid store context in payload');
+}
+
+function bcLoadUserData(array $data): array {
+    $user = is_array($data['user'] ?? null) ? $data['user'] : [];
+    $owner = is_array($data['owner'] ?? null) ? $data['owner'] : [];
+
+    $userId = $user['id'] ?? $data['user_id'] ?? null;
+    $userEmail = $user['email'] ?? $data['user_email'] ?? null;
+    $ownerId = $owner['id'] ?? $data['owner_id'] ?? null;
+    $ownerEmail = $owner['email'] ?? $data['owner_email'] ?? null;
+
+    $isOwner = false;
+
+    if ($userId !== null && $ownerId !== null) {
+        $isOwner = (string) $userId === (string) $ownerId;
+    } elseif ($userEmail && $ownerEmail) {
+        $isOwner = strtolower((string) $userEmail) === strtolower((string) $ownerEmail);
+    }
+
+    return [
+        'user_id' => $userId,
+        'user_email' => $userEmail,
+        'user_locale' => $user['locale'] ?? null,
+        'owner_id' => $ownerId,
+        'owner_email' => $ownerEmail,
+        'is_owner' => $isOwner,
+    ];
+}
 
 $signedPayloadJwt = $_GET['signed_payload_jwt'] ?? null;
-$signedPayload    = $_GET['signed_payload'] ?? null;
-
-$data = null;
+$signedPayload = $_GET['signed_payload'] ?? null;
 
 if (!$signedPayloadJwt && !$signedPayload) {
-    error_log("Load error: Missing signed_payload and signed_payload_jwt");
+    error_log('Load error: Missing signed_payload and signed_payload_jwt');
     die('Missing signed payload. Please open the app from BigCommerce control panel.');
 }
 
-$clientSecret = trim($_ENV['BC_CLIENT_SECRET'] ?? '');
+$clientSecret = trim((string) (Config::$BC_CLIENT_SECRET ?? ($_ENV['BC_CLIENT_SECRET'] ?? '')));
 
-if (!$clientSecret) {
+if ($clientSecret === '') {
     die('Missing BC_CLIENT_SECRET in environment config.');
 }
 
-
-    if ($signedPayloadJwt) {
-        // ✅ NOVI JWT FORMAT
-        $payload = JWT::decode($signedPayloadJwt, new Key($clientSecret, 'HS256'));
-        // pretvori u array radi lakšeg rada
-        $data = json_decode(json_encode($payload), true);
-    } else {
-        // ✅ STARI signed_payload FORMAT: data.signature (HMAC)
-        list($dataPart, $signature) = explode('.', $signedPayload, 2);
-
-        $expectedSig = hash_hmac('sha256', $dataPart, $clientSecret);
-
-        // BigCommerce šalje hex string, ne menjaš ništa osim poređenja
-        if (!hash_equals($expectedSig, $signature)) {
-            throw new Exception('Invalid signed_payload signature');
-        }
-
-        $json = base64_decode($dataPart);
-        $data = json_decode($json, true);
-
-
-    }
-
-    // Sada u $data imaš:
-    // - $data['context'] = "stores/xxxxxx"
-    // - $data['user']['id'], $data['user']['email'], ...
-    // - $data['owner'] ...
-
-    $context = $data['context'] ?? $data['sub'] ?? null;
-
-    if (!$context) {
-        throw new Exception('Missing context/sub in payload');
-    }
-
-    // Izvuci store_hash iz context-a: "stores/{hash}"
-    $parts   = explode('/', $context);
-    $storeHash = $parts[1] ?? null;
-
-    if (!$storeHash) {
-        throw new Exception('Could not extract store_hash from context');
-    }
-
-    // ✅ Ovde povlačiš iz svoje baze kredencijale za taj store
-    // npr. tabela "stores" sa kolonama (store_hash, access_token, scope, user_id, itd.)
-    // $db = Database::getInstance();
-    // $store = $db->fetch("SELECT * FROM stores WHERE store_hash = ?", [$storeHash]);
-    //
-    // if (!$store) throw new Exception("Store not registered in app");
 try {
+    $data = $signedPayloadJwt
+        ? bcLoadDecodeJwtPayload($signedPayloadJwt, $clientSecret)
+        : bcLoadDecodeLegacyPayload($signedPayload, $clientSecret);
+
+    [$storeHash, $context] = bcLoadExtractStoreContext($data);
+    $bcUser = bcLoadUserData($data);
+
     $db = \App\Models\Database::getInstance();
-    
-    // Dohvati store podatke. Prethodno dobijeni user_id i access_token
-    // nisu bitni, bitan je samo store_hash i access_token.
     $store = $db->fetchOne(
-        "SELECT access_token, store_hash FROM bigcommerce_stores WHERE store_hash = ?", 
+        'SELECT access_token, store_hash FROM bigcommerce_stores WHERE store_hash = ? AND is_active = 1',
         [$storeHash]
     );
 
     if (!$store) {
-        throw new Exception("Store is not registered or active in the application.");
+        throw new Exception('Store is not registered or active in the application.');
     }
 
-    // Setuj sesiju za korisnika koji se prijavio (bilo koji admin)
-    // Svi admini unutar istog BigCommerce stvora dele isti access_token!
-    $_SESSION['store_hash'] = $storeHash;
-    $_SESSION['access_token'] = $store['access_token']; // <--- BITNO: Token iz DB
+    session_regenerate_id(true);
+    $db->setStoreContext($storeHash);
+
     $_SESSION['authenticated'] = true;
-    
-    // Ovi podaci se menjaju zavisno od admina i koriste se samo za prikaz/logovanje
-    $_SESSION['context']    = $context;
-    $_SESSION['user_id']    = $data['user']['id']   ?? null;
-    $_SESSION['user_email'] = $data['user']['email'] ?? null;
-    $_SESSION['is_owner']   = (($data['owner']['id'] ?? null) === ($data['user']['id'] ?? null));
+    $_SESSION['auth_source'] = 'bigcommerce';
+    $_SESSION['store_hash'] = $storeHash;
+    $_SESSION['access_token'] = $store['access_token'];
+    $_SESSION['context'] = $context;
 
-    // ✅ Gotovo, user je autentifikovan → idi na dashboard
-    header("Location: /index.php?route=dashboard");
+    // These values identify the BigCommerce control panel user that launched the app.
+    $_SESSION['user_id'] = $bcUser['user_id'];
+    $_SESSION['user_email'] = $bcUser['user_email'];
+    $_SESSION['user_locale'] = $bcUser['user_locale'];
+    $_SESSION['owner_id'] = $bcUser['owner_id'];
+    $_SESSION['owner_email'] = $bcUser['owner_email'];
+    $_SESSION['is_owner'] = $bcUser['is_owner'];
+
+    $db->query('UPDATE bigcommerce_stores SET last_accessed = NOW() WHERE store_hash = ?', [$storeHash]);
+
+    session_write_close();
+    header('Location: ../index.php?route=dashboard');
     exit;
-
-} catch (Exception $e) {
+} catch (Throwable $e) {
     $errorMessage = $e->getMessage();
-    error_log("Load error during DB fetch/session set: " . $errorMessage);
-
-    // Ovde možeš zadržati svoj postojeći HTML za debugging
+    error_log('Load error during payload verification/session set: ' . $errorMessage);
     ?>
     <!DOCTYPE html>
     <html lang="en">
@@ -158,17 +235,10 @@ try {
             .hint {
                 font-size: 14px;
                 color: #9ca3af;
+                line-height: 1.5;
             }
-            .btn {
-                display: inline-block;
-                margin-top: 12px;
-                padding: 10px 16px;
-                border-radius: 999px;
-                background: #22c55e;
-                color: #022c22;
-                text-decoration: none;
-                font-weight: 600;
-                font-size: 14px;
+            code {
+                color: #e5e7eb;
             }
         </style>
     </head>
@@ -180,8 +250,10 @@ try {
             </div>
             <p class="hint">
                 Make sure that:<br>
-                – The <code>BC_CLIENT_SECRET</code> in your <code>.env</code> matches the one in BigCommerce DevTools<br>
-                – You are opening the app from BigCommerce control panel, not directly via URL.
+                - <code>BC_CLIENT_ID</code> and <code>BC_CLIENT_SECRET</code> match the BigCommerce app profile<br>
+                - The store is installed and active in <code>bigcommerce_stores</code><br>
+                - Multiple Users is enabled in the BigCommerce Developer Portal app profile when non-owner users need access<br>
+                - The store owner has granted this BigCommerce user permission to load the app.
             </p>
         </div>
     </body>

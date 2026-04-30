@@ -1,6 +1,8 @@
 <?php
-session_start();
 require_once '../config.php';
+require_once __DIR__ . '/../app/Support/session.php';
+
+appStartSession();
 
 /**
  * OAuth Callback Handler
