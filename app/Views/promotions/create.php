@@ -1,6 +1,6 @@
 <?php
-    $promotionDefaults = $duplicatePromotion ?? [];
-    $isDuplicate = !empty($promotionDefaults);
+    $promotionDefaults = $formDefaults ?? $duplicatePromotion ?? [];
+    $isDuplicate = !empty($duplicatePromotion);
     $defaultStartDateTime = strtotime('now');
     $defaultEndDateTime = strtotime(date('Y-m-d', strtotime('+7 days')) . ' 23:59:00');
     $startDateTime = strtotime($promotionDefaults['start_date'] ?? '') ?: $defaultStartDateTime;
@@ -30,6 +30,10 @@
         <h2><?= trans_e($isDuplicate ? 'promotions.form.duplicate_title' : 'promotions.form.create_title') ?></h2>
         <a href="?route=promotions" class="promotion-back-link">← <?= trans_e('common.back') ?></a>
     </div>
+
+    <?php if (!empty($formError)): ?>
+        <div class="promotion-form-error"><?= htmlspecialchars($formError, ENT_QUOTES, 'UTF-8') ?></div>
+    <?php endif; ?>
 
     <form method="POST" action="?route=promotions&action=create" id="promotionForm" class="promotion-create-form">
         <?= \App\Support\Csrf::inputField() ?>
@@ -160,12 +164,14 @@
                             <tr>
                                 <th><?= trans_e('promotions.preview.name_sku') ?></th>
                                 <th><?= trans_e('promotions.preview.price') ?></th>
+                                <th><?= trans_e('promotions.preview.lowest_30d') ?></th>
                                 <th><?= trans_e('promotions.preview.new_price') ?></th>
+                                <th><?= trans_e('promotions.preview.omnibus_status') ?></th>
                                 <th><?= trans_e('promotions.preview.stock') ?></th>
                             </tr>
                         </thead>
                         <tbody id="preview-table-body">
-                            <tr><td colspan="4" class="promotion-preview-empty"><?= trans_e('promotions.preview.empty_loading') ?></td></tr>
+                            <tr><td colspan="6" class="promotion-preview-empty"><?= trans_e('promotions.preview.empty_loading') ?></td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -956,21 +962,44 @@ function renderPreviewRows(products) {
         : products;
 
     if (visibleProducts.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" class="promotion-preview-empty">${escapeHtml(appT('promotions.preview.empty_filtered'))}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="promotion-preview-empty">${escapeHtml(appT('promotions.preview.empty_filtered'))}</td></tr>`;
         return;
     }
 
+    const formatOptionalMoney = value => {
+        if (value === null || value === undefined || value === '') {
+            return '-';
+        }
+
+        return formatPreviewMoney(value);
+    };
+
+    const renderOmnibusStatus = product => {
+        const status = product.omnibus_status || 'disabled';
+        const isInvalid = status === 'invalid';
+        const labelKey = isInvalid
+            ? 'promotions.preview.omnibus_invalid'
+            : (status === 'valid' ? 'promotions.preview.omnibus_valid' : 'promotions.preview.omnibus_not_checked');
+        const warning = product.omnibus_warning
+            ? `<div class="promotion-preview-omnibus-warning">${escapeHtml(product.omnibus_warning)}</div>`
+            : '';
+
+        return `<span class="promotion-preview-omnibus-badge promotion-preview-omnibus-${escapeHtml(status)}">${escapeHtml(appT(labelKey))}</span>${warning}`;
+    };
+
     tbody.innerHTML = visibleProducts.map(product => `
-        <tr>
+        <tr class="${product.will_apply ? '' : 'promotion-preview-row-invalid'}">
             <td>
                 <div class="promotion-preview-name">${escapeHtml(product.name || '')}</div>
                 <div class="promotion-preview-sku">${escapeHtml(appT('promotions.preview.sku_label', { sku: product.sku || '' }))}</div>
             </td>
             <td class="promotion-preview-number">${formatPreviewMoney(product.original_price)}</td>
+            <td class="promotion-preview-number">${formatOptionalMoney(product.lowest_price_30d)}</td>
             <td class="promotion-preview-number promotion-preview-new-price">
                 ${formatPreviewMoney(product.promo_price)}
                 <div class="promotion-preview-saving">-${formatPreviewMoney(product.savings)}</div>
             </td>
+            <td class="promotion-preview-omnibus">${renderOmnibusStatus(product)}</td>
             <td class="promotion-preview-stock">${escapeHtml(product.inventory ?? '')}</td>
         </tr>
     `).join('');
@@ -990,6 +1019,7 @@ async function updatePreview() {
         params.append('_csrf_token', csrfToken);
         params.append('filters', JSON.stringify(filtersObj));
         params.append('discount_percent', discount);
+        params.append('start_date', document.getElementById('start-date')?.value || '');
 
         const response = await fetch('?route=promotions&action=preview', {
             method: 'POST',
@@ -1006,10 +1036,12 @@ async function updatePreview() {
             document.getElementById('preview-count').textContent = data.total_products;
             previewProducts = products;
             renderPreviewRows(previewProducts);
+        } else {
+            document.getElementById('preview-table-body').innerHTML = `<tr><td colspan="6" class="promotion-preview-empty promotion-preview-error">${escapeHtml(result.error || appT('common.unknown_error'))}</td></tr>`;
         }
     } catch (error) {
         console.error(appT('promotions.preview.preview_error'), error);
-        document.getElementById('preview-table-body').innerHTML = `<tr><td colspan="4" class="promotion-preview-empty promotion-preview-error">${escapeHtml(appT('promotions.preview.load_error'))}</td></tr>`;
+        document.getElementById('preview-table-body').innerHTML = `<tr><td colspan="6" class="promotion-preview-empty promotion-preview-error">${escapeHtml(appT('promotions.preview.load_error'))}</td></tr>`;
     }
 }
 

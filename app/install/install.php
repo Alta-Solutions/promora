@@ -180,6 +180,20 @@ try {
             INDEX `idx_store_hash_processed` (`store_hash`, `processed`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
+        // Kratkotrajni markeri za webhook-ove nastale iz API poziva same aplikacije
+        "CREATE TABLE IF NOT EXISTS `webhook_suppressions` (
+            `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            `store_hash` VARCHAR(255) NOT NULL,
+            `scope` VARCHAR(255) NOT NULL,
+            `product_id` INT UNSIGNED NOT NULL,
+            `remaining_events` INT UNSIGNED NOT NULL DEFAULT 1,
+            `reason` VARCHAR(100) NOT NULL DEFAULT 'app_update',
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `expires_at` DATETIME NOT NULL,
+            UNIQUE KEY `uniq_store_scope_product` (`store_hash`, `scope`, `product_id`),
+            INDEX `idx_expires_at` (`expires_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+
         // Tabela za istoriju cena (Omnibus)
         "CREATE TABLE IF NOT EXISTS `product_price_history` (
             `id` BIGINT AUTO_INCREMENT PRIMARY KEY,

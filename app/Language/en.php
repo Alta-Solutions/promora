@@ -187,7 +187,16 @@ return [
             'search_placeholder' => 'Search product',
             'name_sku' => 'Name / SKU',
             'price' => 'Price',
+            'lowest_30d' => 'Lowest 30d',
             'new_price' => 'New price',
+            'omnibus_status' => 'Omnibus',
+            'omnibus_valid' => 'Valid',
+            'omnibus_invalid' => 'Blocked',
+            'omnibus_not_checked' => 'Not checked',
+            'omnibus_disabled' => 'Omnibus tracker is disabled; 30-day lowest price was not checked.',
+            'omnibus_not_below_reference' => 'Promo price must be lower than the lowest price in the previous 30 days.',
+            'omnibus_not_reduction' => 'This is not a price reduction.',
+            'omnibus_missing_reference' => 'Missing complete 30-day price history for this item.',
             'stock' => 'Stock',
             'empty_loading' => 'Loading...',
             'empty_filtered' => 'No products match the filters.',
@@ -197,6 +206,10 @@ return [
         ],
         'api' => [
             'invalid_custom_field' => 'Invalid custom field',
+        ],
+        'validation' => [
+            'discount_numeric' => 'Discount must be a number.',
+            'discount_range' => 'Discount must be greater than 0 and lower than 100.',
         ],
     ],
     'product_picker' => [

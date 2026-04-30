@@ -8,6 +8,8 @@ class BigCommerceAPI {
     private $headers;
     private $requestCount = 0;
     private $storeHash;
+    private $db;
+    private $webhookSuppressionService;
     
     // Dodajemo varijable za praćenje limita
     private $rateLimitLeft = 100; // Početna pretpostavka
@@ -23,6 +25,7 @@ class BigCommerceAPI {
     public function __construct($storeHash = null, $accessToken = null) {
         // 1. Dohvati kontekst prodavnice
         $db = Database::getInstance();
+        $this->db = $db;
         $this->storeHash = $storeHash ?? $db->getStoreContext();
         
         // 2. Pokušaj da nađeš token (Prioritet: Argument > Sesija > Config)
@@ -114,6 +117,8 @@ class BigCommerceAPI {
     }
 
     protected function request($method, $endpoint, $data = null) {
+        $this->suppressWebhookForWrite($method, $endpoint, $data);
+
         $retries = 0;
 
         do {
@@ -205,6 +210,8 @@ class BigCommerceAPI {
         $results = [];
 
         foreach ($batches as $batch) {
+            $this->suppressWebhooksForWriteBatch($batch);
+
             // Provera rate limita pre slanja batch-a
             $this->checkRateLimit();
 
@@ -565,6 +572,105 @@ class BigCommerceAPI {
         $status = (int)($response['status'] ?? 0);
 
         return $status >= 200 && $status < 300;
+    }
+
+    private function suppressWebhookForWrite($method, $endpoint, $data = null): void {
+        $this->suppressWebhooksForWriteBatch([[
+            'method' => $method,
+            'endpoint' => $endpoint,
+            'data' => $data,
+        ]]);
+    }
+
+    private function suppressWebhooksForWriteBatch(array $requests): void {
+        $productIds = [];
+        $reason = 'app_product_update';
+
+        foreach ($requests as $request) {
+            $method = strtoupper((string)($request['method'] ?? ''));
+            if (!in_array($method, ['POST', 'PUT', 'DELETE'], true)) {
+                continue;
+            }
+
+            $endpoint = (string)($request['endpoint'] ?? '');
+            $ids = $this->extractProductIdsForWrite($endpoint, $request['data'] ?? null);
+            if (empty($ids)) {
+                continue;
+            }
+
+            $productIds = array_merge($productIds, $ids);
+            $reason = $this->getWebhookSuppressionReason($endpoint);
+        }
+
+        if (empty($productIds) || empty($this->storeHash)) {
+            return;
+        }
+
+        try {
+            $this->getWebhookSuppressionService()->suppressProductUpdates(
+                $this->storeHash,
+                $productIds,
+                $reason
+            );
+        } catch (\Throwable $e) {
+            error_log("Webhook suppression marker failed: " . $e->getMessage());
+        }
+    }
+
+    private function extractProductIdsForWrite(string $endpoint, $data = null): array {
+        $path = trim(explode('?', $endpoint, 2)[0], '/');
+        $productIds = [];
+
+        if ($path === 'catalog/products' && is_array($data)) {
+            foreach ($data as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+
+                $productId = $item['id'] ?? $item['product_id'] ?? null;
+                if ($productId) {
+                    $productIds[] = (int)$productId;
+                }
+            }
+
+            return $productIds;
+        }
+
+        if ($path === 'catalog/products/variants' && is_array($data)) {
+            foreach ($data as $item) {
+                if (is_array($item) && !empty($item['product_id'])) {
+                    $productIds[] = (int)$item['product_id'];
+                }
+            }
+
+            return $productIds;
+        }
+
+        if (preg_match('#^catalog/products/(\d+)(?:/|$)#', $path, $matches)) {
+            return [(int)$matches[1]];
+        }
+
+        return [];
+    }
+
+    private function getWebhookSuppressionReason(string $endpoint): string {
+        if (strpos($endpoint, '/custom-fields') !== false) {
+            return 'app_custom_field_update';
+        }
+
+        if (strpos($endpoint, '/variants') !== false || $endpoint === 'catalog/products') {
+            return 'app_price_update';
+        }
+
+        return 'app_product_update';
+    }
+
+    private function getWebhookSuppressionService(): WebhookSuppressionService {
+        if (!$this->webhookSuppressionService) {
+            $this->webhookSuppressionService = new WebhookSuppressionService($this->db);
+        }
+
+        return $this->webhookSuppressionService;
     }
     
     /**
