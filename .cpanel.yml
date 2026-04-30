@@ -1,0 +1,15 @@
+---
+deployment:
+  tasks:
+    # Update this path if the cPanel document root differs.
+    - export DEPLOYPATH=/home/rwdigital/promora.rwdigital.io/
+    - export PHPBIN=/usr/local/bin/ea-php82
+    - if [ ! -x "$PHPBIN" ]; then export PHPBIN=/usr/bin/php; fi
+    - if command -v composer >/dev/null 2>&1; then export COMPOSER="$(command -v composer)"; elif [ -x /opt/cpanel/composer/bin/composer ]; then export COMPOSER=/opt/cpanel/composer/bin/composer; else echo "Composer not found"; exit 1; fi
+    - /bin/mkdir -p "$DEPLOYPATH"
+    - /bin/mkdir -p "$DEPLOYPATH/logs" "$DEPLOYPATH/app/logs"
+    - /bin/cp -a app bigcommerce-app bin public webhook "$DEPLOYPATH"
+    - /bin/cp -a .htaccess composer.json composer.lock config.php favicon.ico index.php README.md "$DEPLOYPATH"
+    - test -f "$DEPLOYPATH/.env" || (echo "Missing production .env at $DEPLOYPATH/.env"; exit 1)
+    - cd "$DEPLOYPATH" && "$COMPOSER" install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+    - cd "$DEPLOYPATH" && "$PHPBIN" app/install/install.php
