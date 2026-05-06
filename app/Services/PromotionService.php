@@ -1188,26 +1188,46 @@ public function __construct(Database $db = null) {
             isset($item['variant_id']) ? (int)$item['variant_id'] : null,
             $this->getStoreCurrency(),
             $promoPrice,
-            $this->normalizeReferenceAt($referenceAt),
-            ['require_full_30_days_history' => true]
+            $this->normalizeReferenceAt($referenceAt)
         );
 
         $referencePrice = $dto['candidate_omnibus_reference_price']
             ?? $dto['omnibus_reference_price']
             ?? null;
+        $usedFallbackReference = false;
+        if ($referencePrice === null) {
+            $fallbackReferencePrice = $this->getBasePriceOmnibusReference($item, $promoPrice);
+            if ($fallbackReferencePrice !== null) {
+                $referencePrice = $fallbackReferencePrice;
+                $usedFallbackReference = true;
+            }
+        }
+
         $reason = $dto['invalid_reduction_reason'] ?? null;
         if ($referencePrice === null) {
             $reason = 'missing_reference_price';
-        } elseif (empty($dto['is_price_drop_candidate']) && empty($dto['is_valid_omnibus_reduction'])) {
-            $reason = $reason ?: 'not_price_reduction';
+            $isValid = false;
+        } else {
+            $isValid = $this->isPromoPriceBelowOmnibusReference($promoPrice, (float)$referencePrice);
+            if ($isValid) {
+                $reason = null;
+            } elseif (empty($dto['is_price_drop_candidate']) && !$usedFallbackReference) {
+                $reason = $reason ?: 'not_price_reduction';
+            } else {
+                $reason = $reason ?: 'not_below_30_day_lowest';
+            }
         }
 
-        $isValid = !empty($dto['is_valid_omnibus_reduction']);
+        $rollingLowest = isset($dto['rolling_lowest_price_last_30_days']) && $dto['rolling_lowest_price_last_30_days'] !== null
+            ? (float)$dto['rolling_lowest_price_last_30_days']
+            : null;
+        if ($rollingLowest === null && $usedFallbackReference) {
+            $rollingLowest = (float)$referencePrice;
+        }
+
         return [
             'lowest_price_30d' => $referencePrice !== null ? (float)$referencePrice : null,
-            'rolling_lowest_price_30d' => isset($dto['rolling_lowest_price_last_30_days']) && $dto['rolling_lowest_price_last_30_days'] !== null
-                ? (float)$dto['rolling_lowest_price_last_30_days']
-                : null,
+            'rolling_lowest_price_30d' => $rollingLowest,
             'omnibus_reference_price' => $referencePrice !== null ? (float)$referencePrice : null,
             'omnibus_valid' => $isValid,
             'will_apply' => $isValid,
@@ -1215,6 +1235,23 @@ public function __construct(Database $db = null) {
             'omnibus_warning' => $isValid ? '' : $this->buildOmnibusWarning($reason, $referencePrice),
             'omnibus_invalid_reason' => $isValid ? null : $reason,
         ];
+    }
+
+    private function getBasePriceOmnibusReference(array $item, float $promoPrice): ?float {
+        if (!isset($item['price']) || $item['price'] === null || $item['price'] === '') {
+            return null;
+        }
+
+        $basePrice = (float)$item['price'];
+        if ($basePrice <= 0 || !$this->isPromoPriceBelowOmnibusReference($promoPrice, $basePrice)) {
+            return null;
+        }
+
+        return $basePrice;
+    }
+
+    private function isPromoPriceBelowOmnibusReference(float $promoPrice, float $referencePrice): bool {
+        return round($promoPrice, 4) < round($referencePrice, 4);
     }
 
     private function calculatePromoPrice(float $originalPrice, float $discountPercent): float {
