@@ -78,6 +78,11 @@ public function __construct(Database $db = null) {
 
         if ($status === 'active') {
             $this->queueActivationJobsForPromotion($promotionId, $data['filters'] ?? []);
+        } else {
+            $appliedProducts = $this->countPromotionProducts($promotionId);
+            if ($this->shouldQueueCleanupAfterPromotionUpdate($status, $appliedProducts)) {
+                $this->queuePromotionCleanup($promotionId, $appliedProducts);
+            }
         }
 
         return $result;
@@ -221,6 +226,10 @@ public function __construct(Database $db = null) {
         }
 
         return 'active';
+    }
+
+    private function shouldQueueCleanupAfterPromotionUpdate(string $status, int $appliedProducts): bool {
+        return $status !== 'active' && $appliedProducts > 0;
     }
 
     /**
@@ -792,34 +801,147 @@ public function __construct(Database $db = null) {
         if (empty($promotions)) {
             return;
         }
-        
+
+        $this->batchSavePromotionProductsNullSafe($promotions);
+    }
+
+    private function batchSavePromotionProductsNullSafe(array $promotions): void {
+        $promotions = $this->normalizePromotionProductRows($promotions);
+        if (empty($promotions)) {
+            return;
+        }
+
+        foreach (array_chunk($promotions, 100) as $chunk) {
+            $existingRows = $this->fetchExistingPromotionProductRows($chunk);
+            $existingRowsByKey = [];
+
+            foreach ($existingRows as $row) {
+                $key = $this->getPromotionItemKey(
+                    (int)$row['product_id'],
+                    $row['variant_id'] !== null ? (int)$row['variant_id'] : null
+                );
+                $existingRowsByKey[$key][] = $row;
+            }
+
+            $rowsToInsert = [];
+            $duplicateIdsToDelete = [];
+
+            foreach ($chunk as $promo) {
+                $key = $this->getPromotionItemKey($promo['product_id'], $promo['variant_id']);
+                $existingForItem = $existingRowsByKey[$key] ?? [];
+
+                if (!empty($existingForItem)) {
+                    $primaryRow = array_shift($existingForItem);
+                    foreach ($existingForItem as $duplicateRow) {
+                        $duplicateIdsToDelete[] = (int)$duplicateRow['id'];
+                    }
+
+                    $this->db->query(
+                        "UPDATE promotion_products
+                         SET promotion_id = ?, custom_field_id = ?, synced_at = NOW()
+                         WHERE store_hash = ? AND id = ?",
+                        [
+                            $promo['promotion_id'],
+                            $promo['custom_field_id'],
+                            $this->storeHash,
+                            (int)$primaryRow['id'],
+                        ]
+                    );
+                    continue;
+                }
+
+                $rowsToInsert[] = $promo;
+            }
+
+            if (!empty($duplicateIdsToDelete)) {
+                $placeholders = str_repeat('?,', count($duplicateIdsToDelete) - 1) . '?';
+                $this->db->query(
+                    "DELETE FROM promotion_products WHERE store_hash = ? AND id IN ($placeholders)",
+                    array_merge([$this->storeHash], $duplicateIdsToDelete)
+                );
+            }
+
+            $this->insertPromotionProductRows($rowsToInsert);
+        }
+    }
+
+    private function normalizePromotionProductRows(array $promotions): array {
+        $normalized = [];
+
+        foreach ($promotions as $promo) {
+            $productId = (int)($promo['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $variantId = isset($promo['variant_id']) && $promo['variant_id'] !== null && $promo['variant_id'] !== ''
+                ? (int)$promo['variant_id']
+                : null;
+            $key = $this->getPromotionItemKey($productId, $variantId);
+
+            $normalized[$key] = [
+                'promotion_id' => (int)($promo['promotion_id'] ?? 0),
+                'product_id' => $productId,
+                'variant_id' => $variantId,
+                'custom_field_id' => isset($promo['custom_field_id']) && $promo['custom_field_id'] !== null
+                    ? (int)$promo['custom_field_id']
+                    : null,
+            ];
+        }
+
+        return array_values(array_filter($normalized, static function (array $promo): bool {
+            return $promo['promotion_id'] > 0;
+        }));
+    }
+
+    private function fetchExistingPromotionProductRows(array $promotions): array {
+        if (empty($promotions)) {
+            return [];
+        }
+
+        $conditions = [];
+        $params = [$this->storeHash];
+
+        foreach ($promotions as $promo) {
+            $conditions[] = '(product_id = ? AND variant_id <=> ?)';
+            $params[] = $promo['product_id'];
+            $params[] = $promo['variant_id'];
+        }
+
+        return $this->db->fetchAll(
+            "SELECT id, product_id, variant_id
+             FROM promotion_products
+             WHERE store_hash = ? AND (" . implode(' OR ', $conditions) . ")
+             ORDER BY product_id ASC, variant_id ASC, synced_at DESC, id DESC",
+            $params
+        );
+    }
+
+    private function insertPromotionProductRows(array $promotions): void {
+        if (empty($promotions)) {
+            return;
+        }
+
         $values = [];
         $bindings = [];
-        
+
         foreach ($promotions as $promo) {
-            // Svaki $promo je sada niz koji sadrži detalje o promociji za jedan proizvod/varijantu
             $values[] = '(?, ?, ?, ?, ?, NOW())';
             $bindings = array_merge($bindings, [
                 $this->storeHash,
                 $promo['promotion_id'],
                 $promo['product_id'],
-                $promo['variant_id'] ?? null,
-                $promo['custom_field_id'] ?? null
+                $promo['variant_id'],
+                $promo['custom_field_id'],
             ]);
         }
 
-        $valuesPlaceholder = implode(', ', $values);
-        
-        // Tabela `promotion_products` ima UNIQUE KEY na (store_hash, product_id, variant_id)
-        $sql = "INSERT INTO promotion_products 
-                 (store_hash, promotion_id, product_id, variant_id, custom_field_id, synced_at)
-                 VALUES {$valuesPlaceholder}
-                 ON DUPLICATE KEY UPDATE 
-                 promotion_id = VALUES(promotion_id),
-                 custom_field_id = VALUES(custom_field_id),
-                 synced_at = VALUES(synced_at)";
-                 
-        $this->db->query($sql, $bindings);
+        $this->db->query(
+            "INSERT INTO promotion_products
+             (store_hash, promotion_id, product_id, variant_id, custom_field_id, synced_at)
+             VALUES " . implode(', ', $values),
+            $bindings
+        );
     }
     
     private function isBetterPromotion($newPromo, $existingPromo) {
@@ -1088,7 +1210,11 @@ public function __construct(Database $db = null) {
         $originalPrice = (float)$item['price'];
         $promoPrice = $this->calculatePromoPrice($originalPrice, $discountPercent);
         $savings = $originalPrice - $promoPrice;
-        $omnibus = $this->validatePromotionPriceAgainstOmnibus($item, $promoPrice, $referenceAt);
+        $omnibus = $this->validatePromotionPriceAgainstOmnibus(
+            $item,
+            $promoPrice,
+            $this->resolvePreviewOmnibusReferenceAt($referenceAt)
+        );
 
         return [
             'id' => $item['id'],
@@ -1122,7 +1248,7 @@ public function __construct(Database $db = null) {
         $omnibus = $this->validatePromotionPriceAgainstOmnibus(
             $product,
             $promoPrice,
-            $promotion['start_date'] ?? null
+            $this->resolvePromotionOmnibusReferenceAt($promotion)
         );
 
         return [
@@ -1167,6 +1293,7 @@ public function __construct(Database $db = null) {
             'lowest_price_30d' => null,
             'rolling_lowest_price_30d' => null,
             'omnibus_reference_price' => null,
+            'omnibus_reference_at' => null,
             'omnibus_valid' => true,
             'will_apply' => true,
             'omnibus_status' => 'disabled',
@@ -1182,14 +1309,19 @@ public function __construct(Database $db = null) {
             return $base;
         }
 
+        $effectiveReferenceAt = $this->normalizeReferenceAt($referenceAt);
         $dto = $this->omnibusPricingService->getDisplayData(
             $this->storeHash,
             (int)$item['product_id'],
             isset($item['variant_id']) ? (int)$item['variant_id'] : null,
             $this->getStoreCurrency(),
             $promoPrice,
-            $this->normalizeReferenceAt($referenceAt)
+            $effectiveReferenceAt
         );
+
+        $rollingLowest = isset($dto['rolling_lowest_price_last_30_days']) && $dto['rolling_lowest_price_last_30_days'] !== null
+            ? (float)$dto['rolling_lowest_price_last_30_days']
+            : null;
 
         $referencePrice = $dto['candidate_omnibus_reference_price']
             ?? $dto['omnibus_reference_price']
@@ -1203,14 +1335,29 @@ public function __construct(Database $db = null) {
             }
         }
 
+        $displayLowestPrice = $rollingLowest ?? ($referencePrice !== null ? (float)$referencePrice : null);
+        $validationReferencePrice = $referencePrice !== null ? (float)$referencePrice : null;
+        if (
+            $rollingLowest !== null
+            && (
+                $validationReferencePrice === null
+                || $usedFallbackReference
+                || $this->isPromoPriceBelowOmnibusReference($rollingLowest, $validationReferencePrice)
+            )
+        ) {
+            $validationReferencePrice = $rollingLowest;
+        }
+
         $reason = $dto['invalid_reduction_reason'] ?? null;
-        if ($referencePrice === null) {
+        if ($validationReferencePrice === null) {
             $reason = 'missing_reference_price';
             $isValid = false;
         } else {
-            $isValid = $this->isPromoPriceBelowOmnibusReference($promoPrice, (float)$referencePrice);
+            $isValid = $this->isPromoPriceBelowOmnibusReference($promoPrice, $validationReferencePrice);
             if ($isValid) {
                 $reason = null;
+            } elseif ($rollingLowest !== null && !$this->isPromoPriceBelowOmnibusReference($promoPrice, $rollingLowest)) {
+                $reason = 'not_below_30_day_lowest';
             } elseif (empty($dto['is_price_drop_candidate']) && !$usedFallbackReference) {
                 $reason = $reason ?: 'not_price_reduction';
             } else {
@@ -1218,21 +1365,19 @@ public function __construct(Database $db = null) {
             }
         }
 
-        $rollingLowest = isset($dto['rolling_lowest_price_last_30_days']) && $dto['rolling_lowest_price_last_30_days'] !== null
-            ? (float)$dto['rolling_lowest_price_last_30_days']
-            : null;
-        if ($rollingLowest === null && $usedFallbackReference) {
-            $rollingLowest = (float)$referencePrice;
+        if ($displayLowestPrice === null && $usedFallbackReference) {
+            $displayLowestPrice = (float)$referencePrice;
         }
 
         return [
-            'lowest_price_30d' => $referencePrice !== null ? (float)$referencePrice : null,
-            'rolling_lowest_price_30d' => $rollingLowest,
-            'omnibus_reference_price' => $referencePrice !== null ? (float)$referencePrice : null,
+            'lowest_price_30d' => $displayLowestPrice,
+            'rolling_lowest_price_30d' => $rollingLowest ?? ($usedFallbackReference ? (float)$referencePrice : null),
+            'omnibus_reference_price' => $validationReferencePrice,
+            'omnibus_reference_at' => $effectiveReferenceAt->format('Y-m-d H:i:s'),
             'omnibus_valid' => $isValid,
             'will_apply' => $isValid,
             'omnibus_status' => $isValid ? 'valid' : 'invalid',
-            'omnibus_warning' => $isValid ? '' : $this->buildOmnibusWarning($reason, $referencePrice),
+            'omnibus_warning' => $isValid ? '' : $this->buildOmnibusWarning($reason, $validationReferencePrice),
             'omnibus_invalid_reason' => $isValid ? null : $reason,
         ];
     }
@@ -1325,6 +1470,66 @@ public function __construct(Database $db = null) {
         }
 
         return new \DateTimeImmutable($value);
+    }
+
+    private function resolvePreviewOmnibusReferenceAt($submittedStartDate): \DateTimeImmutable {
+        return $this->latestDateTime([
+            $this->normalizeReferenceAt($submittedStartDate),
+            $this->normalizeReferenceAt('now'),
+        ]);
+    }
+
+    private function resolvePromotionOmnibusReferenceAt(array $promotion): \DateTimeImmutable {
+        $dates = [];
+        foreach (['start_date', 'created_at', 'updated_at'] as $field) {
+            $dateTime = $this->normalizeOptionalReferenceAt($promotion[$field] ?? null);
+            if ($dateTime !== null) {
+                $dates[] = $dateTime;
+            }
+        }
+
+        if (empty($dates)) {
+            return $this->normalizeReferenceAt('now');
+        }
+
+        return $this->latestDateTime($dates);
+    }
+
+    private function normalizeOptionalReferenceAt($referenceAt): ?\DateTimeImmutable {
+        if ($referenceAt instanceof \DateTimeImmutable) {
+            return $referenceAt;
+        }
+
+        if ($referenceAt instanceof \DateTimeInterface) {
+            return \DateTimeImmutable::createFromInterface($referenceAt);
+        }
+
+        $value = trim((string)$referenceAt);
+        if ($value === '') {
+            return null;
+        }
+
+        try {
+            return new \DateTimeImmutable($value);
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    private function latestDateTime(array $dateTimes): \DateTimeImmutable {
+        $latest = null;
+
+        foreach ($dateTimes as $dateTime) {
+            if (!$dateTime instanceof \DateTimeImmutable) {
+                continue;
+            }
+
+            if ($latest === null || $dateTime > $latest) {
+                $latest = $dateTime;
+            }
+        }
+
+        return $latest ?? $this->normalizeReferenceAt('now');
     }
 
     private function translateMessage(string $key, array $replace, string $fallback): string {
