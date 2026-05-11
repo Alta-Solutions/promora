@@ -144,6 +144,86 @@ class PriceLogger {
     /**
      * Primenjuje ključni algoritam za pronalaženje najniže cene u poslednjih 30 dana za jedan proizvod.
      */
+    public function seedInitialPriceHistoryBatch(string $storeHash, array $pricesToSeed): int {
+        if (empty($pricesToSeed)) {
+            return 0;
+        }
+
+        $inserted = 0;
+        $seen = [];
+        $hasVariantId = $this->priceHistoryHasVariantId();
+
+        foreach ($pricesToSeed as $item) {
+            $productId = (int)($item['product_id'] ?? 0);
+            $price = isset($item['price']) && is_numeric($item['price'])
+                ? (float)$item['price']
+                : null;
+            $currency = (string)($item['currency'] ?? '');
+            $recordedAt = (string)($item['recorded_at'] ?? date('Y-m-d H:i:s', strtotime('-30 days')));
+            $variantId = $hasVariantId && array_key_exists('variant_id', $item) && $item['variant_id'] !== null
+                ? (int)$item['variant_id']
+                : null;
+
+            if ($productId <= 0 || $price === null || $price <= 0 || $currency === '' || $recordedAt === '') {
+                continue;
+            }
+
+            $key = $productId . '_' . ($variantId ?? 'base') . '_' . $currency;
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+
+            if ($hasVariantId) {
+                $existingSeed = $this->db->fetchOne(
+                    "SELECT id
+                     FROM product_price_history
+                     WHERE store_hash = ?
+                       AND product_id = ?
+                       AND variant_id <=> ?
+                       AND currency = ?
+                       AND recorded_at <= ?
+                     LIMIT 1",
+                    [$storeHash, $productId, $variantId, $currency, $recordedAt]
+                );
+            } else {
+                $existingSeed = $this->db->fetchOne(
+                    "SELECT id
+                     FROM product_price_history
+                     WHERE store_hash = ?
+                       AND product_id = ?
+                       AND currency = ?
+                       AND recorded_at <= ?
+                     LIMIT 1",
+                    [$storeHash, $productId, $currency, $recordedAt]
+                );
+                $variantId = null;
+            }
+
+            if ($existingSeed) {
+                continue;
+            }
+
+            if ($hasVariantId) {
+                $this->db->query(
+                    "INSERT INTO product_price_history (store_hash, product_id, variant_id, price, currency, recorded_at)
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                    [$storeHash, $productId, $variantId, $price, $currency, $recordedAt]
+                );
+            } else {
+                $this->db->query(
+                    "INSERT INTO product_price_history (store_hash, product_id, price, currency, recorded_at)
+                     VALUES (?, ?, ?, ?, ?)",
+                    [$storeHash, $productId, $price, $currency, $recordedAt]
+                );
+            }
+
+            $inserted++;
+        }
+
+        return $inserted;
+    }
+
     public function getLowestPriceIn30Days(string $storeHash, int $productId, ?int $variantId = null, ?string $currency = null): ?float {
         $storeConfig = $this->db->fetchOne(
             "SELECT currency FROM bigcommerce_stores WHERE store_hash = ?",

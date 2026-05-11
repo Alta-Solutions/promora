@@ -92,6 +92,7 @@ return array_replace_recursive(require __DIR__ . '/sr.php', [
             'end_minute_aria' => 'Minuta završetka',
             'create_submit' => 'Stvori promociju',
             'create_duplicate_submit' => 'Stvori duplikat',
+            'creating' => 'Kreiranje promocije...',
             'duplicate_name_suffix' => '(kopija)',
         ],
         'filters' => [

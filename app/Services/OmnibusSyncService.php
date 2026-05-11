@@ -12,6 +12,7 @@ class OmnibusSyncService {
     private $cacheService;
     private $omnibusFieldService;
     private $omnibusPricingService;
+    private $priceLogger;
     private $productsCacheHasType;
 
     private const BATCH_SIZE = 50;
@@ -25,6 +26,7 @@ class OmnibusSyncService {
         $this->cacheService = new ProductCacheService($this->db);
         $this->omnibusFieldService = new OmnibusFieldService($this->api, $this->db);
         $this->omnibusPricingService = new OmnibusPricingService($this->db);
+        $this->priceLogger = new PriceLogger($this->db);
     }
 
     public function processStore(): array {
@@ -106,6 +108,8 @@ class OmnibusSyncService {
         foreach ($cachedProducts as $product) {
             $productsById[(int)$product['product_id']][] = $product;
         }
+
+        $this->seedInitialPriceHistory($productsById, $currency);
 
         $updates = [];
 
@@ -198,6 +202,63 @@ class OmnibusSyncService {
         }
 
         return isset($product['price']) ? (float)$product['price'] : null;
+    }
+
+    private function seedInitialPriceHistory(array $productsById, string $currency): void {
+        $candidates = [];
+
+        foreach ($productsById as $productId => $productRows) {
+            foreach ($this->selectRowsForPricing($productRows) as $row) {
+                $seedPrice = $this->resolveInitialHistoryPrice($row);
+                if ($seedPrice === null || $seedPrice <= 0) {
+                    continue;
+                }
+
+                $variantId = isset($row['variant_id']) && $row['variant_id'] !== null
+                    ? (int)$row['variant_id']
+                    : null;
+                $seedRecordedAt = $this->resolveInitialHistoryRecordedAt($row['cached_at'] ?? null);
+
+                $candidates[] = [
+                    'product_id' => (int)$productId,
+                    'variant_id' => $variantId,
+                    'price' => $seedPrice,
+                    'currency' => $currency,
+                    'recorded_at' => $seedRecordedAt,
+                ];
+            }
+        }
+
+        if (!empty($candidates)) {
+            $this->priceLogger->seedInitialPriceHistoryBatch($this->storeHash, $candidates);
+        }
+    }
+
+    private function resolveInitialHistoryPrice(array $product): ?float {
+        $regularPrice = isset($product['price']) && is_numeric($product['price'])
+            ? (float)$product['price']
+            : null;
+        $salePrice = isset($product['sale_price']) && is_numeric($product['sale_price'])
+            ? (float)$product['sale_price']
+            : null;
+
+        if ($salePrice !== null && $salePrice > 0) {
+            return $regularPrice !== null && $regularPrice > 0 ? $regularPrice : $salePrice;
+        }
+
+        return $regularPrice;
+    }
+
+    private function resolveInitialHistoryRecordedAt($cachedAt): string {
+        try {
+            $observedAt = $cachedAt
+                ? new \DateTimeImmutable((string)$cachedAt)
+                : new \DateTimeImmutable('now');
+        } catch (\Throwable $e) {
+            $observedAt = new \DateTimeImmutable('now');
+        }
+
+        return $observedAt->sub(new \DateInterval('P30D'))->format('Y-m-d H:i:s');
     }
 
     private function buildParentProductsCacheMap(array $cachedProducts): array {

@@ -102,6 +102,7 @@ class ProductCacheService {
         
         // Niz za grupno logovanje cena
         $pricesToLog = [];
+        $initialPricesToSeed = [];
         
         foreach ($products as $product) {
             // --- 1. Keširanje osnovnog proizvoda ---
@@ -142,6 +143,17 @@ class ProductCacheService {
             // Priprema cene osnovnog proizvoda za grupno logovanje
             $effectiveProductPrice = $this->getEffectivePrice($product['price'] ?? null, $product['sale_price'] ?? null);
             if ($storeConfig && $storeConfig['enable_omnibus'] && $effectiveProductPrice !== null && $effectiveProductPrice > 0) {
+                $initialProductPrice = $this->getInitialHistoryPrice($product['price'] ?? null, $product['sale_price'] ?? null);
+                if ($initialProductPrice !== null && $initialProductPrice > 0) {
+                    $initialPricesToSeed[] = [
+                        'product_id' => (int)$product['id'],
+                        'variant_id' => null,
+                        'price' => $initialProductPrice,
+                        'currency' => $storeConfig['currency'] ?? 'USD',
+                        'recorded_at' => $this->buildInitialHistoryRecordedAt($now),
+                    ];
+                }
+
                 $pricesToLog[] = [
                     'product_id' => (int)$product['id'],
                     'variant_id' => null,
@@ -212,6 +224,17 @@ class ProductCacheService {
 
                         // Priprema cene varijante za grupno logovanje
                         if ($storeConfig && $storeConfig['enable_omnibus'] && $effectiveVariantPrice !== null && $effectiveVariantPrice > 0) {
+                            $initialVariantPrice = $this->getInitialHistoryPrice($variantPrice, $variant['sale_price'] ?? null);
+                            if ($initialVariantPrice !== null && $initialVariantPrice > 0) {
+                                $initialPricesToSeed[] = [
+                                    'product_id' => (int)$product['id'],
+                                    'variant_id' => (int)$variant['id'],
+                                    'price' => $initialVariantPrice,
+                                    'currency' => $storeConfig['currency'] ?? 'USD',
+                                    'recorded_at' => $this->buildInitialHistoryRecordedAt($now),
+                                ];
+                            }
+
                             $pricesToLog[] = [
                                 'product_id' => (int)$product['id'],
                                 'variant_id' => (int)$variant['id'],
@@ -274,6 +297,10 @@ class ProductCacheService {
         }
         // --- KRAJ DEBUGGING KODA ---
         
+        if ($storeConfig && $storeConfig['enable_omnibus'] && !empty($initialPricesToSeed)) {
+            $priceLogger->seedInitialPriceHistoryBatch($this->storeHash, $initialPricesToSeed);
+        }
+
         // --- 3. Grupni upis svih prikupljenih cena ---
         if ($storeConfig && $storeConfig['enable_omnibus'] && !empty($pricesToLog)) {
             $priceLogger->logPricesBatch($this->storeHash, $pricesToLog);
@@ -490,6 +517,27 @@ class ProductCacheService {
         }
 
         return $basePrice;
+    }
+
+    private function getInitialHistoryPrice($price, $salePrice): ?float {
+        $basePrice = is_numeric($price) ? (float)$price : null;
+        $discountedPrice = is_numeric($salePrice) ? (float)$salePrice : null;
+
+        if ($discountedPrice !== null && $discountedPrice > 0) {
+            return $basePrice !== null && $basePrice > 0 ? $basePrice : $discountedPrice;
+        }
+
+        return $basePrice;
+    }
+
+    private function buildInitialHistoryRecordedAt(string $observedAt): string {
+        try {
+            $dateTime = new \DateTimeImmutable($observedAt);
+        } catch (\Throwable $e) {
+            $dateTime = new \DateTimeImmutable('now');
+        }
+
+        return $dateTime->sub(new \DateInterval('P30D'))->format('Y-m-d H:i:s');
     }
 
     public function countProductsByFilters($filters = []) {

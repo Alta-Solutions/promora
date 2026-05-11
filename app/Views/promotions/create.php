@@ -23,6 +23,7 @@
     $discountValue = $promotionDefaults['discount_percent'] ?? 0;
     $priorityValue = $promotionDefaults['priority'] ?? 0;
     $colorValue = $promotionDefaults['color'] ?? '#3b82f6';
+    $promotionCreateTokenValue = $promotionCreateToken ?? '';
 ?>
 
 <div class="promotion-create-page">
@@ -37,6 +38,14 @@
 
     <form method="POST" action="?route=promotions&action=create" id="promotionForm" class="promotion-create-form">
         <?= \App\Support\Csrf::inputField() ?>
+        <input type="hidden" name="_promotion_create_token" value="<?= htmlspecialchars($promotionCreateTokenValue, ENT_QUOTES, 'UTF-8') ?>">
+
+        <div class="promotion-submit-overlay" id="promotionSubmitOverlay" aria-hidden="true">
+            <div class="promotion-submit-dialog" role="status" aria-live="polite">
+                <span class="promotion-submit-spinner" aria-hidden="true"></span>
+                <span><?= trans_e('promotions.form.creating') ?></span>
+            </div>
+        </div>
 
         <section class="promotion-card promotion-setup-card">
             <div class="promotion-setup-grid">
@@ -142,7 +151,12 @@
 
                 <div class="promotion-form-actions">
                     <a href="?route=promotions" class="btn btn-secondary"><?= trans_e('common.cancel') ?></a>
-                    <button type="submit" class="btn btn-primary"><?= trans_e($isDuplicate ? 'promotions.form.create_duplicate_submit' : 'promotions.form.create_submit') ?></button>
+                    <button
+                        type="submit"
+                        class="btn btn-primary"
+                        id="promotion-submit-button"
+                        data-loading-label="<?= htmlspecialchars(trans('promotions.form.creating'), ENT_QUOTES, 'UTF-8') ?>"
+                    ><?= trans_e($isDuplicate ? 'promotions.form.create_duplicate_submit' : 'promotions.form.create_submit') ?></button>
                 </div>
             </section>
 
@@ -924,9 +938,30 @@ function buildFiltersPayload() {
     return filtersObj;
 }
 
+let promotionFormSubmitting = false;
 document.getElementById('promotionForm').addEventListener('submit', function(e) {
+    if (promotionFormSubmitting) {
+        e.preventDefault();
+        return;
+    }
+
     const filtersObj = buildFiltersPayload();
     document.getElementById('filters-json').value = JSON.stringify(filtersObj);
+
+    promotionFormSubmitting = true;
+    this.classList.add('is-submitting');
+
+    const submitButton = document.getElementById('promotion-submit-button');
+    if (submitButton) {
+        submitButton.dataset.originalLabel = submitButton.textContent;
+        submitButton.textContent = submitButton.dataset.loadingLabel || appT('promotions.form.creating');
+        submitButton.disabled = true;
+    }
+
+    const overlay = document.getElementById('promotionSubmitOverlay');
+    if (overlay) {
+        overlay.setAttribute('aria-hidden', 'false');
+    }
 });
 
 // Initialize

@@ -143,6 +143,7 @@ return [
             'end_minute_aria' => 'End minute',
             'create_submit' => 'Create promotion',
             'create_duplicate_submit' => 'Create duplicate',
+            'creating' => 'Creating promotion...',
             'duplicate_name_suffix' => '(copy)',
             'default_name' => 'Promotion',
         ],

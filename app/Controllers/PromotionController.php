@@ -14,6 +14,7 @@ class PromotionController {
     private $api;
     private $promotionService;
     private $cacheService;
+    private const CREATE_SUBMISSION_TOKEN_SESSION_KEY = '_promotion_create_submission_tokens';
     
     public function __construct() {
         // Get the shared database instance. It should be aware of the store context from the session.
@@ -47,6 +48,12 @@ class PromotionController {
             }
 
             $data = $this->getFormData();
+
+            if (!$this->consumeCreateSubmissionToken($_POST['_promotion_create_token'] ?? '')) {
+                header('Location: ?route=promotions&success=created');
+                exit;
+            }
+
             try {
                 // Umesto direktnog upisa u model, koristimo servis koji kreira i Job za sync
                 $id = $this->promotionService->createPromotion($data);
@@ -60,6 +67,7 @@ class PromotionController {
             }
         }
         
+        $promotionCreateToken = $this->issueCreateSubmissionToken();
         $settings = $this->getStoreSettings();
         $allowedCustomFields = $settings['allowed_filters'] ?? [];
         // Load categories and brands from CACHE
@@ -95,6 +103,7 @@ class PromotionController {
         $brands = $this->api->getBrands();
         $cacheStats = $this->cacheService->getCacheStats();
         $duplicatePromotion = $this->buildDuplicatePromotionDraft($sourcePromotion);
+        $promotionCreateToken = $this->issueCreateSubmissionToken();
 
         include __DIR__ . '/../Views/layouts/header.php';
         include __DIR__ . '/../Views/promotions/create.php';
@@ -300,6 +309,73 @@ class PromotionController {
         $defaults = $data;
         $defaults['filters'] = json_encode($data['filters'] ?? [], JSON_UNESCAPED_UNICODE);
         return $defaults;
+    }
+
+    private function issueCreateSubmissionToken(): string {
+        $this->pruneCreateSubmissionTokens();
+
+        $storeHash = $this->getTokenStoreHash();
+        $token = bin2hex(random_bytes(32));
+
+        if (!isset($_SESSION[self::CREATE_SUBMISSION_TOKEN_SESSION_KEY][$storeHash])) {
+            $_SESSION[self::CREATE_SUBMISSION_TOKEN_SESSION_KEY][$storeHash] = [];
+        }
+
+        $_SESSION[self::CREATE_SUBMISSION_TOKEN_SESSION_KEY][$storeHash][$token] = time();
+
+        return $token;
+    }
+
+    private function consumeCreateSubmissionToken($token): bool {
+        $this->pruneCreateSubmissionTokens();
+
+        if (!is_string($token) || $token === '') {
+            return false;
+        }
+
+        $storeHash = $this->getTokenStoreHash();
+        if (empty($_SESSION[self::CREATE_SUBMISSION_TOKEN_SESSION_KEY][$storeHash][$token])) {
+            return false;
+        }
+
+        unset($_SESSION[self::CREATE_SUBMISSION_TOKEN_SESSION_KEY][$storeHash][$token]);
+        return true;
+    }
+
+    private function pruneCreateSubmissionTokens(): void {
+        $sessionKey = self::CREATE_SUBMISSION_TOKEN_SESSION_KEY;
+        if (empty($_SESSION[$sessionKey]) || !is_array($_SESSION[$sessionKey])) {
+            $_SESSION[$sessionKey] = [];
+            return;
+        }
+
+        $expiresBefore = time() - 7200;
+        foreach ($_SESSION[$sessionKey] as $storeHash => $tokens) {
+            if (!is_array($tokens)) {
+                unset($_SESSION[$sessionKey][$storeHash]);
+                continue;
+            }
+
+            foreach ($tokens as $token => $createdAt) {
+                if ((int)$createdAt < $expiresBefore) {
+                    unset($_SESSION[$sessionKey][$storeHash][$token]);
+                }
+            }
+
+            if (count($_SESSION[$sessionKey][$storeHash]) > 20) {
+                asort($_SESSION[$sessionKey][$storeHash]);
+                $_SESSION[$sessionKey][$storeHash] = array_slice(
+                    $_SESSION[$sessionKey][$storeHash],
+                    -20,
+                    null,
+                    true
+                );
+            }
+        }
+    }
+
+    private function getTokenStoreHash(): string {
+        return (string)($_SESSION['store_hash'] ?? Database::getInstance()->getStoreContext() ?? 'default');
     }
 
     private function getSubmittedFilters() {

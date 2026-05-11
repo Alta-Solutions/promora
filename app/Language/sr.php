@@ -143,6 +143,7 @@ return [
             'end_minute_aria' => 'Minut kraja',
             'create_submit' => 'Kreiraj promociju',
             'create_duplicate_submit' => 'Kreiraj duplikat',
+            'creating' => 'Kreiranje promocije...',
             'duplicate_name_suffix' => '(kopija)',
             'default_name' => 'Promocija',
         ],
