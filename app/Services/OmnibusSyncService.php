@@ -14,6 +14,7 @@ class OmnibusSyncService {
     private $omnibusPricingService;
     private $priceLogger;
     private $productsCacheHasType;
+    private $promotionsHasOmnibusTermsUpdatedAt;
 
     private const BATCH_SIZE = 50;
 
@@ -110,11 +111,19 @@ class OmnibusSyncService {
         }
 
         $this->seedInitialPriceHistory($productsById, $currency);
+        $promotionReferenceMap = $this->fetchActivePromotionReferenceMap($productIds);
+        $priceActivationMap = $this->fetchCurrentPriceActivationMap($productsById, $promotionReferenceMap, $currency);
 
         $updates = [];
 
         foreach ($productsById as $productId => $productRows) {
-            $updates[] = $this->buildAggregatedUpdateForProduct($productId, $productRows, $currency);
+            $updates[] = $this->buildAggregatedUpdateForProduct(
+                $productId,
+                $productRows,
+                $currency,
+                $promotionReferenceMap,
+                $priceActivationMap
+            );
         }
 
         try {
@@ -138,7 +147,13 @@ class OmnibusSyncService {
         }
     }
 
-    private function buildAggregatedUpdateForProduct(int $productId, array $productRows, string $currency): array {
+    private function buildAggregatedUpdateForProduct(
+        int $productId,
+        array $productRows,
+        string $currency,
+        array $promotionReferenceMap = [],
+        array $priceActivationMap = []
+    ): array {
         $rowsForPricing = $this->selectRowsForPricing($productRows);
         $lowestReference = null;
         $lastDto = null;
@@ -152,6 +167,13 @@ class OmnibusSyncService {
             $variantId = isset($row['variant_id']) && $row['variant_id'] !== null
                 ? (int)$row['variant_id']
                 : null;
+            $referenceAt = $this->getPricingReferenceForRow(
+                $productId,
+                $variantId,
+                $promotionReferenceMap,
+                $priceActivationMap,
+                $row['cached_at'] ?? null
+            );
 
             $dto = $this->omnibusPricingService->getDisplayData(
                 $this->storeHash,
@@ -159,7 +181,7 @@ class OmnibusSyncService {
                 $variantId,
                 $currency,
                 $currentPrice,
-                null,
+                $referenceAt,
                 [
                     'current_price_observed_at' => $row['cached_at'] ?? null,
                     'require_full_30_days_history' => true,
@@ -186,6 +208,221 @@ class OmnibusSyncService {
             'omnibus_reference_price' => $lowestReference,
             'effective_currency' => $lastDto['effective_currency'] ?? $currency,
         ];
+    }
+
+    private function fetchCurrentPriceActivationMap(
+        array $productsById,
+        array $promotionReferenceMap,
+        string $currency
+    ): array {
+        if (empty($productsById) || empty($promotionReferenceMap)) {
+            return [];
+        }
+
+        $conditions = [];
+        $params = [$this->storeHash, $currency];
+        $seen = [];
+
+        foreach ($productsById as $productId => $productRows) {
+            $productId = (int)$productId;
+            foreach ($this->selectRowsForPricing($productRows) as $row) {
+                $currentPrice = $this->resolveCurrentPrice($row);
+                if ($currentPrice === null || $currentPrice <= 0) {
+                    continue;
+                }
+
+                $variantId = isset($row['variant_id']) && $row['variant_id'] !== null
+                    ? (int)$row['variant_id']
+                    : null;
+                $promotionReferenceAt = $this->getPromotionReferenceForRow(
+                    $productId,
+                    $variantId,
+                    $promotionReferenceMap
+                );
+                if ($promotionReferenceAt === null) {
+                    continue;
+                }
+
+                $price = number_format($currentPrice, 4, '.', '');
+                $referenceSql = $promotionReferenceAt->format('Y-m-d H:i:s');
+                $dedupeKey = $this->buildPromotionReferenceKey($productId, $variantId)
+                    . ':' . $price
+                    . ':' . $referenceSql;
+                if (isset($seen[$dedupeKey])) {
+                    continue;
+                }
+                $seen[$dedupeKey] = true;
+
+                $conditions[] = '(product_id = ? AND variant_id <=> ? AND price = ? AND recorded_at >= ?)';
+                $params[] = $productId;
+                $params[] = $variantId;
+                $params[] = $price;
+                $params[] = $referenceSql;
+            }
+        }
+
+        if (empty($conditions)) {
+            return [];
+        }
+
+        $rows = $this->db->fetchAll(
+            "SELECT product_id, variant_id, MIN(recorded_at) AS first_recorded_at
+             FROM product_price_history
+             WHERE store_hash = ?
+               AND currency = ?
+               AND (" . implode(' OR ', $conditions) . ")
+             GROUP BY product_id, variant_id",
+            $params
+        );
+
+        $map = [];
+        foreach ($rows as $row) {
+            if (empty($row['first_recorded_at'])) {
+                continue;
+            }
+
+            $productId = (int)($row['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $variantId = isset($row['variant_id']) && $row['variant_id'] !== null
+                ? (int)$row['variant_id']
+                : null;
+            $recordedAt = $this->normalizeOptionalReferenceAt($row['first_recorded_at']);
+            if ($recordedAt === null) {
+                continue;
+            }
+
+            $map[$this->buildPromotionReferenceKey($productId, $variantId)] = $recordedAt;
+        }
+
+        return $map;
+    }
+
+    private function fetchActivePromotionReferenceMap(array $productIds): array {
+        $productIds = array_values(array_unique(array_filter(array_map('intval', $productIds))));
+        if (empty($productIds)) {
+            return [];
+        }
+
+        $termsUpdatedAtSelect = $this->promotionsHasOmnibusTermsUpdatedAt()
+            ? 'p.omnibus_terms_updated_at'
+            : 'NULL';
+        $placeholders = str_repeat('?,', count($productIds) - 1) . '?';
+        $now = date('Y-m-d H:i:s');
+        $rows = $this->db->fetchAll(
+            "SELECT pp.product_id,
+                    pp.variant_id,
+                    p.start_date,
+                    p.created_at,
+                    {$termsUpdatedAtSelect} AS omnibus_terms_updated_at
+             FROM promotion_products pp
+             INNER JOIN promotions p
+                ON p.store_hash = pp.store_hash
+               AND p.id = pp.promotion_id
+             WHERE pp.store_hash = ?
+               AND pp.product_id IN ($placeholders)
+               AND p.status = 'active'
+               AND p.start_date <= ?
+               AND p.end_date >= ?
+             ORDER BY pp.product_id ASC, pp.variant_id ASC, pp.synced_at DESC, pp.id DESC",
+            array_merge([$this->storeHash], $productIds, [$now, $now])
+        );
+
+        $map = [];
+        foreach ($rows as $row) {
+            $productId = (int)($row['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $variantId = isset($row['variant_id']) && $row['variant_id'] !== null
+                ? (int)$row['variant_id']
+                : null;
+            $key = $this->buildPromotionReferenceKey($productId, $variantId);
+            if (isset($map[$key])) {
+                continue;
+            }
+
+            $map[$key] = $this->resolvePromotionReferenceAt($row);
+        }
+
+        return $map;
+    }
+
+    private function getPromotionReferenceForRow(
+        int $productId,
+        ?int $variantId,
+        array $promotionReferenceMap
+    ): ?\DateTimeImmutable {
+        $exactKey = $this->buildPromotionReferenceKey($productId, $variantId);
+        if (isset($promotionReferenceMap[$exactKey])) {
+            return $promotionReferenceMap[$exactKey];
+        }
+
+        $parentKey = $this->buildPromotionReferenceKey($productId, null);
+        return $promotionReferenceMap[$parentKey] ?? null;
+    }
+
+    private function getPricingReferenceForRow(
+        int $productId,
+        ?int $variantId,
+        array $promotionReferenceMap,
+        array $priceActivationMap,
+        $currentPriceObservedAt = null
+    ): ?\DateTimeImmutable {
+        $exactKey = $this->buildPromotionReferenceKey($productId, $variantId);
+        if (isset($priceActivationMap[$exactKey])) {
+            return $priceActivationMap[$exactKey];
+        }
+
+        $promotionReferenceAt = $this->getPromotionReferenceForRow($productId, $variantId, $promotionReferenceMap);
+        $observedAt = $this->normalizeOptionalReferenceAt($currentPriceObservedAt);
+        if (
+            $promotionReferenceAt !== null
+            && $observedAt !== null
+            && $observedAt > $promotionReferenceAt
+        ) {
+            return $observedAt;
+        }
+
+        return $promotionReferenceAt;
+    }
+
+    private function buildPromotionReferenceKey(int $productId, ?int $variantId): string {
+        return $productId . ':' . ($variantId === null ? 'base' : (string)$variantId);
+    }
+
+    private function resolvePromotionReferenceAt(array $promotion): \DateTimeImmutable {
+        $dates = [];
+        foreach (['start_date', 'created_at', 'omnibus_terms_updated_at'] as $field) {
+            $dateTime = $this->normalizeOptionalReferenceAt($promotion[$field] ?? null);
+            if ($dateTime !== null) {
+                $dates[] = $dateTime;
+            }
+        }
+
+        $latest = null;
+        foreach ($dates as $dateTime) {
+            if ($latest === null || $dateTime > $latest) {
+                $latest = $dateTime;
+            }
+        }
+
+        return $latest ?? new \DateTimeImmutable('now');
+    }
+
+    private function normalizeOptionalReferenceAt($dateTime): ?\DateTimeImmutable {
+        if ($dateTime === null || $dateTime === '') {
+            return null;
+        }
+
+        try {
+            return new \DateTimeImmutable((string)$dateTime);
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 
     private function selectRowsForPricing(array $productRows): array {
@@ -292,5 +529,20 @@ class OmnibusSyncService {
         }
 
         return $this->productsCacheHasType;
+    }
+
+    private function promotionsHasOmnibusTermsUpdatedAt(): bool {
+        if ($this->promotionsHasOmnibusTermsUpdatedAt !== null) {
+            return $this->promotionsHasOmnibusTermsUpdatedAt;
+        }
+
+        try {
+            $column = $this->db->fetchOne("SHOW COLUMNS FROM promotions LIKE 'omnibus_terms_updated_at'");
+            $this->promotionsHasOmnibusTermsUpdatedAt = $column !== false && $column !== null;
+        } catch (\Throwable $e) {
+            $this->promotionsHasOmnibusTermsUpdatedAt = false;
+        }
+
+        return $this->promotionsHasOmnibusTermsUpdatedAt;
     }
 }

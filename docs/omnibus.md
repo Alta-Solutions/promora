@@ -118,6 +118,19 @@ would now fail. This repair is allowed only when the target promo price is still
 strictly lower than the already displayed `lowest_price_30d` value. It must not
 be treated as a general force-apply bypass.
 
+Omnibus custom field sync must use the same lifecycle reference for products
+that already have an active `promotion_products` row. A retry, webhook refresh,
+manual Omnibus sync, or Sync All run must not reinterpret the same active
+promotion as a new price drop just because price history contains a later
+technical `regular -> sale` transition.
+
+If the first observed sale-price history row is slightly after the promotion
+lifecycle reference, Omnibus sync may use that first observed current promo price
+timestamp as the calculation reference. It must use the earliest matching current
+promo price after the lifecycle reference, not a later retry-created price row.
+If that history row has not been written yet, the product cache observation time
+may be used as a fallback when it is after the lifecycle reference.
+
 ### Practical Compliance Guide
 
 Use three different price concepts deliberately:
