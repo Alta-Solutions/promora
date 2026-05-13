@@ -210,6 +210,37 @@ Implementation guidance:
 - delete it when there is no active valid reduction
 - synchronize the local `products_cache.custom_fields` state after successful API writes
 
+### Variant Product Quick Fix
+
+For products with variants, the app keeps using the parent product custom field
+`lowest_price_30d`, but writes a JSON payload instead of a single numeric value.
+This is a pragmatic compatibility fix until variant metafields are implemented.
+
+Simple product value:
+
+```text
+15.64
+```
+
+Variant product value:
+
+```json
+{"type":"variant_prior_prices","currency":"EUR","values":{"5631":"6.23","5648":"15.64"}}
+```
+
+Frontend logic must treat this field as either:
+
+- a simple numeric value for products without variants
+- a JSON map where `values[variant_id]` is the Omnibus prior price for the
+  selected variant
+
+Do not display the JSON string directly. If a selected variant has no value in
+the map, hide the lowest-price block for that variant.
+
+Long-term, variant metafields are still the cleaner model because the prior price
+belongs to the variant. This JSON custom-field format is intentionally a quick
+fix for storefront compatibility.
+
 ## Tests To Update
 
 When changing Omnibus logic, update or add focused tests around:

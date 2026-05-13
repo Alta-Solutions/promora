@@ -85,6 +85,46 @@ class PromotionServicePromotionProductsTest extends TestCase {
         $this->assertFalse($this->invokeShouldQueueCleanupAfterPromotionUpdate($service, 'scheduled', 0));
     }
 
+    public function testFiltersPromotionRowsToConfirmedPriceUpdates(): void {
+        $service = $this->createService(new class {});
+        $promotions = [
+            'v_5631' => [
+                'promotion_id' => 55,
+                'product_id' => 5472,
+                'variant_id' => 5631,
+            ],
+            'v_5648' => [
+                'promotion_id' => 55,
+                'product_id' => 5472,
+                'variant_id' => 5648,
+            ],
+            'p_308' => [
+                'promotion_id' => 55,
+                'product_id' => 308,
+                'variant_id' => null,
+            ],
+        ];
+
+        $filtered = $this->invokeFilterPromotionsWithSuccessfulPriceUpdates($service, $promotions, [
+            [
+                'success' => false,
+                'product_id' => 5472,
+                'variant_id' => 5631,
+            ],
+            [
+                'success' => true,
+                'product_id' => 5472,
+                'variant_id' => 5648,
+            ],
+            [
+                'success' => true,
+                'product_id' => 308,
+            ],
+        ]);
+
+        $this->assertSame(['v_5648', 'p_308'], array_keys($filtered));
+    }
+
     private function invokeShouldQueueCleanupAfterPromotionUpdate(
         PromotionService $service,
         string $status,
@@ -110,6 +150,17 @@ class PromotionServicePromotionProductsTest extends TestCase {
         $method = new ReflectionMethod($service, 'batchSavePromotionProducts');
         $method->setAccessible(true);
         $method->invoke($service, $promotions);
+    }
+
+    private function invokeFilterPromotionsWithSuccessfulPriceUpdates(
+        PromotionService $service,
+        array $promotions,
+        array $priceResults
+    ): array {
+        $method = new ReflectionMethod($service, 'filterPromotionsWithSuccessfulPriceUpdates');
+        $method->setAccessible(true);
+
+        return $method->invoke($service, $promotions, $priceResults);
     }
 
     private function setPrivateProperty(object $object, string $property, $value): void {

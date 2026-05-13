@@ -415,15 +415,7 @@ public function __construct(Database $db = null) {
         // BATCH UPDATE: Apply prices to BigCommerce
         $productUpdates = [];
         $variantUpdates = [];
-        $cachePriceUpdates = [];
         foreach ($productPromotions as $promo) {
-            $cachePriceUpdates[] = [
-                'product_id' => $promo['product_id'],
-                'variant_id' => $promo['variant_id'] ?? null,
-                'price' => $promo['original_price'],
-                'sale_price' => $promo['promo_price']
-            ];
-
             if (!empty($promo['variant_id'])) {
                 $variantUpdates[] = [
                     'product_id' => $promo['product_id'],
@@ -443,24 +435,19 @@ public function __construct(Database $db = null) {
         $productPriceResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
         $variantPriceResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
         $priceResults = array_merge($productPriceResults, $variantPriceResults);
-        $successCount = count(array_filter($priceResults, fn($r) => !empty($r['success'])));
-        $errorCount = count($priceResults) - $successCount;
+        $appliedPromotions = $this->filterPromotionsWithSuccessfulPriceUpdates($productPromotions, $priceResults);
+        $successCount = count($appliedPromotions);
+        $errorCount = count($productPromotions) - $successCount;
         
         $debugLog[] = "Price updates: {$successCount} success, {$errorCount} errors";
         
         // BATCH UPDATE: Custom fields (KORIŠĆENJE MULTI CURLA)
-        $customFieldUpdates = [];
-        foreach ($productPromotions as $promo) {
-            $customFieldUpdates[] = [
-                'product_id' => $promo['product_id'],
-                'field_value' => $promo['custom_field_value'] ?? $promo['promotion_name']
-            ];
-        }
+        $customFieldUpdates = $this->buildUniquePromotionFieldUpdates($appliedPromotions);
         
         // 🚀 IZMENA: Korišćenje multi-cURL (batch) metode
         // OPTIMIZACIJA: Prosleđujemo custom fields iz keša da izbegnemo GET requestove
         // OPTIMIZACIJA: Dohvatanje poznatih ID-eva iz promotion_products tabele (Backup ako je keš zastareo)
-        $productIds = array_values(array_unique(array_column($productPromotions, 'product_id')));
+        $productIds = array_values(array_unique(array_column($appliedPromotions, 'product_id')));
         $knownFieldIds = [];
         if (!empty($productIds)) {
              $placeholders = str_repeat('?,', count($productIds) - 1) . '?';
@@ -480,7 +467,7 @@ public function __construct(Database $db = null) {
             }
         }
         
-        foreach ($productPromotions as &$promo) {
+        foreach ($appliedPromotions as &$promo) {
             $pid = $promo['product_id'];
             $promo['custom_field_id'] = $fieldIdMap[$pid] ?? null;
         }
@@ -490,7 +477,7 @@ public function __construct(Database $db = null) {
         $debugLog[] = "Custom field updates (Multi-cURL): {$fieldSuccess} success";
         
         // 🚀 IZMENA: Zameniti petlju za individualne INSERT-e jednim BATCH INSERT-om
-        $this->batchSavePromotionProducts($productPromotions);
+        $this->batchSavePromotionProducts($appliedPromotions);
         $debugLog[] = "Database records saved/updated in batch.";
         
         // Cleanup expired products (sada će koristiti batch metode)
@@ -498,6 +485,7 @@ public function __construct(Database $db = null) {
         $debugLog[] = "Cleaned {$cleanedCount} expired products";
         
         // 🚀 OPTIMIZACIJA: Direktno ažuriranje lokalnog keša (bez API poziva)
+        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions);
         $this->cacheService->updatePriceCacheDirectly($cachePriceUpdates);
 
         if (($cleanedCount + $expiredCleanedCount) > 0) {
@@ -1081,22 +1069,20 @@ public function __construct(Database $db = null) {
         }
 
         // 4. BATCH API pozivi za cene
-        if (!empty($productUpdates)) {
-            $this->api->batchUpdateProducts($productUpdates);
-        }
-        if (!empty($variantUpdates)) {
-            $this->api->batchUpdateVariants($variantUpdates);
+        $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
+        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
+        $priceResults = array_merge($productResults, $variantResults);
+        $appliedPromotions = $this->filterPromotionsWithSuccessfulPriceUpdates($productPromotions, $priceResults);
+
+        if (empty($appliedPromotions)) {
+            return [
+                'processed' => 0,
+                'errors' => count($items)
+            ];
         }
 
         // 5. BATCH CUSTOM FIELDS (Multi Curl)
-        $cfUpdates = [];
-        foreach ($productPromotions as $p) {
-            // Custom field se postavlja samo na osnovni proizvod, ne na varijantu
-            $cfUpdates[] = [
-                'product_id' => $p['product_id'],
-                'field_value' => $p['custom_field_value'] ?? $p['promotion_name']
-            ];
-        }
+        $cfUpdates = $this->buildUniquePromotionFieldUpdates($appliedPromotions);
         // Uklanjamo duplikate jer više varijanti može biti vezano za isti osnovni proizvod
         $cfUpdates = array_values(array_unique($cfUpdates, SORT_REGULAR));
         
@@ -1110,7 +1096,7 @@ public function __construct(Database $db = null) {
         }
         
         // OPTIMIZACIJA: Dohvatanje poznatih ID-eva iz promotion_products tabele
-        $productIds = array_column($productPromotions, 'product_id');
+        $productIds = array_values(array_unique(array_column($appliedPromotions, 'product_id')));
         $knownFieldIds = [];
         if (!empty($productIds)) {
              $placeholders = str_repeat('?,', count($productIds) - 1) . '?';
@@ -1130,36 +1116,24 @@ public function __construct(Database $db = null) {
                 $fieldIdMap[$res['product_id']] = $res['custom_field_id'] ?? null;
             }
         }
-        foreach ($productPromotions as &$p) {
+        foreach ($appliedPromotions as &$p) {
             // Dodeljujemo ID custom polja svim stavkama istog proizvoda
             $p['custom_field_id'] = $fieldIdMap[$p['product_id']] ?? null;
         }
         unset($p);
 
         // 6. BATCH DB SAVE
-        $this->batchSavePromotionProducts($productPromotions);
+        $this->batchSavePromotionProducts($appliedPromotions);
 
         // 7. UPDATE CACHE DIRECTLY
-        $cachePriceUpdates = [];
-        foreach ($productPromotions as $p) {
-            $cachePriceUpdates[] = [
-                'product_id' => $p['product_id'],
-                'variant_id' => $p['variant_id'],
-                'price'      => $p['original_price'],
-                'sale_price' => $p['promo_price']
-            ];
-        }
+        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions);
         $this->cacheService->updatePriceCacheDirectly($cachePriceUpdates);
 
         return [
-            'processed' => count($productPromotions),
-            'errors' => 0
+            'processed' => count($appliedPromotions),
+            'errors' => count($items) - count($appliedPromotions)
         ];
 
-        return [
-            'processed' => count($productPromotions),
-            'errors' => count($items) - count($productPromotions) // Razlika su oni koji nisu prošli proveru prioriteta
-        ];
     }
 
     private function processProductsBatch($products, $specificPromoId = null) {
@@ -1643,7 +1617,10 @@ public function __construct(Database $db = null) {
     }
 
     private function getExistingOmnibusFieldRepairReference(array $product, float $promoPrice): ?float {
-        $referencePrice = $this->extractExistingOmnibusFieldPrice($product['custom_fields'] ?? null);
+        $variantId = isset($product['variant_id']) && $product['variant_id'] !== null
+            ? (int)$product['variant_id']
+            : null;
+        $referencePrice = $this->extractExistingOmnibusFieldPrice($product['custom_fields'] ?? null, $variantId);
         if ($referencePrice === null || $referencePrice <= 0) {
             return null;
         }
@@ -1653,7 +1630,7 @@ public function __construct(Database $db = null) {
             : null;
     }
 
-    private function extractExistingOmnibusFieldPrice($rawFields): ?float {
+    private function extractExistingOmnibusFieldPrice($rawFields, ?int $variantId = null): ?float {
         $fields = is_string($rawFields) ? json_decode($rawFields, true) : $rawFields;
         if (!is_array($fields)) {
             return null;
@@ -1664,13 +1641,13 @@ public function __construct(Database $db = null) {
                 continue;
             }
 
-            return $this->parseStoredPriceValue($field['value'] ?? null);
+            return $this->parseStoredPriceValue($field['value'] ?? null, $variantId);
         }
 
         return null;
     }
 
-    private function parseStoredPriceValue($value): ?float {
+    private function parseStoredPriceValue($value, ?int $variantId = null): ?float {
         if (is_int($value) || is_float($value)) {
             return (float)$value;
         }
@@ -1682,6 +1659,25 @@ public function __construct(Database $db = null) {
         $value = trim($value);
         if ($value === '') {
             return null;
+        }
+
+        if ($value[0] === '{') {
+            $decoded = json_decode($value, true);
+            if (!is_array($decoded)) {
+                return null;
+            }
+
+            if ($variantId === null) {
+                return null;
+            }
+
+            $variantKey = (string)$variantId;
+            $variantValues = $decoded['values'] ?? $decoded;
+            if (!is_array($variantValues) || !array_key_exists($variantKey, $variantValues)) {
+                return null;
+            }
+
+            return $this->parseStoredPriceValue($variantValues[$variantKey], null);
         }
 
         if (is_numeric($value)) {
@@ -1984,12 +1980,16 @@ public function __construct(Database $db = null) {
 
         // 1. Update na BC (Ovo je sporo ako se radi u petlji!)
         if (!empty($product['variant_id'])) {
-            $this->api->batchUpdateVariants([[
+            $priceResults = $this->api->batchUpdateVariants([[
                 'product_id' => $product['product_id'],
                 'id' => $product['variant_id'],
                 'price' => $originalPrice,
                 'sale_price' => $promoPrice
             ]]);
+
+            if (!$this->hasSuccessfulPriceUpdateForItem($product['product_id'], $product['variant_id'], $priceResults)) {
+                throw new \RuntimeException("Variant price update failed for product {$product['product_id']} variant {$product['variant_id']}.");
+            }
         } else {
             $this->api->updateProductPrice($product['product_id'], $originalPrice, $promoPrice);
         }
@@ -2069,6 +2069,86 @@ public function __construct(Database $db = null) {
             "DELETE FROM promotion_products WHERE product_id = ? AND store_hash = ?",
             [$product['product_id'], $this->storeHash]
         );
+    }
+
+    private function filterPromotionsWithSuccessfulPriceUpdates(array $promotions, array $priceResults): array {
+        $successfulKeys = $this->getSuccessfulPriceUpdateKeys($priceResults);
+        if (empty($successfulKeys)) {
+            return [];
+        }
+
+        return array_filter($promotions, function (array $promo) use ($successfulKeys): bool {
+            $key = $this->getPromotionItemKey($promo['product_id'], $promo['variant_id'] ?? null);
+            return isset($successfulKeys[$key]);
+        });
+    }
+
+    private function hasSuccessfulPriceUpdateForItem($productId, $variantId, array $priceResults): bool {
+        $key = $this->getPromotionItemKey($productId, $variantId);
+        $successfulKeys = $this->getSuccessfulPriceUpdateKeys($priceResults);
+
+        return isset($successfulKeys[$key]);
+    }
+
+    private function getSuccessfulPriceUpdateKeys(array $priceResults): array {
+        $keys = [];
+
+        foreach ($priceResults as $result) {
+            if (empty($result['success'])) {
+                continue;
+            }
+
+            $variantId = $result['variant_id'] ?? null;
+            $productId = $result['product_id'] ?? null;
+
+            if (($productId === null || $productId === '') && ($variantId === null || $variantId === '')) {
+                $productId = $result['id'] ?? null;
+            }
+
+            if ($variantId !== null && $variantId !== '') {
+                $keys[$this->getPromotionItemKey((int)($productId ?: 0), (int)$variantId)] = true;
+                continue;
+            }
+
+            if ($productId !== null && $productId !== '') {
+                $keys[$this->getPromotionItemKey((int)$productId, null)] = true;
+            }
+        }
+
+        return $keys;
+    }
+
+    private function buildUniquePromotionFieldUpdates(array $promotions): array {
+        $updates = [];
+
+        foreach ($promotions as $promo) {
+            $productId = (int)($promo['product_id'] ?? 0);
+            if ($productId <= 0 || isset($updates[$productId])) {
+                continue;
+            }
+
+            $updates[$productId] = [
+                'product_id' => $productId,
+                'field_value' => $promo['custom_field_value'] ?? $promo['promotion_name']
+            ];
+        }
+
+        return array_values($updates);
+    }
+
+    private function buildPromotionCachePriceUpdates(array $promotions): array {
+        $updates = [];
+
+        foreach ($promotions as $promo) {
+            $updates[] = [
+                'product_id' => $promo['product_id'],
+                'variant_id' => $promo['variant_id'] ?? null,
+                'price' => $promo['original_price'],
+                'sale_price' => $promo['promo_price']
+            ];
+        }
+
+        return $updates;
     }
 
     private function getPromotionItemKey($productId, $variantId = null) {

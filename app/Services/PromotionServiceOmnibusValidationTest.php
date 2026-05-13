@@ -315,6 +315,46 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertSame('not_below_30_day_lowest', $candidate['omnibus_invalid_reason']);
     }
 
+    public function testExistingVariantOmnibusFieldAllowsRepairForMatchingVariantReference(): void {
+        $pricingService = $this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => 10.00,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]);
+        $service = $this->createPromotionService($pricingService);
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionCandidate');
+        $method->setAccessible(true);
+        $candidate = $method->invoke($service, $this->productItem([
+            'product_id' => 5472,
+            'variant_id' => 5648,
+            'price' => 18.65,
+            'custom_fields' => json_encode([
+                [
+                    'id' => 987,
+                    'name' => 'lowest_price_30d',
+                    'value' => '{"type":"variant_prior_prices","currency":"EUR","values":{"5631":"6.23","5648":"15.64"}}',
+                ],
+            ]),
+        ]), [
+            'id' => 55,
+            'name' => 'Variant repair promotion',
+            'custom_field_value' => 'Na popustu',
+            'discount_percent' => 20.00,
+            'start_date' => '2026-05-12 11:03:00',
+            'created_at' => '2026-05-12 11:11:28',
+            'omnibus_terms_updated_at' => '2026-05-12 11:11:28',
+            'priority' => 1,
+        ]);
+
+        $this->assertTrue($candidate['will_apply']);
+        $this->assertTrue($candidate['omnibus_existing_field_repair_allowed']);
+        $this->assertSame(15.64, $candidate['omnibus_reference_price']);
+    }
+
     private function validateAgainstOmnibus(array $dto, array $item, float $promoPrice): array {
         $serviceClass = new ReflectionClass(PromotionService::class);
         $service = $this->createPromotionService($this->createPricingService($dto));

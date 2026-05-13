@@ -416,16 +416,29 @@ class BigCommerceAPI {
         
         foreach ($batches as $batch) {
             try {
-                // The payload is an array of variant update objects
-                $response = $this->request('PUT', 'catalog/products/variants', $batch);
+                // The payload is an array of variant update objects.
+                // BigCommerce's cross-product batch variant endpoint is /catalog/variants.
+                $response = $this->request('PUT', 'catalog/variants', $batch);
+                $requestedByVariantId = [];
+                foreach ($batch as $update) {
+                    if (!empty($update['id'])) {
+                        $requestedByVariantId[(int)$update['id']] = $update;
+                    }
+                }
                 
                 // Process response
                 if (isset($response['body']['data'])) {
                     foreach ($response['body']['data'] as $updatedVariant) {
+                        $variantId = isset($updatedVariant['id']) ? (int)$updatedVariant['id'] : null;
+                        $productId = $updatedVariant['product_id']
+                            ?? ($variantId !== null && isset($requestedByVariantId[$variantId]['product_id'])
+                                ? $requestedByVariantId[$variantId]['product_id']
+                                : null);
+
                         $results[] = [
                             'success' => true,
-                            'product_id' => $updatedVariant['product_id'],
-                            'variant_id' => $updatedVariant['id']
+                            'product_id' => $productId !== null ? (int)$productId : null,
+                            'variant_id' => $variantId
                         ];
                     }
                 }
@@ -636,7 +649,7 @@ class BigCommerceAPI {
             return $productIds;
         }
 
-        if ($path === 'catalog/products/variants' && is_array($data)) {
+        if (in_array($path, ['catalog/products/variants', 'catalog/variants'], true) && is_array($data)) {
             foreach ($data as $item) {
                 if (is_array($item) && !empty($item['product_id'])) {
                     $productIds[] = (int)$item['product_id'];

@@ -197,6 +197,66 @@ class OmnibusSyncServiceTest extends TestCase {
         $this->assertSame('2026-05-12 16:33:03', $pricingService->referenceAt->format('Y-m-d H:i:s'));
     }
 
+    public function testAggregatedUpdateBuildsVariantReferencePayloadForVariantProducts(): void {
+        $pricingService = new class {
+            public function getDisplayData(
+                string $storeHash,
+                int $productId,
+                ?int $variantId,
+                string $currency,
+                $currentPrice = null,
+                ?DateTimeImmutable $referenceAt = null,
+                array $options = []
+            ): array {
+                return [
+                    'current_price' => $currentPrice,
+                    'rolling_lowest_price_last_30_days' => $currentPrice,
+                    'lowest_price_last_30_days' => $currentPrice,
+                    'is_valid_omnibus_reduction' => true,
+                    'omnibus_reference_price' => $variantId === 5631 ? '6.23' : '15.64',
+                    'effective_currency' => $currency,
+                ];
+            }
+        };
+
+        $service = $this->createService(new class {
+            public function seedInitialPriceHistoryBatch(string $storeHash, array $pricesToSeed): int {
+                return count($pricesToSeed);
+            }
+        }, $pricingService);
+
+        $method = new ReflectionMethod($service, 'buildAggregatedUpdateForProduct');
+        $method->setAccessible(true);
+        $update = $method->invoke($service, 5472, [
+            [
+                'product_id' => 5472,
+                'variant_id' => 5631,
+                'type' => 'variant',
+                'price' => '7.79',
+                'sale_price' => '4.98',
+                'cached_at' => '2026-05-13 15:11:03',
+            ],
+            [
+                'product_id' => 5472,
+                'variant_id' => 5648,
+                'type' => 'variant',
+                'price' => '18.65',
+                'sale_price' => '14.92',
+                'cached_at' => '2026-05-13 15:11:03',
+            ],
+        ], 'EUR');
+
+        $this->assertTrue($update['is_discounted_now']);
+        $this->assertSame([
+            'type' => 'variant_prior_prices',
+            'currency' => 'EUR',
+            'values' => [
+                '5631' => 6.23,
+                '5648' => 15.64,
+            ],
+        ], $update['omnibus_reference_price']);
+    }
+
     private function createService($priceLogger, $pricingService = null): OmnibusSyncService {
         $reflection = new ReflectionClass(OmnibusSyncService::class);
         $service = $reflection->newInstanceWithoutConstructor();

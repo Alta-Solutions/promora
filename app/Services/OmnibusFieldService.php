@@ -331,6 +331,36 @@ class OmnibusFieldService {
     }
 
     private function formatFieldValue($price): string {
+        if (is_array($price)) {
+            return $this->formatStructuredFieldValue($price);
+        }
+
+        return $this->formatPriceValue($price);
+    }
+
+    private function formatStructuredFieldValue(array $payload): string {
+        if (($payload['type'] ?? null) === 'variant_prior_prices') {
+            $values = [];
+            foreach (($payload['values'] ?? []) as $variantId => $price) {
+                if (!is_numeric($price)) {
+                    continue;
+                }
+
+                $values[(string)$variantId] = $this->formatPriceValue($price);
+            }
+
+            ksort($values, SORT_NATURAL);
+            $payload = [
+                'type' => 'variant_prior_prices',
+                'currency' => (string)($payload['currency'] ?? ''),
+                'values' => $values,
+            ];
+        }
+
+        return json_encode($payload, JSON_UNESCAPED_SLASHES);
+    }
+
+    private function formatPriceValue($price): string {
         $normalized = number_format((float)$price, 4, '.', '');
         return rtrim(rtrim($normalized, '0'), '.');
     }

@@ -155,7 +155,9 @@ class OmnibusSyncService {
         array $priceActivationMap = []
     ): array {
         $rowsForPricing = $this->selectRowsForPricing($productRows);
+        $hasVariantRows = $this->hasVariantRows($rowsForPricing);
         $lowestReference = null;
+        $variantReferences = [];
         $lastDto = null;
 
         foreach ($rowsForPricing as $row) {
@@ -194,19 +196,49 @@ class OmnibusSyncService {
             }
 
             $referencePrice = (float)$dto['omnibus_reference_price'];
-            if ($lowestReference === null || $referencePrice < $lowestReference) {
+            if ($hasVariantRows && $variantId !== null) {
+                $variantReferences[(string)$variantId] = $referencePrice;
+            } elseif ($lowestReference === null || $referencePrice < $lowestReference) {
                 $lowestReference = $referencePrice;
             }
         }
+
+        $referenceValue = $hasVariantRows
+            ? $this->buildVariantReferencePayload($variantReferences, $currency)
+            : $lowestReference;
 
         return [
             'product_id' => $productId,
             'current_price' => $lastDto['current_price'] ?? null,
             'rolling_lowest_price_last_30_days' => $lastDto['rolling_lowest_price_last_30_days'] ?? null,
             'lowest_price_last_30_days' => $lastDto['lowest_price_last_30_days'] ?? null,
-            'is_discounted_now' => $lowestReference !== null,
-            'omnibus_reference_price' => $lowestReference,
+            'is_discounted_now' => $referenceValue !== null,
+            'omnibus_reference_price' => $referenceValue,
             'effective_currency' => $lastDto['effective_currency'] ?? $currency,
+        ];
+    }
+
+    private function hasVariantRows(array $rows): bool {
+        foreach ($rows as $row) {
+            if (isset($row['variant_id']) && $row['variant_id'] !== null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function buildVariantReferencePayload(array $variantReferences, string $currency): ?array {
+        if (empty($variantReferences)) {
+            return null;
+        }
+
+        ksort($variantReferences, SORT_NATURAL);
+
+        return [
+            'type' => 'variant_prior_prices',
+            'currency' => $currency,
+            'values' => $variantReferences,
         ];
     }
 
