@@ -159,5 +159,17 @@ class Promotion {
                 "ALTER TABLE promotions ADD COLUMN description TEXT NULL AFTER color"
             );
         }
+
+        $omnibusTermsColumn = $this->db->fetchOne(
+            "SELECT COLUMN_NAME
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'promotions' AND COLUMN_NAME = 'omnibus_terms_updated_at'"
+        );
+
+        if (!$omnibusTermsColumn) {
+            $this->db->query(
+                "ALTER TABLE promotions ADD COLUMN omnibus_terms_updated_at DATETIME NULL AFTER created_at"
+            );
+        }
     }
 }

@@ -185,7 +185,13 @@ class PromotionController {
             $preview = $this->promotionService->previewPromotionProducts(
                 $filters,
                 $discountPercent,
-                $_POST['start_date'] ?? null
+                $_POST['start_date'] ?? null,
+                [
+                    'promotion_id' => isset($_POST['promotion_id']) ? (int)$_POST['promotion_id'] : null,
+                    'filters' => $filters,
+                    'discount_percent' => $discountPercent,
+                    'start_date' => $_POST['start_date'] ?? null,
+                ]
             );
             echo json_encode(['success' => true, 'data' => $preview]);
         } catch (\Exception $e) {

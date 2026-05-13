@@ -15,6 +15,7 @@ class PromotionService {
     private $omnibusPricingService;
     private $storeConfigCache = null;
     private const API_PRODUCT_LIMIT = 250;
+    private const OMNIBUS_FIELD_NAME = 'lowest_price_30d';
     
 public function __construct(Database $db = null) {
         $this->promotionModel = new Promotion();
@@ -41,8 +42,8 @@ public function __construct(Database $db = null) {
         $status = $this->determinePromotionStatus($data['start_date'] ?? null, $data['end_date'] ?? null);
 
         // 1. Unos promocije u bazu
-        $sql = "INSERT INTO promotions (store_hash, name, custom_field_value, discount_percent, start_date, end_date, priority, filters, status, color, description, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())";
+        $sql = "INSERT INTO promotions (store_hash, name, custom_field_value, discount_percent, start_date, end_date, priority, filters, status, color, description, created_at, omnibus_terms_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())";
         
         $filtersJson = is_array($data['filters']) ? json_encode($data['filters']) : $data['filters'];
         
@@ -70,9 +71,18 @@ public function __construct(Database $db = null) {
     }
 
     public function updatePromotion($promotionId, array $data) {
+        $existingPromotion = $this->promotionModel->findById($promotionId);
+        if (!$existingPromotion) {
+            throw new \InvalidArgumentException("Promotion not found.");
+        }
+
         $data['discount_percent'] = $this->validateDiscountPercent($data['discount_percent'] ?? null);
         $status = $this->determinePromotionStatus($data['start_date'] ?? null, $data['end_date'] ?? null);
         $data['status'] = $status;
+        $omnibusTermsChanged = $this->hasPromotionOmnibusTermsChanged($existingPromotion, $data);
+        if ($omnibusTermsChanged) {
+            $data['omnibus_terms_updated_at'] = date('Y-m-d H:i:s');
+        }
 
         $result = $this->promotionModel->update($promotionId, $data);
 
@@ -541,14 +551,35 @@ public function __construct(Database $db = null) {
     /**
      * Preview products that match promotion filters (WITHOUT applying promotion)
      */
-    public function previewPromotionProducts($filters, $discountPercent, $referenceAt = null) {
+    public function previewPromotionProducts($filters, $discountPercent, $referenceAt = null, array $context = []) {
         $discountPercent = $this->validateDiscountPercent($discountPercent);
+        $skipOmnibusRevalidation = $this->isEditPreviewWithoutOmnibusTermChanges(
+            $context + [
+                'filters' => $filters,
+                'discount_percent' => $discountPercent,
+                'start_date' => $referenceAt,
+            ]
+        );
+        $omnibusReferenceAt = $this->resolvePreviewOmnibusReferenceAt(
+            $referenceAt,
+            $context + [
+                'filters' => $filters,
+                'discount_percent' => $discountPercent,
+            ]
+        );
         // getProductsByFilters sada vraća i proizvode i varijante
         $items = $this->cacheService->getProductsByFilters($filters);
         
         $preview = [];
         foreach ($items as $item) {
-            $row = $this->buildPromotionPreviewRow($item, $discountPercent, $referenceAt);
+            $row = $this->buildPromotionPreviewRow(
+                $item,
+                $discountPercent,
+                $omnibusReferenceAt,
+                true,
+                $skipOmnibusRevalidation,
+                !empty($context['promotion_id'])
+            );
             if ($row !== null) {
                 $preview[] = $row;
             }
@@ -1202,7 +1233,14 @@ public function __construct(Database $db = null) {
         return round($value, 2);
     }
 
-    private function buildPromotionPreviewRow(array $item, float $discountPercent, $referenceAt = null): ?array {
+    private function buildPromotionPreviewRow(
+        array $item,
+        float $discountPercent,
+        $referenceAt = null,
+        bool $referenceAtResolved = false,
+        bool $skipOmnibusRevalidation = false,
+        bool $allowExistingFieldRepair = false
+    ): ?array {
         if (empty($item['price']) || (float)$item['price'] <= 0) {
             return null;
         }
@@ -1210,11 +1248,22 @@ public function __construct(Database $db = null) {
         $originalPrice = (float)$item['price'];
         $promoPrice = $this->calculatePromoPrice($originalPrice, $discountPercent);
         $savings = $originalPrice - $promoPrice;
+        $omnibusReferenceAt = $referenceAtResolved
+            ? $this->normalizeReferenceAt($referenceAt)
+            : $this->resolvePreviewOmnibusReferenceAt($referenceAt);
         $omnibus = $this->validatePromotionPriceAgainstOmnibus(
             $item,
             $promoPrice,
-            $this->resolvePreviewOmnibusReferenceAt($referenceAt)
+            $omnibusReferenceAt
         );
+        if ($skipOmnibusRevalidation) {
+            $omnibus = $this->markOmnibusRevalidationSkipped($omnibus);
+        } elseif ($allowExistingFieldRepair && empty($omnibus['will_apply'])) {
+            $existingReference = $this->getExistingOmnibusFieldRepairReference($item, $promoPrice);
+            if ($existingReference !== null) {
+                $omnibus = $this->markOmnibusExistingFieldRepairAllowed($omnibus, $existingReference);
+            }
+        }
 
         return [
             'id' => $item['id'],
@@ -1250,6 +1299,17 @@ public function __construct(Database $db = null) {
             $promoPrice,
             $this->resolvePromotionOmnibusReferenceAt($promotion)
         );
+        if (
+            empty($omnibus['will_apply'])
+            && $this->isExistingPromotionProductCurrentForTerms($product, $promotion)
+        ) {
+            $omnibus = $this->markOmnibusRevalidationSkipped($omnibus);
+        } elseif (empty($omnibus['will_apply'])) {
+            $existingReference = $this->getExistingOmnibusFieldRepairReference($product, $promoPrice);
+            if ($existingReference !== null) {
+                $omnibus = $this->markOmnibusExistingFieldRepairAllowed($omnibus, $existingReference);
+            }
+        }
 
         return [
             'id' => $promotion['id'],
@@ -1472,7 +1532,16 @@ public function __construct(Database $db = null) {
         return new \DateTimeImmutable($value);
     }
 
-    private function resolvePreviewOmnibusReferenceAt($submittedStartDate): \DateTimeImmutable {
+    private function resolvePreviewOmnibusReferenceAt($submittedStartDate, array $context = []): \DateTimeImmutable {
+        $existingPromotion = $this->findPromotionFromPreviewContext($context);
+
+        if (
+            is_array($existingPromotion)
+            && !$this->hasPromotionOmnibusTermsChanged($existingPromotion, $context)
+        ) {
+            return $this->resolvePromotionOmnibusReferenceAt($existingPromotion);
+        }
+
         return $this->latestDateTime([
             $this->normalizeReferenceAt($submittedStartDate),
             $this->normalizeReferenceAt('now'),
@@ -1481,7 +1550,7 @@ public function __construct(Database $db = null) {
 
     private function resolvePromotionOmnibusReferenceAt(array $promotion): \DateTimeImmutable {
         $dates = [];
-        foreach (['start_date', 'created_at', 'updated_at'] as $field) {
+        foreach (['start_date', 'created_at', 'omnibus_terms_updated_at'] as $field) {
             $dateTime = $this->normalizeOptionalReferenceAt($promotion[$field] ?? null);
             if ($dateTime !== null) {
                 $dates[] = $dateTime;
@@ -1530,6 +1599,216 @@ public function __construct(Database $db = null) {
         }
 
         return $latest ?? $this->normalizeReferenceAt('now');
+    }
+
+    private function isEditPreviewWithoutOmnibusTermChanges(array $context): bool {
+        $existingPromotion = $this->findPromotionFromPreviewContext($context);
+
+        return is_array($existingPromotion)
+            && !$this->hasPromotionOmnibusTermsChanged($existingPromotion, $context);
+    }
+
+    private function findPromotionFromPreviewContext(array $context): ?array {
+        $promotionId = isset($context['promotion_id']) ? (int)$context['promotion_id'] : 0;
+        if ($promotionId <= 0 || !$this->promotionModel) {
+            return null;
+        }
+
+        $promotion = $this->promotionModel->findById($promotionId);
+        return is_array($promotion) ? $promotion : null;
+    }
+
+    private function markOmnibusRevalidationSkipped(array $omnibus): array {
+        $omnibus['omnibus_valid'] = true;
+        $omnibus['will_apply'] = true;
+        $omnibus['omnibus_status'] = 'valid';
+        $omnibus['omnibus_warning'] = '';
+        $omnibus['omnibus_invalid_reason'] = null;
+        $omnibus['omnibus_revalidation_skipped'] = true;
+
+        return $omnibus;
+    }
+
+    private function markOmnibusExistingFieldRepairAllowed(array $omnibus, float $referencePrice): array {
+        $omnibus['lowest_price_30d'] = $referencePrice;
+        $omnibus['omnibus_reference_price'] = $referencePrice;
+        $omnibus['omnibus_valid'] = true;
+        $omnibus['will_apply'] = true;
+        $omnibus['omnibus_status'] = 'valid';
+        $omnibus['omnibus_warning'] = '';
+        $omnibus['omnibus_invalid_reason'] = null;
+        $omnibus['omnibus_existing_field_repair_allowed'] = true;
+
+        return $omnibus;
+    }
+
+    private function getExistingOmnibusFieldRepairReference(array $product, float $promoPrice): ?float {
+        $referencePrice = $this->extractExistingOmnibusFieldPrice($product['custom_fields'] ?? null);
+        if ($referencePrice === null || $referencePrice <= 0) {
+            return null;
+        }
+
+        return $this->isPromoPriceBelowOmnibusReference($promoPrice, $referencePrice)
+            ? $referencePrice
+            : null;
+    }
+
+    private function extractExistingOmnibusFieldPrice($rawFields): ?float {
+        $fields = is_string($rawFields) ? json_decode($rawFields, true) : $rawFields;
+        if (!is_array($fields)) {
+            return null;
+        }
+
+        foreach ($fields as $field) {
+            if (!is_array($field) || ($field['name'] ?? null) !== self::OMNIBUS_FIELD_NAME) {
+                continue;
+            }
+
+            return $this->parseStoredPriceValue($field['value'] ?? null);
+        }
+
+        return null;
+    }
+
+    private function parseStoredPriceValue($value): ?float {
+        if (is_int($value) || is_float($value)) {
+            return (float)$value;
+        }
+
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            return (float)$value;
+        }
+
+        if (!preg_match('/-?\d+(?:[.,]\d+)?/', $value, $matches)) {
+            return null;
+        }
+
+        return (float)str_replace(',', '.', $matches[0]);
+    }
+
+    private function isExistingPromotionProductCurrentForTerms(array $product, array $promotion): bool {
+        if (empty($promotion['id']) || empty($product['product_id']) || !$this->db) {
+            return false;
+        }
+
+        $row = $this->db->fetchOne(
+            "SELECT synced_at
+             FROM promotion_products
+             WHERE store_hash = ?
+               AND promotion_id = ?
+               AND product_id = ?
+               AND variant_id <=> ?
+             ORDER BY synced_at DESC, id DESC
+             LIMIT 1",
+            [
+                $this->storeHash,
+                (int)$promotion['id'],
+                (int)$product['product_id'],
+                isset($product['variant_id']) && $product['variant_id'] !== null
+                    ? (int)$product['variant_id']
+                    : null,
+            ]
+        );
+
+        if (empty($row['synced_at'])) {
+            return false;
+        }
+
+        $syncedAt = $this->normalizeOptionalReferenceAt($row['synced_at']);
+        $termsChangedAt = $this->resolvePromotionTermsChangedAt($promotion);
+
+        return $syncedAt !== null
+            && $termsChangedAt !== null
+            && $syncedAt >= $termsChangedAt;
+    }
+
+    private function resolvePromotionTermsChangedAt(array $promotion): ?\DateTimeImmutable {
+        foreach (['omnibus_terms_updated_at', 'created_at', 'updated_at', 'start_date'] as $field) {
+            $dateTime = $this->normalizeOptionalReferenceAt($promotion[$field] ?? null);
+            if ($dateTime !== null) {
+                return $dateTime;
+            }
+        }
+
+        return null;
+    }
+
+    private function hasPromotionOmnibusTermsChanged(array $existingPromotion, array $newData): bool {
+        if (
+            array_key_exists('discount_percent', $newData)
+            && round((float)$existingPromotion['discount_percent'], 2) !== round((float)$newData['discount_percent'], 2)
+        ) {
+            return true;
+        }
+
+        if (
+            array_key_exists('start_date', $newData)
+            && $this->normalizeDateForComparison($existingPromotion['start_date'] ?? null)
+                !== $this->normalizeDateForComparison($newData['start_date'] ?? null)
+        ) {
+            return true;
+        }
+
+        if (
+            array_key_exists('filters', $newData)
+            && $this->normalizeFiltersForComparison($existingPromotion['filters'] ?? [])
+                !== $this->normalizeFiltersForComparison($newData['filters'] ?? [])
+        ) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private function normalizeDateForComparison($date): ?string {
+        $dateTime = $this->normalizeOptionalReferenceAt($date);
+        return $dateTime ? $dateTime->format('Y-m-d H:i') : null;
+    }
+
+    private function normalizeFiltersForComparison($filters): string {
+        if (is_string($filters)) {
+            $decoded = json_decode($filters, true);
+            $filters = is_array($decoded) ? $decoded : [];
+        }
+
+        if (!is_array($filters)) {
+            $filters = [];
+        }
+
+        $normalized = $this->sortFilterValueForComparison($filters);
+        return json_encode($normalized, JSON_UNESCAPED_UNICODE);
+    }
+
+    private function sortFilterValueForComparison($value) {
+        if (!is_array($value)) {
+            return $value;
+        }
+
+        $isList = array_keys($value) === range(0, count($value) - 1);
+        if ($isList) {
+            $normalizedList = array_map([$this, 'sortFilterValueForComparison'], $value);
+            usort($normalizedList, static function ($left, $right): int {
+                return strcmp(json_encode($left, JSON_UNESCAPED_UNICODE), json_encode($right, JSON_UNESCAPED_UNICODE));
+            });
+
+            return $normalizedList;
+        }
+
+        ksort($value);
+        foreach ($value as $key => $item) {
+            $value[$key] = $this->sortFilterValueForComparison($item);
+        }
+
+        return $value;
     }
 
     private function translateMessage(string $key, array $replace, string $fallback): string {

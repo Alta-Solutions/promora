@@ -1012,6 +1012,7 @@ async function updatePreview() {
     try {
         const params = new URLSearchParams();
         params.append('_csrf_token', csrfToken);
+        params.append('promotion_id', <?= json_encode((int)$promotion['id']) ?>);
         params.append('filters', JSON.stringify(filtersObj));
         params.append('discount_percent', discount);
         params.append('start_date', document.getElementById('start-date')?.value || '');

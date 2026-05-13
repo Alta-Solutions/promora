@@ -104,6 +104,7 @@ try {
             `color` VARCHAR(20) NULL,
             `description` TEXT NULL,
             `created_at` DATETIME NOT NULL,
+            `omnibus_terms_updated_at` DATETIME NULL,
             `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX `idx_store_hash_status` (`store_hash`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",

@@ -91,11 +91,32 @@ For preview:
 
 For saved promotions during sync:
 
-- use `max(start_date, created_at, updated_at)`
+- use `max(start_date, created_at, omnibus_terms_updated_at)`
 
 This prevents users from setting a promotion start date before a known lower
 price change in order to bypass the 30-day lowest-price validation. A future
 scheduled promotion still uses its future `start_date`.
+
+`omnibus_terms_updated_at` is updated only when the promotion terms that affect
+the price reduction change, such as:
+
+- discount percentage
+- start date
+- product filters
+
+Metadata-only edits, such as changing the internal name, description, color, or
+custom field label, must not make an already-applied promotion look like a new
+price reduction. Existing products for the same promotion can skip Omnibus
+revalidation when their `promotion_products.synced_at` is newer than the last
+Omnibus terms update. They can still be synced so metadata/custom fields are
+refreshed.
+
+If BigCommerce is left in a partial state where `lowest_price_30d` already
+exists on a product but the sale price or promotion custom field was not applied,
+promotion sync may repair the missing write even if normal Omnibus revalidation
+would now fail. This repair is allowed only when the target promo price is still
+strictly lower than the already displayed `lowest_price_30d` value. It must not
+be treated as a general force-apply bypass.
 
 ### Practical Compliance Guide
 
