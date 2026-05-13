@@ -48,13 +48,24 @@ try {
     $promotionStores = $db->fetchAll("SELECT store_hash FROM bigcommerce_stores");
     
     $promotionJobsCreated = 0;
+    $promotionJobsSkipped = 0;
+    $completedJobsDeleted = 0;
+    $failedJobsDeleted = 0;
     foreach ($promotionStores as $store) {
-        $db->setStoreContext($store['store_hash']);
+        $storeHash = $store['store_hash'];
+        $db->setStoreContext($storeHash);
         $promotionService = new \App\Services\PromotionService();
         $result = $promotionService->queueAllPromotions();
         $promotionJobsCreated += $result['jobs'] ?? 0;
+        $promotionJobsSkipped += $result['skipped'] ?? 0;
+
+        $queueService = new QueueService($storeHash);
+        $purgedJobs = $queueService->purgeOldJobs();
+        $completedJobsDeleted += $purgedJobs['completed_deleted'] ?? 0;
+        $failedJobsDeleted += $purgedJobs['failed_deleted'] ?? 0;
     }
-    logMsg("-> Created {$promotionJobsCreated} promotion-related jobs.");
+    logMsg("-> Created {$promotionJobsCreated} promotion-related jobs. Skipped open duplicates: {$promotionJobsSkipped}.");
+    logMsg("-> Purged old sync_jobs rows. Completed: {$completedJobsDeleted}, failed: {$failedJobsDeleted}.");
 
 } catch (\Exception $e) {
     logMsg("ERROR in Scheduler: " . $e->getMessage());

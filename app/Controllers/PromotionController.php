@@ -15,6 +15,7 @@ class PromotionController {
     private $promotionService;
     private $cacheService;
     private const CREATE_SUBMISSION_TOKEN_SESSION_KEY = '_promotion_create_submission_tokens';
+    private const PROMOTION_INDEX_PER_PAGE_OPTIONS = [10, 25, 50, 100];
     
     public function __construct() {
         // Get the shared database instance. It should be aware of the store context from the session.
@@ -33,7 +34,33 @@ class PromotionController {
     }
     
     public function index() {
-        $promotions = $this->promotionModel->findAll();
+        $search = $this->getPromotionIndexSearch();
+        $perPage = $this->getPromotionIndexPerPage();
+        $page = max(1, (int)$this->getQueryParam('page', '1'));
+        $totalPromotions = $this->promotionModel->countAll(true, $search);
+        $totalPages = max(1, (int)ceil($totalPromotions / $perPage));
+
+        if ($page > $totalPages) {
+            $page = $totalPages;
+        }
+
+        $offset = ($page - 1) * $perPage;
+        $promotions = $this->promotionModel->findAll(true, [
+            'search' => $search,
+            'limit' => $perPage,
+            'offset' => $offset,
+        ]);
+        $pagination = [
+            'page' => $page,
+            'per_page' => $perPage,
+            'per_page_options' => self::PROMOTION_INDEX_PER_PAGE_OPTIONS,
+            'total' => $totalPromotions,
+            'total_pages' => $totalPages,
+            'from' => $totalPromotions > 0 ? $offset + 1 : 0,
+            'to' => min($offset + $perPage, $totalPromotions),
+            'search' => $search,
+        ];
+
         include __DIR__ . '/../Views/layouts/header.php';
         include __DIR__ . '/../Views/promotions/index.php';
         include __DIR__ . '/../Views/layouts/footer.php';
@@ -382,6 +409,28 @@ class PromotionController {
 
     private function getTokenStoreHash(): string {
         return (string)($_SESSION['store_hash'] ?? Database::getInstance()->getStoreContext() ?? 'default');
+    }
+
+    private function getPromotionIndexSearch(): string {
+        $search = $this->normalizeEscapedUnicodeString(trim($this->getQueryParam('q')));
+
+        return function_exists('mb_substr')
+            ? mb_substr($search, 0, 120)
+            : substr($search, 0, 120);
+    }
+
+    private function getPromotionIndexPerPage(): int {
+        $perPage = (int)$this->getQueryParam('per_page', '25');
+
+        return in_array($perPage, self::PROMOTION_INDEX_PER_PAGE_OPTIONS, true)
+            ? $perPage
+            : 25;
+    }
+
+    private function getQueryParam(string $key, string $default = ''): string {
+        $value = $_GET[$key] ?? $default;
+
+        return is_scalar($value) ? (string)$value : $default;
     }
 
     private function getSubmittedFilters() {

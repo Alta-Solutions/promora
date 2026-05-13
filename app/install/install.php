@@ -153,7 +153,8 @@ try {
             `created_at` DATETIME NOT NULL,
             `updated_at` DATETIME NULL,
             `next_run_at` DATETIME NULL,
-            INDEX `idx_status_next_run` (`status`, `next_run_at`)
+            INDEX `idx_status_next_run` (`status`, `next_run_at`),
+            INDEX `idx_store_job_promotion_status` (`store_hash`, `job_type`, `promotion_id`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
         // Tabela za webhook-ove
