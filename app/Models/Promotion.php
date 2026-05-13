@@ -73,8 +73,13 @@ class Promotion {
         return $this->db->fetchOne("SELECT * FROM promotions WHERE id = ? AND store_hash = ?", [$id, $storeHash]);
     }
     
-    public function findAll($includeExpired = true) {
+    public function findAll($includeExpired = true, array $options = []) {
         $storeHash = $this->db->getStoreContext();
+        $search = $this->normalizeSearch($options['search'] ?? '');
+        $limit = isset($options['limit']) ? max(1, (int)$options['limit']) : null;
+        $offset = isset($options['offset']) ? max(0, (int)$options['offset']) : 0;
+        $whereParams = [];
+        $whereSql = $this->buildListWhereClause((bool)$includeExpired, $storeHash, $search, $whereParams);
         
         $sql = "SELECT p.*, 
                 COUNT(DISTINCT pp.product_id) as product_count,
@@ -82,7 +87,7 @@ class Promotion {
                 FROM promotions p
                 LEFT JOIN promotion_products pp ON p.id = pp.promotion_id AND pp.store_hash = ?
                 LEFT JOIN sync_log sl ON p.id = sl.promotion_id AND sl.store_hash = ?
-                WHERE p.store_hash = ?";
+                WHERE {$whereSql}";
         
         $sql .= " GROUP BY p.id ORDER BY 
                   CASE 
@@ -94,8 +99,25 @@ class Promotion {
                   END,
                   p.priority DESC, 
                   p.created_at DESC";
+
+        if ($limit !== null) {
+            $sql .= " LIMIT {$limit} OFFSET {$offset}";
+        }
         
-        return $this->db->fetchAll($sql, [$storeHash, $storeHash, $storeHash]);
+        return $this->db->fetchAll($sql, array_merge([$storeHash, $storeHash], $whereParams));
+    }
+
+    public function countAll($includeExpired = true, string $search = ''): int {
+        $storeHash = $this->db->getStoreContext();
+        $whereParams = [];
+        $whereSql = $this->buildListWhereClause((bool)$includeExpired, $storeHash, $this->normalizeSearch($search), $whereParams);
+
+        $row = $this->db->fetchOne(
+            "SELECT COUNT(*) AS cnt FROM promotions p WHERE {$whereSql}",
+            $whereParams
+        );
+
+        return (int)($row['cnt'] ?? 0);
     }
     
     public function findActive() {
@@ -171,5 +193,42 @@ class Promotion {
                 "ALTER TABLE promotions ADD COLUMN omnibus_terms_updated_at DATETIME NULL AFTER created_at"
             );
         }
+    }
+
+    private function buildListWhereClause(bool $includeExpired, ?string $storeHash, string $search, array &$params): string {
+        $where = ["p.store_hash = ?"];
+        $params[] = $storeHash;
+
+        if (!$includeExpired) {
+            $where[] = "p.status != 'expired'";
+        }
+
+        if ($search !== '') {
+            $like = '%' . $search . '%';
+            $where[] = "(
+                p.name LIKE ?
+                OR COALESCE(p.custom_field_value, '') LIKE ?
+                OR COALESCE(p.description, '') LIKE ?
+                OR p.status LIKE ?
+                OR CAST(p.id AS CHAR) LIKE ?
+                OR CAST(p.priority AS CHAR) LIKE ?
+                OR CAST(p.discount_percent AS CHAR) LIKE ?
+            )";
+            array_push($params, $like, $like, $like, $like, $like, $like, $like);
+        }
+
+        return implode(' AND ', $where);
+    }
+
+    private function normalizeSearch($search): string {
+        $search = trim((string)$search);
+
+        if ($search === '') {
+            return '';
+        }
+
+        return function_exists('mb_substr')
+            ? mb_substr($search, 0, 120)
+            : substr($search, 0, 120);
     }
 }

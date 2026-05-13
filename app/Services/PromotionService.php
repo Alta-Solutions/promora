@@ -150,7 +150,7 @@ public function __construct(Database $db = null) {
         $totalItems = $this->cacheService->countProductsByFilters($filtersArray);
 
         // Kreiramo posao odmah
-        $queue->createJob('sync_promotion', $promotionId, $totalItems > 0 ? $totalItems : 1);
+        $queue->createJobIfNotOpen('sync_promotion', $promotionId, $totalItems > 0 ? $totalItems : 1);
     }
 
     private function queueOmnibusSyncJobIfEnabled(QueueService $queue): void {
@@ -163,7 +163,7 @@ public function __construct(Database $db = null) {
             return;
         }
 
-        $queue->createOmnibusSyncJob($this->countOmnibusParentProducts(), false);
+        $queue->createOmnibusSyncJob($this->countOmnibusParentProducts());
     }
 
     private function countOmnibusParentProducts(): int {
@@ -254,6 +254,7 @@ public function __construct(Database $db = null) {
         $promotions = $this->promotionModel->findActive();
         $expiredCleanupJobs = 0;
         $jobsCreated = 0;
+        $jobsSkipped = 0;
 
         if (empty($promotions)) {
             // Ako nema promocija, kreiraj posao za čišćenje svega
@@ -274,15 +275,23 @@ public function __construct(Database $db = null) {
             $totalItems = $this->cacheService->countProductsByFilters($filters);
             
             // Kreiramo posao čak i ako je 0, da bi worker mogao da evidentira prolaz
-            $queue->createJob('sync_promotion', $promo['id'], $totalItems > 0 ? $totalItems : 1);
-            $jobsCreated++;
+            $jobResult = $queue->createJobIfNotOpen('sync_promotion', $promo['id'], $totalItems > 0 ? $totalItems : 1);
+            if (!empty($jobResult['created'])) {
+                $jobsCreated++;
+            } else {
+                $jobsSkipped++;
+            }
         }
 
         if ($expiredCleanupJobs > 0) {
             $this->queueOmnibusSyncJobIfEnabled($queue);
         }
 
-        return ['message' => "Uspešno zakazano {$jobsCreated} poslova sinhronizacije.", 'jobs' => $jobsCreated];
+        return [
+            'message' => "Uspešno zakazano {$jobsCreated} poslova sinhronizacije. Preskočeno postojećih: {$jobsSkipped}.",
+            'jobs' => $jobsCreated,
+            'skipped' => $jobsSkipped
+        ];
     }
 
     /**

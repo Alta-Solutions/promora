@@ -11,7 +11,7 @@
     <title><?= trans_e('common.app_name') ?></title>
     <link rel="stylesheet" href="public/css/style.css">
     <link rel="stylesheet" href="public/css/promotions.css?v=<?= filemtime(ROOT_PATH . 'public/css/promotions.css') ?>">
-    <link rel="stylesheet" href="public/css/dashboard.css">
+    <link rel="stylesheet" href="public/css/dashboard.css?v=<?= filemtime(ROOT_PATH . 'public/css/dashboard.css') ?>">
     <link rel="stylesheet" href="public/css/settings.css">
     <link rel="stylesheet" href="public/css/logs.css">
     <?php if ($usesTomSelect): ?>

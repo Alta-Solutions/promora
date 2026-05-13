@@ -24,6 +24,44 @@ class QueueService {
         return $this->db->lastInsertId();
     }
 
+    public function createJobIfNotOpen($type, $promotionId = null, $totalItems = 0): array {
+        $lockName = 'sync_job:' . (string)$this->storeHash . ':' . (string)$type . ':' . ($promotionId === null ? 'null' : (string)$promotionId);
+        $lockAcquired = $this->acquireLock($lockName, 5);
+
+        if (!$lockAcquired) {
+            return [
+                'created' => false,
+                'job_id' => null,
+                'reason' => 'lock_timeout',
+                'message' => 'Nije moguce rezervisati job u ovom trenutku.',
+            ];
+        }
+
+        try {
+            $existingJob = $this->findOpenJob($type, $promotionId);
+            if ($existingJob) {
+                return [
+                    'created' => false,
+                    'job_id' => (int)$existingJob['id'],
+                    'reason' => 'already_exists',
+                    'message' => 'Job je vec zakazan ili u toku.',
+                    'job' => $existingJob,
+                ];
+            }
+
+            $jobId = $this->createJob($type, $promotionId, $totalItems > 0 ? $totalItems : 1);
+
+            return [
+                'created' => true,
+                'job_id' => (int)$jobId,
+                'reason' => 'created',
+                'message' => 'Job je uspesno zakazan.',
+            ];
+        } finally {
+            $this->releaseLock($lockName);
+        }
+    }
+
     public function createOmnibusSyncJob(int $totalItems, bool $deduplicateOpenJobs = true): array {
         $lockName = 'omnibus_sync:' . (string)$this->storeHash;
         $lockAcquired = $this->acquireLock($lockName, 5);
@@ -128,6 +166,32 @@ class QueueService {
         );
     }
 
+    public function purgeOldJobs(int $completedRetentionDays = 14, int $failedRetentionDays = 90): array {
+        $completedRetentionDays = max(1, $completedRetentionDays);
+        $failedRetentionDays = max(1, $failedRetentionDays);
+
+        $completedStmt = $this->db->query(
+            "DELETE FROM sync_jobs
+             WHERE store_hash = ?
+               AND status = 'completed'
+               AND COALESCE(updated_at, created_at) < DATE_SUB(NOW(), INTERVAL {$completedRetentionDays} DAY)",
+            [$this->storeHash]
+        );
+
+        $failedStmt = $this->db->query(
+            "DELETE FROM sync_jobs
+             WHERE store_hash = ?
+               AND status = 'failed'
+               AND COALESCE(updated_at, created_at) < DATE_SUB(NOW(), INTERVAL {$failedRetentionDays} DAY)",
+            [$this->storeHash]
+        );
+
+        return [
+            'completed_deleted' => $completedStmt->rowCount(),
+            'failed_deleted' => $failedStmt->rowCount(),
+        ];
+    }
+
     /**
      * NOVO: Pametna obrada greške sa Retry logikom
      */
@@ -180,6 +244,20 @@ class QueueService {
              ORDER BY created_at ASC
              LIMIT 1",
             [$this->storeHash, $jobType]
+        );
+    }
+
+    private function findOpenJob($jobType, $promotionId = null) {
+        return $this->db->fetchOne(
+            "SELECT *
+             FROM sync_jobs
+             WHERE store_hash = ?
+               AND job_type = ?
+               AND promotion_id <=> ?
+               AND status IN ('pending', 'processing')
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1",
+            [$this->storeHash, $jobType, $promotionId]
         );
     }
 

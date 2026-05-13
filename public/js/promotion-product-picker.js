@@ -19,6 +19,7 @@
         error: '',
         searchTimer: null
     };
+    const expandedSkuControls = new Set();
 
     function html(value) {
         if (typeof escapeHtml === 'function') {
@@ -121,9 +122,9 @@
         return appT('product_picker.many_selected', { count });
     }
 
-    function selectedChipHtml(index, scope, sku) {
+    function selectedChipHtml(index, scope, sku, hidden = false) {
         return `
-            <span class="promotion-product-picker-chip">
+            <span class="promotion-product-picker-chip"${hidden ? ' hidden' : ''}>
                 <span>${html(sku)}</span>
                 <button type="button" onclick="removeProductSkuSelection(${index}, ${jsArg(scope)}, ${jsArg(sku)})" aria-label="${html(appT('product_picker.remove_sku', { sku }))}">x</button>
             </span>
@@ -132,13 +133,23 @@
 
     function renderProductSkuPickerControl(index, scope, value) {
         const selectedSkus = normalizeSkuValues(value);
-        const visibleSkus = selectedSkus.slice(0, 8);
-        const hiddenCount = selectedSkus.length - visibleSkus.length;
+        const expansionKey = getSkuControlExpansionKey(index, scope);
+        const canCollapse = selectedSkus.length > 8;
+        if (!canCollapse) {
+            expandedSkuControls.delete(expansionKey);
+        }
+
+        const isExpanded = canCollapse && expandedSkuControls.has(expansionKey);
+        const visibleSkus = isExpanded ? selectedSkus : selectedSkus.slice(0, 8);
+        const hiddenSkus = isExpanded ? [] : selectedSkus.slice(visibleSkus.length);
+        const hiddenCount = hiddenSkus.length;
         const chipsHtml = selectedSkus.length > 0
             ? `
                 <div class="promotion-product-picker-chips">
                     ${visibleSkus.map(sku => selectedChipHtml(index, scope, sku)).join('')}
-                    ${hiddenCount > 0 ? `<span class="promotion-product-picker-more">+${hiddenCount}</span>` : ''}
+                    ${hiddenSkus.map(sku => selectedChipHtml(index, scope, sku, true)).join('')}
+                    ${hiddenCount > 0 ? `<button type="button" class="promotion-product-picker-more" onclick="expandProductSkuSelection(${index}, ${jsArg(scope)})" aria-expanded="false" aria-label="${html(appT('product_picker.show_all_selected'))}">+${hiddenCount}</button>` : ''}
+                    ${isExpanded ? `<button type="button" class="promotion-product-picker-more promotion-product-picker-less" onclick="collapseProductSkuSelection(${index}, ${jsArg(scope)})" aria-expanded="true">${html(appT('product_picker.show_less_selected'))}</button>` : ''}
                     <button type="button" class="promotion-product-picker-clear" onclick="clearProductSkuSelection(${index}, ${jsArg(scope)})">${html(appT('product_picker.clear'))}</button>
                 </div>
             `
@@ -248,12 +259,19 @@
                 return;
             }
 
+            if (isParentVariantSelector(checkbox)) {
+                handleParentVariantSelectorChange(checkbox);
+                renderFooterState();
+                return;
+            }
+
             if (checkbox.checked) {
                 state.selected.add(checkbox.value);
             } else {
                 state.selected.delete(checkbox.value);
             }
 
+            syncParentCheckboxState(checkbox.closest('.promotion-product-picker-group'));
             renderFooterState();
         });
 
@@ -415,6 +433,7 @@
         list.innerHTML = state.groups.length > 0
             ? state.groups.map(group => renderProductGroup(group)).join('')
             : state.products.map(product => renderProductRow(product)).join('');
+        syncAllParentCheckboxStates(list);
         renderFooterState();
     }
 
@@ -451,6 +470,15 @@
         return sku === '' ? [] : [sku];
     }
 
+    function collectVariantSkus(variants) {
+        const skus = [];
+        variants.forEach(variant => {
+            collectProductSku(variant).forEach(sku => skus.push(sku));
+        });
+
+        return Array.from(new Set(skus));
+    }
+
     function addSkusToSelection(skus) {
         skus.forEach(sku => {
             const normalizedSku = String(sku || '').trim();
@@ -458,6 +486,68 @@
                 state.selected.add(normalizedSku);
             }
         });
+    }
+
+    function getParentVariantSkus(checkbox) {
+        try {
+            const skus = JSON.parse(checkbox.dataset.variantSkus || '[]');
+            return Array.isArray(skus) ? skus.map(sku => String(sku)).filter(sku => sku !== '') : [];
+        } catch (error) {
+            return [];
+        }
+    }
+
+    function isParentVariantSelector(checkbox) {
+        return checkbox?.dataset?.variantSelector === '1';
+    }
+
+    function handleParentVariantSelectorChange(checkbox) {
+        const variantSkus = getParentVariantSkus(checkbox);
+        const group = checkbox.closest('.promotion-product-picker-group');
+
+        if (checkbox.value) {
+            state.selected.delete(checkbox.value);
+        }
+
+        if (checkbox.checked) {
+            addSkusToSelection(variantSkus);
+        } else {
+            variantSkus.forEach(sku => state.selected.delete(sku));
+        }
+
+        syncVisibleVariantCheckboxes(group);
+        syncParentCheckboxState(group);
+    }
+
+    function syncVisibleVariantCheckboxes(group) {
+        if (!group) {
+            return;
+        }
+
+        group.querySelectorAll('.promotion-product-picker-row-variant .promotion-product-picker-checkbox').forEach(checkbox => {
+            checkbox.checked = state.selected.has(checkbox.value);
+        });
+    }
+
+    function syncParentCheckboxState(group) {
+        if (!group) {
+            return;
+        }
+
+        const parentCheckbox = group.querySelector('.promotion-product-picker-row-parent .promotion-product-picker-checkbox[data-variant-selector="1"]');
+        if (!parentCheckbox) {
+            return;
+        }
+
+        const variantSkus = getParentVariantSkus(parentCheckbox);
+        const selectedCount = variantSkus.filter(sku => state.selected.has(sku)).length;
+
+        parentCheckbox.checked = variantSkus.length > 0 && selectedCount === variantSkus.length;
+        parentCheckbox.indeterminate = selectedCount > 0 && selectedCount < variantSkus.length;
+    }
+
+    function syncAllParentCheckboxStates(root) {
+        (root || document).querySelectorAll('.promotion-product-picker-group').forEach(syncParentCheckboxState);
     }
 
     async function selectAllCurrentSearch() {
@@ -506,6 +596,7 @@
         const productId = String(group.product_id || parent.product_id || '');
         const hasVariants = variants.length > 0;
         const collapsed = hasVariants && state.collapsedProductIds.has(productId);
+        const variantSkus = collectVariantSkus(variants);
 
         return `
             <div class="promotion-product-picker-group ${hasVariants ? 'promotion-product-picker-group-has-variants' : ''}">
@@ -513,7 +604,8 @@
                     isParent: true,
                     hasVariants: hasVariants,
                     collapsed: collapsed,
-                    productId: productId
+                    productId: productId,
+                    variantSkus: variantSkus
                 })}
                 ${hasVariants && !collapsed ? variants.map(variant => renderProductRow(variant, {
                     isVariant: true,
@@ -525,9 +617,16 @@
 
     function renderProductRow(product, context = {}) {
         const sku = String(product.sku || product.value || '');
-        const isSelectable = product.is_selectable !== false && sku !== '';
-        const checked = isSelectable && state.selected.has(sku) ? 'checked' : '';
+        const variantSkus = Array.isArray(context.variantSkus) ? context.variantSkus : [];
+        const isParentVariantSelector = !!context.isParent && variantSkus.length > 0;
+        const isSelectable = isParentVariantSelector || (product.is_selectable !== false && sku !== '');
+        const checked = isParentVariantSelector
+            ? (variantSkus.every(variantSku => state.selected.has(variantSku)) ? 'checked' : '')
+            : (isSelectable && state.selected.has(sku) ? 'checked' : '');
         const disabled = isSelectable ? '' : 'disabled';
+        const checkboxData = isParentVariantSelector
+            ? ` data-variant-selector="1" data-variant-skus="${html(JSON.stringify(variantSkus))}"`
+            : '';
         const price = product.sale_price !== null && product.sale_price !== undefined && product.sale_price !== ''
             ? product.sale_price
             : product.regular_price;
@@ -551,7 +650,7 @@
         return `
             <div class="promotion-product-picker-row ${context.isParent ? 'promotion-product-picker-row-parent' : ''} ${context.isVariant ? 'promotion-product-picker-row-variant' : ''} ${!isSelectable ? 'promotion-product-picker-row-disabled' : ''}">
                 <span class="promotion-product-picker-cell promotion-product-picker-checkbox-cell">
-                    <input type="checkbox" class="promotion-product-picker-checkbox" value="${html(sku)}" ${checked} ${disabled}>
+                    <input type="checkbox" class="promotion-product-picker-checkbox" value="${html(sku)}"${checkboxData} ${checked} ${disabled}>
                 </span>
                 <span class="promotion-product-picker-cell promotion-product-picker-expand-cell">${expandHtml}</span>
                 <span class="promotion-product-picker-cell promotion-product-picker-image">${imageHtml}</span>
@@ -604,7 +703,28 @@
     }
 
     function clearProductSkuSelection(index, scope) {
+        expandedSkuControls.delete(getSkuControlExpansionKey(index, scope));
         setFilterSkus(index, scope, []);
+    }
+
+    function getSkuControlExpansionKey(index, scope) {
+        return `${scope || 'include'}:${index}`;
+    }
+
+    function renderFiltersIfAvailable() {
+        if (typeof renderFilters === 'function') {
+            renderFilters();
+        }
+    }
+
+    function expandProductSkuSelection(index, scope) {
+        expandedSkuControls.add(getSkuControlExpansionKey(index, scope));
+        renderFiltersIfAvailable();
+    }
+
+    function collapseProductSkuSelection(index, scope) {
+        expandedSkuControls.delete(getSkuControlExpansionKey(index, scope));
+        renderFiltersIfAvailable();
     }
 
     window.renderProductSkuPickerControl = renderProductSkuPickerControl;
@@ -612,4 +732,6 @@
     window.closeProductSkuPicker = closeProductSkuPicker;
     window.removeProductSkuSelection = removeProductSkuSelection;
     window.clearProductSkuSelection = clearProductSkuSelection;
+    window.expandProductSkuSelection = expandProductSkuSelection;
+    window.collapseProductSkuSelection = collapseProductSkuSelection;
 })();

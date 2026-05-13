@@ -1,26 +1,42 @@
+<?php
+$promotionAttention = $promotionAttention ?? ['summary' => [], 'items' => []];
+$attentionSummary = array_merge([
+    'expires_today' => 0,
+    'expires_soon' => 0,
+    'starts_soon' => 0,
+    'never_synced' => 0,
+], $promotionAttention['summary'] ?? []);
+$attentionItems = $promotionAttention['items'] ?? [];
+$attentionLabels = [
+    'expires_today' => trans('dashboard.attention_expires_today'),
+    'expires_soon' => trans('dashboard.attention_expires_soon'),
+    'starts_soon' => trans('dashboard.attention_starts_soon'),
+    'never_synced' => trans('dashboard.attention_never_synced'),
+];
+?>
+
 <div class="page-header">
     <div>
         <h2 class="page-title"><?= trans_e('dashboard.title') ?></h2>
         <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;"><?= trans_e('dashboard.subtitle') ?></p>
     </div>
     <div style="font-size: 0.85rem; color: #6b7280; background: white; padding: 6px 12px; border-radius: 20px; border: 1px solid #e5e7eb;">
-        📅 <?= date('d.m.Y') ?>
+        <?= date('d.m.Y') ?>
     </div>
 </div>
 
-<!-- Statistika -->
 <div class="stats-grid">
     <div class="stat-card">
         <div class="stat-label"><?= trans_e('dashboard.stats_total_promotions') ?></div>
-        <div class="stat-value"><?= $stats['total_promotions'] ?></div>
+        <div class="stat-value"><?= (int)$stats['total_promotions'] ?></div>
     </div>
     <div class="stat-card">
         <div class="stat-label" style="color: #10b981;"><?= trans_e('dashboard.stats_active_promotions') ?></div>
-        <div class="stat-value" style="color: #10b981;"><?= $stats['active_promotions'] ?></div>
+        <div class="stat-value" style="color: #10b981;"><?= (int)$stats['active_promotions'] ?></div>
     </div>
     <div class="stat-card">
         <div class="stat-label"><?= trans_e('dashboard.stats_products_in_promotion') ?></div>
-        <div class="stat-value"><?= $stats['total_products'] ?></div>
+        <div class="stat-value"><?= (int)$stats['total_products'] ?></div>
     </div>
     <div class="stat-card">
         <div class="stat-label"><?= trans_e('dashboard.stats_last_sync') ?></div>
@@ -30,7 +46,6 @@
     </div>
 </div>
 
-<!-- Sync Progress (Hidden by default) -->
 <div id="sync-progress-container" class="sync-progress">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
         <div style="display: flex; align-items: center; gap: 10px;">
@@ -39,48 +54,80 @@
         </div>
         <span id="sync-stats" style="font-weight: bold; color: #3b82f6;">0 / 0</span>
     </div>
-    
+
     <div class="progress-track">
         <div id="sync-bar" class="progress-fill"></div>
     </div>
     <p id="sync-msg" style="font-size: 12px; color: #6b7280; margin-top: 8px;"><?= trans_e('dashboard.sync_not_interrupted') ?></p>
 </div>
 
-<!-- Glavni sadržaj -->
-<div style="display: grid; grid-template-columns: 2fr 1fr; gap: 24px;">
-    
-    <!-- Lista aktivnih promocija -->
+<div class="dashboard-main-grid">
     <div>
-        <h3 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; color: #374151;"><?= trans_e('dashboard.active_promotions') ?></h3>
-        <div class="active-promos-list">
-            <?php if (!empty($activePromotions)): ?>
-                <?php foreach ($activePromotions as $promo): ?>
-                    <div class="promo-item">
-                        <div style="display: flex; align-items: center; gap: 12px;">
-                            <div style="width: 4px; height: 32px; background: <?= htmlspecialchars($promo['color']) ?>; border-radius: 2px;"></div>
-                            <div>
-                                <div style="font-weight: 600; color: #111827;"><?= htmlspecialchars($promo['name']) ?></div>
-                                <div style="font-size: 0.75rem; color: #6b7280;">
-                                    <?= date('d.m.', strtotime($promo['start_date'])) ?> - <?= date('d.m.Y', strtotime($promo['end_date'])) ?>
-                                </div>
-                            </div>
-                        </div>
-                        <div style="text-align: right;">
-                            <div style="font-weight: 700; color: #10b981; font-size: 1.1rem;"><?= $promo['discount_percent'] ?>%</div>
-                            <div style="font-size: 0.75rem; color: #6b7280;"><?= trans_e('dashboard.priority_label', ['priority' => $promo['priority']]) ?></div>
-                        </div>
-                    </div>
-                <?php endforeach; ?>
-            <?php else: ?>
-                <div style="padding: 40px; text-align: center; color: #6b7280;">
-                    <div style="font-size: 2rem; margin-bottom: 10px;">💤</div>
-                    <?= trans_e('dashboard.no_active_promotions') ?>
+        <div class="dashboard-section-header">
+            <div>
+                <h3><?= trans_e('dashboard.attention_title') ?></h3>
+                <p><?= trans_e('dashboard.attention_subtitle') ?></p>
+            </div>
+            <a href="?route=promotions" class="dashboard-section-link"><?= trans_e('dashboard.view_all_promotions') ?></a>
+        </div>
+
+        <div class="promotion-attention-panel">
+            <div class="promotion-attention-summary">
+                <div class="promotion-attention-stat is-danger">
+                    <span><?= (int)$attentionSummary['expires_today'] ?></span>
+                    <strong><?= trans_e('dashboard.attention_expiring_today_label') ?></strong>
                 </div>
-            <?php endif; ?>
+                <div class="promotion-attention-stat is-warning">
+                    <span><?= (int)$attentionSummary['expires_soon'] ?></span>
+                    <strong><?= trans_e('dashboard.attention_expiring_week_label') ?></strong>
+                </div>
+                <div class="promotion-attention-stat is-info">
+                    <span><?= (int)$attentionSummary['starts_soon'] ?></span>
+                    <strong><?= trans_e('dashboard.attention_scheduled_week_label') ?></strong>
+                </div>
+                <div class="promotion-attention-stat is-muted">
+                    <span><?= (int)$attentionSummary['never_synced'] ?></span>
+                    <strong><?= trans_e('dashboard.attention_unsynced_label') ?></strong>
+                </div>
+            </div>
+
+            <div class="promotion-attention-list">
+                <?php if (!empty($attentionItems)): ?>
+                    <?php foreach ($attentionItems as $promo): ?>
+                        <?php
+                            $attentionType = $promo['attention_type'] ?? 'expires_soon';
+                            $attentionClass = 'attention-' . str_replace('_', '-', $attentionType);
+                            $attentionAt = strtotime((string)($promo['attention_at'] ?? $promo['end_date'] ?? ''));
+                            $dateLabel = $attentionType === 'starts_soon'
+                                ? trans('dashboard.attention_starts_at', ['date' => $attentionAt ? date('d.m.Y H:i', $attentionAt) : '-'])
+                                : trans('dashboard.attention_ends_at', ['date' => $attentionAt ? date('d.m.Y H:i', $attentionAt) : '-']);
+
+                            if ($attentionType === 'never_synced') {
+                                $dateLabel = trans('dashboard.attention_never_synced_detail');
+                            }
+                        ?>
+                        <a href="?route=promotions&action=edit&id=<?= (int)$promo['id'] ?>" class="promotion-attention-item <?= htmlspecialchars($attentionClass, ENT_QUOTES, 'UTF-8') ?>">
+                            <span class="promotion-attention-color" style="background: <?= htmlspecialchars($promo['color'] ?: '#3b82f6', ENT_QUOTES, 'UTF-8') ?>;"></span>
+                            <span class="promotion-attention-main">
+                                <span class="promotion-attention-name"><?= htmlspecialchars($promo['name'], ENT_QUOTES, 'UTF-8') ?></span>
+                                <span class="promotion-attention-meta"><?= htmlspecialchars($dateLabel, ENT_QUOTES, 'UTF-8') ?></span>
+                            </span>
+                            <span class="promotion-attention-side">
+                                <span class="promotion-attention-badge"><?= htmlspecialchars($attentionLabels[$attentionType] ?? $attentionType, ENT_QUOTES, 'UTF-8') ?></span>
+                                <span class="promotion-attention-discount"><?= htmlspecialchars((string)$promo['discount_percent'], ENT_QUOTES, 'UTF-8') ?>%</span>
+                            </span>
+                        </a>
+                    <?php endforeach; ?>
+                <?php else: ?>
+                    <div class="promotion-attention-empty">
+                        <strong><?= trans_e('dashboard.attention_empty_title') ?></strong>
+                        <span><?= trans_e('dashboard.attention_empty_text') ?></span>
+                    </div>
+                <?php endif; ?>
+            </div>
         </div>
     </div>
 
-    <!-- Brze akcije -->
     <div>
         <h3 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; color: #374151;"><?= trans_e('dashboard.quick_actions') ?></h3>
         <div class="action-card" style="flex-direction: column; align-items: flex-start; gap: 15px;">
@@ -88,11 +135,11 @@
                 <div style="font-weight: 600; margin-bottom: 4px;"><?= trans_e('dashboard.global_sync') ?></div>
                 <p style="font-size: 0.85rem; color: #6b7280; margin: 0;"><?= trans_e('dashboard.global_sync_help') ?></p>
             </div>
-            <button onclick="syncAll()" class="btn btn-primary" style="width: 100%; justify-content: center; display: flex; align-items: center; gap: 8px;">
-                🔄 <?= trans_e('dashboard.sync_all') ?>
+            <button onclick="syncAll(event)" class="btn btn-primary" style="width: 100%; justify-content: center; display: flex; align-items: center; gap: 8px;">
+                <?= trans_e('dashboard.sync_all') ?>
             </button>
         </div>
-        
+
         <div class="action-card" style="margin-top: 20px; flex-direction: column; align-items: flex-start; gap: 15px;">
             <div>
                 <div style="font-weight: 600; margin-bottom: 4px;"><?= trans_e('dashboard.new_promotion') ?></div>
@@ -108,24 +155,24 @@
 <script>
 let syncInterval = null;
 
-async function syncAll() {
+async function syncAll(event) {
     if (!confirm(appT('dashboard.confirm_sync_all'))) return;
-    
+
     const btn = event.target;
     const originalText = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = '⏳ ' + appT('dashboard.starting');
-    
+    btn.innerHTML = appT('dashboard.starting');
+
     try {
         const response = await fetch('?route=api&action=sync_all');
         const result = await response.json();
-        
+
         if (result.success) {
-            alert('✅ ' + result.result.message + '\n\n' + appT('dashboard.sync_all_added'));
-            startPolling(); // Restartujemo proveru statusa
+            alert(result.result.message + '\n\n' + appT('dashboard.sync_all_added'));
+            startPolling();
         }
     } catch (error) {
-        alert('❌ ' + appT('common.error') + ': ' + error.message);
+        alert(appT('common.error') + ': ' + error.message);
     } finally {
         btn.disabled = false;
         btn.innerHTML = originalText;
@@ -142,39 +189,35 @@ async function checkSyncStatus() {
     try {
         const response = await fetch('?route=sync&action=getActiveJobStatus');
         const data = await response.json();
-
         const container = document.getElementById('sync-progress-container');
-        
+
         if (data.active) {
-            // Prikaži bar i ažuriraj ga
             container.style.display = 'block';
-            
-            // Izračunaj procenat
+
             let percent = 0;
             if (data.total > 0) {
                 percent = Math.round((data.processed / data.total) * 100);
             }
-            
+
             document.getElementById('sync-bar').style.width = percent + '%';
             document.getElementById('sync-stats').textContent = `${data.processed} / ${data.total} (${percent}%)`;
-            
+
             let statusText = appT('dashboard.sync_in_progress');
-            let barColor = '#3b82f6'; // Blue
+            let barColor = '#3b82f6';
 
             if (data.status === 'pending') {
-                statusText = '⏳ ' + appT('dashboard.status_pending');
-                barColor = '#f59e0b'; // Orange
+                statusText = appT('dashboard.status_pending');
+                barColor = '#f59e0b';
             } else if (data.status === 'processing') {
-                statusText = '🔄 ' + appT('dashboard.status_processing');
-                barColor = '#3b82f6'; // Blue
+                statusText = appT('dashboard.status_processing');
+                barColor = '#3b82f6';
             } else if (data.status === 'completed') {
-                statusText = '✅ ' + appT('dashboard.status_completed');
-                barColor = '#10b981'; // Green
+                statusText = appT('dashboard.status_completed');
+                barColor = '#10b981';
             }
-            
+
             document.getElementById('sync-title').textContent = statusText;
             document.getElementById('sync-bar').style.background = barColor;
-
         } else {
             container.style.display = 'none';
             if (syncInterval) {
@@ -187,6 +230,5 @@ async function checkSyncStatus() {
     }
 }
 
-// Pokreni proveru odmah pri učitavanju
 startPolling();
 </script>
