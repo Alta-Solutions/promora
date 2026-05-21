@@ -421,7 +421,7 @@ public function __construct(Database $db = null) {
             $debugLog[] = "Skipped {$omnibusSkippedCount} products because promo price is not below the Omnibus reference price.";
         }
         
-        // BATCH UPDATE: Apply prices to BigCommerce
+        // BATCH UPDATE: Apply sale prices to BigCommerce
         $productUpdates = [];
         $variantUpdates = [];
         foreach ($productPromotions as $promo) {
@@ -429,13 +429,11 @@ public function __construct(Database $db = null) {
                 $variantUpdates[] = [
                     'product_id' => $promo['product_id'],
                     'id' => $promo['variant_id'],
-                    'price' => $promo['original_price'],
                     'sale_price' => $promo['promo_price']
                 ];
             } else {
                 $productUpdates[] = [
                     'product_id' => $promo['product_id'],
-                    'price' => $promo['original_price'],
                     'sale_price' => $promo['promo_price']
                 ];
             }
@@ -649,7 +647,7 @@ public function __construct(Database $db = null) {
             if (!empty($items)) {
                 $allItemsToClean = array_merge($allItemsToClean, $items);
 
-                // Batch update prices (postojeće)
+                // Batch uklanjanje sale_price (postojeće)
                 [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($items);
                 if (!empty($productUpdates)) {
                     $this->api->batchUpdateProducts($productUpdates);
@@ -694,7 +692,7 @@ public function __construct(Database $db = null) {
         
         [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($allProducts);
 
-        // Batch update prices (postojeće)
+        // Batch uklanjanje sale_price (postojeće)
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
         $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
         $cleanedCount = count(array_filter(array_merge($productResults, $variantResults), fn($r) => !empty($r['success'])));
@@ -736,7 +734,7 @@ public function __construct(Database $db = null) {
         [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($toClean);
         $productIds = $this->getProductsWithoutActivePromotionEntries($toClean, array_column($toClean, 'id'));
 
-        // Batch update prices (postojeće)
+        // Batch uklanjanje sale_price (postojeće)
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
         $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
         $cleanedCount = count(array_filter(array_merge($productResults, $variantResults), fn($r) => !empty($r['success'])));
@@ -782,16 +780,16 @@ public function __construct(Database $db = null) {
         $productUpdates = [];
         $variantUpdates = [];
 
-        // 2. Pripremi vraćanje originalnih cena
+        // 2. Pripremi uklanjanje sale_price
         foreach ($items as $item) {
             if ($item['variant_id']) {
-                $variantUpdates[] = ['product_id' => $item['product_id'], 'id' => $item['variant_id'], 'price' => $item['original_price'], 'sale_price' => null];
+                $variantUpdates[] = ['product_id' => $item['product_id'], 'id' => $item['variant_id'], 'sale_price' => null];
             } else {
-                $productUpdates[] = ['product_id' => $item['product_id'], 'price' => $item['original_price'], 'sale_price' => null];
+                $productUpdates[] = ['product_id' => $item['product_id'], 'sale_price' => null];
             }
         }
         
-        // 3. Vrati cene na BigCommerce
+        // 3. Ukloni sale_price na BigCommerce
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
         $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
         $errors = count(array_filter($productResults, fn($r) => !$r['success'])) + count(array_filter($variantResults, fn($r) => !$r['success']));
@@ -815,7 +813,7 @@ public function __construct(Database $db = null) {
 
         $cacheUpdates = [];
         foreach(array_merge($productUpdates, $variantUpdates) as $upd) {
-            $cacheUpdates[] = ['product_id' => $upd['product_id'], 'variant_id' => $upd['id'] ?? null, 'price' => $upd['price'], 'sale_price' => $upd['sale_price']];
+            $cacheUpdates[] = ['product_id' => $upd['product_id'], 'variant_id' => $upd['id'] ?? null, 'sale_price' => $upd['sale_price']];
         }
         $this->cacheService->updatePriceCacheDirectly($cacheUpdates);
         
@@ -1065,19 +1063,17 @@ public function __construct(Database $db = null) {
                 $variantUpdates[] = [
                     'product_id' => $p['product_id'],
                     'id'         => $p['variant_id'], // Za variant API, 'id' je ID varijante
-                    'price'      => $p['original_price'],
                     'sale_price' => $p['promo_price']
                 ];
             } else {
                 $productUpdates[] = [
                     'product_id' => $p['product_id'],
-                    'price'      => $p['original_price'],
                     'sale_price' => $p['promo_price']
                 ];
             }
         }
 
-        // 4. BATCH API pozivi za cene
+        // 4. BATCH API pozivi za sale_price
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
         $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
         $priceResults = array_merge($productResults, $variantResults);
@@ -1247,6 +1243,7 @@ public function __construct(Database $db = null) {
                 $omnibus = $this->markOmnibusExistingFieldRepairAllowed($omnibus, $existingReference);
             }
         }
+        $validation = $this->applyCostPriceGuard($omnibus, $item, $promoPrice);
 
         return [
             'id' => $item['id'],
@@ -1261,7 +1258,7 @@ public function __construct(Database $db = null) {
             'inventory' => $item['inventory_level'],
             'brand' => $item['brand_name'],
             'is_visible' => $item['is_visible'],
-        ] + $omnibus;
+        ] + $validation;
     }
 
     private function buildPromotionCandidate(array $product, array $promotion): ?array {
@@ -1293,6 +1290,7 @@ public function __construct(Database $db = null) {
                 $omnibus = $this->markOmnibusExistingFieldRepairAllowed($omnibus, $existingReference);
             }
         }
+        $validation = $this->applyCostPriceGuard($omnibus, $product, $promoPrice);
 
         return [
             'id' => $promotion['id'],
@@ -1306,7 +1304,7 @@ public function __construct(Database $db = null) {
             'discount_percent' => $discount,
             'promo_price' => $promoPrice,
             'priority' => $promotion['priority']
-        ] + $omnibus;
+        ] + $validation;
     }
 
     private function calculateBestPromotionCandidate($product, $activePromotions) {
@@ -1467,6 +1465,66 @@ public function __construct(Database $db = null) {
             'promotions.preview.omnibus_missing_reference',
             [],
             'Missing complete 30-day price history for this item.'
+        );
+    }
+
+    private function applyCostPriceGuard(array $validation, array $item, float $promoPrice): array {
+        $costPrice = $this->normalizeCostPrice($item['cost_price'] ?? null);
+        $promoMargin = $costPrice !== null ? round($promoPrice - $costPrice, 2) : null;
+        $isValid = $costPrice === null || !$this->isPromoPriceBelowCostPrice($promoPrice, $costPrice);
+
+        $validation['cost_price'] = $costPrice;
+        $validation['promo_margin'] = $promoMargin;
+        $validation['margin_after_discount'] = $promoMargin;
+        $validation['cost_price_valid'] = $isValid;
+        $validation['cost_price_status'] = $costPrice === null ? 'not_checked' : ($isValid ? 'valid' : 'invalid');
+        $validation['cost_price_warning'] = '';
+
+        if (!$isValid) {
+            $validation['will_apply'] = false;
+            $validation['cost_price_warning'] = $this->buildCostPriceWarning($costPrice);
+        }
+
+        $warnings = [];
+        $invalidReasons = [];
+
+        if (empty($validation['omnibus_valid']) && !empty($validation['omnibus_warning'])) {
+            $warnings[] = $validation['omnibus_warning'];
+        }
+        if (!empty($validation['omnibus_invalid_reason'])) {
+            $invalidReasons[] = $validation['omnibus_invalid_reason'];
+        }
+
+        if (!$isValid) {
+            $warnings[] = $validation['cost_price_warning'];
+            $invalidReasons[] = 'below_cost_price';
+        }
+
+        $validation['promotion_warning'] = implode(' ', array_values(array_unique(array_filter($warnings))));
+        $validation['promotion_invalid_reasons'] = array_values(array_unique(array_filter($invalidReasons)));
+        $validation['promotion_invalid_reason'] = $validation['promotion_invalid_reasons'][0] ?? null;
+
+        return $validation;
+    }
+
+    private function normalizeCostPrice($costPrice): ?float {
+        if ($costPrice === null || $costPrice === '' || !is_numeric($costPrice)) {
+            return null;
+        }
+
+        $costPrice = (float)$costPrice;
+        return $costPrice > 0 ? $costPrice : null;
+    }
+
+    private function isPromoPriceBelowCostPrice(float $promoPrice, float $costPrice): bool {
+        return round($promoPrice, 4) < round($costPrice, 4);
+    }
+
+    private function buildCostPriceWarning(float $costPrice): string {
+        return $this->translateMessage(
+            'promotions.preview.below_cost_price',
+            ['cost_price' => number_format($costPrice, 2, '.', '')],
+            'Promo price is below cost price.'
         );
     }
 
@@ -1992,7 +2050,6 @@ public function __construct(Database $db = null) {
             $priceResults = $this->api->batchUpdateVariants([[
                 'product_id' => $product['product_id'],
                 'id' => $product['variant_id'],
-                'price' => $originalPrice,
                 'sale_price' => $promoPrice
             ]]);
 
@@ -2000,7 +2057,7 @@ public function __construct(Database $db = null) {
                 throw new \RuntimeException("Variant price update failed for product {$product['product_id']} variant {$product['variant_id']}.");
             }
         } else {
-            $this->api->updateProductPrice($product['product_id'], $originalPrice, $promoPrice);
+            $this->api->updateProductSalePrice($product['product_id'], $promoPrice);
         }
 
         // 2. Custom Field
@@ -2023,20 +2080,18 @@ public function __construct(Database $db = null) {
         $this->cacheService->updatePriceCacheDirectly([[
             'product_id' => $product['product_id'],
             'variant_id' => $product['variant_id'] ?? null,
-            'price' => $originalPrice,
             'sale_price' => $promoPrice
         ]]);
     }
 
     /**
-     * Uklanja promociju sa proizvoda (vraća staru cenu).
+     * Uklanja promociju sa proizvoda.
      */
     private function removePromotionFromProduct($product) {
         if (!empty($product['variant_id'])) {
             $this->api->batchUpdateVariants([[
                 'product_id' => $product['product_id'],
                 'id' => $product['variant_id'],
-                'price' => $product['price'],
                 'sale_price' => null
             ]]);
             $this->db->query(
@@ -2044,7 +2099,7 @@ public function __construct(Database $db = null) {
                 [$product['product_id'], $product['variant_id'], $this->storeHash]
             );
         } else {
-            $this->api->updateProductPrice($product['product_id'], $product['price'], null);
+            $this->api->updateProductSalePrice($product['product_id'], null);
             $this->db->query(
                 "DELETE FROM promotion_products WHERE product_id = ? AND variant_id IS NULL AND store_hash = ?",
                 [$product['product_id'], $this->storeHash]
@@ -2058,26 +2113,8 @@ public function __construct(Database $db = null) {
         $this->cacheService->updatePriceCacheDirectly([[
             'product_id' => $product['product_id'],
             'variant_id' => $product['variant_id'] ?? null,
-            'price' => $product['price'],
             'sale_price' => null
         ]]);
-        return;
-        // Vraćamo originalnu cenu (koja je u 'price' polju u products_cache jer cache čuva original)
-        // ILI ako je proizvod već snižen, moramo paziti. 
-        // Pretpostavka: $product['price'] iz keša je bazna cena.
-        
-        $this->api->updateProductPrice($product['product_id'], $product['price'], null); // null briše sale_price
-        
-        // Brisanje custom field-a bi zahtevalo da znamo ID fielda, što je komplikovano u single modu.
-        // Zato je batch cleanupAll mnogo bolji.
-        
-        $shouldRemoveField = !$this->hasActivePromotionEntriesForProduct($product['product_id'], []);
-
-        // Brisanje iz baze
-        $this->db->query(
-            "DELETE FROM promotion_products WHERE product_id = ? AND store_hash = ?",
-            [$product['product_id'], $this->storeHash]
-        );
     }
 
     private function filterPromotionsWithSuccessfulPriceUpdates(array $promotions, array $priceResults): array {
@@ -2152,7 +2189,6 @@ public function __construct(Database $db = null) {
             $updates[] = [
                 'product_id' => $promo['product_id'],
                 'variant_id' => $promo['variant_id'] ?? null,
-                'price' => $promo['original_price'],
                 'sale_price' => $promo['promo_price']
             ];
         }
@@ -2170,15 +2206,9 @@ public function __construct(Database $db = null) {
         $cacheUpdates = [];
 
         foreach ($items as $item) {
-            $originalPrice = isset($item['original_price']) ? (float)$item['original_price'] : null;
-            if ($originalPrice === null || $originalPrice <= 0) {
-                continue;
-            }
-
             $cacheUpdates[] = [
                 'product_id' => $item['product_id'],
                 'variant_id' => $item['variant_id'] ?? null,
-                'price' => $originalPrice,
                 'sale_price' => null
             ];
 
@@ -2186,13 +2216,11 @@ public function __construct(Database $db = null) {
                 $variantUpdates[] = [
                     'product_id' => $item['product_id'],
                     'id' => $item['variant_id'],
-                    'price' => $originalPrice,
                     'sale_price' => null
                 ];
             } else {
                 $productUpdates[] = [
                     'product_id' => $item['product_id'],
-                    'price' => $originalPrice,
                     'sale_price' => null
                 ];
             }

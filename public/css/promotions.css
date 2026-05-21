@@ -1314,7 +1314,7 @@ body.promotion-product-picker-open {
 
 .promotion-workspace-grid {
     display: grid;
-    grid-template-columns: minmax(49.5%, 500px) minmax(0, 1fr);
+    grid-template-columns: minmax(40%, 500px) minmax(0, 1fr);
     gap: 20px;
     align-items: start;
 }
@@ -1509,16 +1509,20 @@ body.promotion-product-picker-open {
 .promotion-preview-table th:nth-child(2),
 .promotion-preview-table th:nth-child(3),
 .promotion-preview-table th:nth-child(4),
+.promotion-preview-table th:nth-child(5),
+.promotion-preview-table th:nth-child(6),
 .promotion-preview-table td:nth-child(2),
 .promotion-preview-table td:nth-child(3),
-.promotion-preview-table td:nth-child(4) {
+.promotion-preview-table td:nth-child(4),
+.promotion-preview-table td:nth-child(5),
+.promotion-preview-table td:nth-child(6) {
     text-align: right;
 }
 
-.promotion-preview-table th:nth-child(5),
-.promotion-preview-table td:nth-child(5),
-.promotion-preview-table th:nth-child(6),
-.promotion-preview-table td:nth-child(6) {
+.promotion-preview-table th:nth-child(7),
+.promotion-preview-table td:nth-child(7),
+.promotion-preview-table th:nth-child(8),
+.promotion-preview-table td:nth-child(8) {
     text-align: center;
 }
 
@@ -1557,6 +1561,11 @@ body.promotion-product-picker-open {
     color: var(--danger-color);
     font-size: 10px;
     line-height: 1.2;
+}
+
+.promotion-preview-margin-invalid {
+    color: var(--danger-color);
+    font-weight: 700;
 }
 
 .promotion-preview-stock {

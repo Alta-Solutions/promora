@@ -308,14 +308,22 @@ class ProductCacheService {
     }
     
     /**
-     * OPTIMIZACIJA: Direktno ažuriranje cena u lokalnom kešu bez API poziva.
-     * Ovo eliminiše potrebu za "read-after-write" API pozivom.
+     * Direktno ažurira app-managed sale_price u lokalnom kešu bez API poziva.
+     * Catalog price ostaje vrednost koju je keš poslednji put dobio od BigCommerce-a.
      */
     public function updatePriceCacheDirectly(array $updates) {
         if (empty($updates)) return;
 
+        $storeConfig = $this->db->fetchOne(
+            "SELECT enable_omnibus, currency FROM bigcommerce_stores WHERE store_hash = ?",
+            [$this->storeHash]
+        );
+        $regularPricesByKey = $storeConfig && $storeConfig['enable_omnibus']
+            ? $this->getRegularPricesForCacheUpdates($updates)
+            : [];
+
         // IZMENA: Ažuriranje se sada radi na osnovu product_id i variant_id
-        $sql = "UPDATE products_cache SET price = ?, sale_price = ?, cached_at = NOW() 
+        $sql = "UPDATE products_cache SET sale_price = ?, cached_at = NOW()
                 WHERE product_id = ? AND variant_id <=> ? AND store_hash = ?";
         
         foreach ($updates as $update) {
@@ -326,7 +334,6 @@ class ProductCacheService {
             if ($salePrice === 0 || $salePrice === 0.0) $salePrice = null;
 
             $this->db->query($sql, [
-                $update['price'],     // Originalna cena (koja je sada 'price' na BC)
                 $salePrice,           // Nova akcijska cena (ili null)
                 $update['product_id'],
                 $update['variant_id'] ?? null, // Koristimo <=> pa je null bezbedno
@@ -334,25 +341,26 @@ class ProductCacheService {
             ]);
         }
 
-        $storeConfig = $this->db->fetchOne(
-            "SELECT enable_omnibus, currency FROM bigcommerce_stores WHERE store_hash = ?",
-            [$this->storeHash]
-        );
-
         if (!$storeConfig || !$storeConfig['enable_omnibus']) {
             return;
         }
 
         $pricesToLog = [];
         foreach ($updates as $update) {
-            $effectivePrice = $this->getEffectivePrice($update['price'] ?? null, $update['sale_price'] ?? null);
+            $key = $this->buildCacheUpdateKey(
+                (int)$update['product_id'],
+                $update['variant_id'] ?? null
+            );
+            $regularPrice = $regularPricesByKey[$key]
+                ?? (isset($update['price']) && is_numeric($update['price']) ? (float)$update['price'] : null);
+            $effectivePrice = $this->getEffectivePrice($regularPrice, $update['sale_price'] ?? null);
             if ($effectivePrice === null || $effectivePrice <= 0) {
                 continue;
             }
 
             $pricesToLog[] = [
                 'product_id' => (int)$update['product_id'],
-                'variant_id' => isset($update['variant_id']) ? (int)$update['variant_id'] : null,
+                'variant_id' => $this->normalizeVariantId($update['variant_id'] ?? null),
                 'price' => $effectivePrice,
                 'currency' => $storeConfig['currency'] ?? 'USD',
             ];
@@ -538,6 +546,71 @@ class ProductCacheService {
         }
 
         return $dateTime->sub(new \DateInterval('P30D'))->format('Y-m-d H:i:s');
+    }
+
+    private function getRegularPricesForCacheUpdates(array $updates): array {
+        $pairs = [];
+
+        foreach ($updates as $update) {
+            $productId = isset($update['product_id']) ? (int)$update['product_id'] : 0;
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $variantId = $this->normalizeVariantId($update['variant_id'] ?? null);
+            $key = $this->buildCacheUpdateKey($productId, $variantId);
+            $pairs[$key] = [$productId, $variantId];
+        }
+
+        if (empty($pairs)) {
+            return [];
+        }
+
+        $prices = [];
+        foreach (array_chunk($pairs, 200, true) as $chunk) {
+            $conditions = [];
+            $params = [$this->storeHash];
+
+            foreach ($chunk as [$productId, $variantId]) {
+                $conditions[] = "(product_id = ? AND variant_id <=> ?)";
+                $params[] = $productId;
+                $params[] = $variantId;
+            }
+
+            $rows = $this->db->fetchAll(
+                "SELECT product_id, variant_id, price
+                 FROM products_cache
+                 WHERE store_hash = ?
+                   AND (" . implode(' OR ', $conditions) . ")",
+                $params
+            );
+
+            foreach ($rows as $row) {
+                if (!isset($row['product_id']) || !is_numeric($row['price'] ?? null)) {
+                    continue;
+                }
+
+                $prices[$this->buildCacheUpdateKey(
+                    (int)$row['product_id'],
+                    $this->normalizeVariantId($row['variant_id'] ?? null)
+                )] = (float)$row['price'];
+            }
+        }
+
+        return $prices;
+    }
+
+    private function buildCacheUpdateKey(int $productId, $variantId): string {
+        $variantId = $this->normalizeVariantId($variantId);
+        return $productId . ':' . ($variantId === null ? 'parent' : (string)$variantId);
+    }
+
+    private function normalizeVariantId($variantId): ?int {
+        if ($variantId === null || $variantId === '') {
+            return null;
+        }
+
+        return (int)$variantId;
     }
 
     public function countProductsByFilters($filters = []) {

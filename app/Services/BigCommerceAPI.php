@@ -348,19 +348,12 @@ class BigCommerceAPI {
             try {
                 // Prepare batch payload for BigCommerce API
                 $payload = array_map(function($update) {
-                    $item = [
-                        'id' => $update['product_id'],
-                        'price' => (float)$update['price']
+                    $productId = $update['product_id'] ?? $update['id'] ?? null;
+
+                    return [
+                        'id' => (int)$productId,
+                        'sale_price' => $this->normalizeSalePriceForApi($update['sale_price'] ?? null)
                     ];
-                    
-                    if (isset($update['sale_price']) && $update['sale_price'] !== null) {
-                        $item['sale_price'] = (float)$update['sale_price'];
-                    } else {
-                        // To remove sale_price, set it to 0
-                        $item['sale_price'] = 0; 
-                    }
-                    
-                    return $item;
                 }, $batch);
                 
                 // Make batch request to BigCommerce
@@ -392,7 +385,7 @@ class BigCommerceAPI {
                 foreach ($batch as $update) {
                     $results[] = [
                         'success' => false,
-                        'product_id' => $update['product_id'],
+                        'product_id' => $update['product_id'] ?? $update['id'] ?? null,
                         'error' => $e->getMessage()
                     ];
                 }
@@ -416,9 +409,22 @@ class BigCommerceAPI {
         
         foreach ($batches as $batch) {
             try {
-                // The payload is an array of variant update objects.
+                // The payload is an array of variant sale price update objects.
                 // BigCommerce's cross-product batch variant endpoint is /catalog/variants.
-                $response = $this->request('PUT', 'catalog/variants', $batch);
+                $payload = array_map(function($update) {
+                    $item = [
+                        'id' => (int)$update['id'],
+                        'sale_price' => $this->normalizeSalePriceForApi($update['sale_price'] ?? null)
+                    ];
+
+                    if (!empty($update['product_id'])) {
+                        $item['product_id'] = (int)$update['product_id'];
+                    }
+
+                    return $item;
+                }, $batch);
+
+                $response = $this->request('PUT', 'catalog/variants', $payload);
                 $requestedByVariantId = [];
                 foreach ($batch as $update) {
                     if (!empty($update['id'])) {
@@ -472,18 +478,29 @@ class BigCommerceAPI {
     }
     
     /**
-     * Single product update (fallback or for special cases)
+     * Single product sale price update (fallback or for special cases).
+     */
+    public function updateProductSalePrice($productId, $salePrice = null) {
+        $data = [
+            'sale_price' => $this->normalizeSalePriceForApi($salePrice)
+        ];
+
+        return $this->request('PUT', "catalog/products/{$productId}", $data);
+    }
+
+    /**
+     * @deprecated Use updateProductSalePrice(). Kept for compatibility; ignores catalog price.
      */
     public function updateProductPrice($productId, $price, $salePrice = null) {
-        $data = ['price' => (float)$price];
-        
-        if ($salePrice !== null) {
-            $data['sale_price'] = (float)$salePrice;
-        } else {
-            $data['sale_price'] = 0; // Remove sale price
+        return $this->updateProductSalePrice($productId, $salePrice);
+    }
+
+    private function normalizeSalePriceForApi($salePrice): float {
+        if ($salePrice !== null && $salePrice !== '') {
+            return (float)$salePrice;
         }
-        
-        return $this->request('PUT', "catalog/products/{$productId}", $data);
+
+        return 0.0;
     }
     
     // Custom Fields Management

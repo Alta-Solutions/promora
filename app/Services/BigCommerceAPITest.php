@@ -62,9 +62,38 @@ class BigCommerceAPITest extends TestCase {
         $this->assertSame('PUT', $api->requests[0]['method']);
         $this->assertSame('catalog/variants', $api->requests[0]['endpoint']);
         $this->assertSame([[
+            'id' => 5648,
+            'sale_price' => 14.92,
+            'product_id' => 5472,
+        ]], $api->requests[0]['data']);
+        $this->assertSame([[
             'success' => true,
             'product_id' => 5472,
             'variant_id' => 5648,
         ]], $result);
+    }
+
+    public function testBatchUpdateProductsDoesNotSendCatalogPrice() {
+        $api = new TestableBigCommerceAPI([
+            'status' => 200,
+            'body' => [
+                'data' => [
+                    ['id' => 5472],
+                ],
+            ],
+        ]);
+
+        $api->batchUpdateProducts([[
+            'product_id' => 5472,
+            'price' => 18.65,
+            'sale_price' => 14.92,
+        ]]);
+
+        $this->assertSame('PUT', $api->requests[0]['method']);
+        $this->assertSame('catalog/products', $api->requests[0]['endpoint']);
+        $this->assertSame([[
+            'id' => 5472,
+            'sale_price' => 14.92,
+        ]], $api->requests[0]['data']);
     }
 }

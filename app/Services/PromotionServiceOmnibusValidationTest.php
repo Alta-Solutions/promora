@@ -70,6 +70,65 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertSame('not_below_30_day_lowest', $result['omnibus_invalid_reason']);
     }
 
+    public function testPreviewBlocksPromotionWhenPromoPriceIsBelowCostPrice(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionPreviewRow');
+        $method->setAccessible(true);
+        $row = $method->invoke($service, $this->productItem([
+            'price' => 100.00,
+            'cost_price' => 85.00,
+        ]), 20.00, '2026-05-05 00:00:00');
+
+        $this->assertFalse($row['will_apply']);
+        $this->assertFalse($row['cost_price_valid']);
+        $this->assertSame(85.00, $row['cost_price']);
+        $this->assertSame(-5.00, $row['promo_margin']);
+        $this->assertSame(-5.00, $row['margin_after_discount']);
+        $this->assertSame('below_cost_price', $row['promotion_invalid_reason']);
+        $this->assertContains('below_cost_price', $row['promotion_invalid_reasons']);
+        $this->assertNotSame('', $row['promotion_warning']);
+    }
+
+    public function testPromotionCandidateAllowsPromoPriceEqualToCostPrice(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionCandidate');
+        $method->setAccessible(true);
+        $candidate = $method->invoke($service, $this->productItem([
+            'price' => 100.00,
+            'cost_price' => 80.00,
+        ]), [
+            'id' => 77,
+            'name' => 'Break-even promotion',
+            'custom_field_value' => 'Break-even promotion',
+            'discount_percent' => 20.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'created_at' => '2026-05-05 10:23:00',
+            'priority' => 1,
+        ]);
+
+        $this->assertTrue($candidate['will_apply']);
+        $this->assertTrue($candidate['cost_price_valid']);
+        $this->assertSame(0.00, $candidate['promo_margin']);
+        $this->assertSame(0.00, $candidate['margin_after_discount']);
+        $this->assertSame([], $candidate['promotion_invalid_reasons']);
+    }
+
     public function testPreviewReferenceDateCannotBeBackdatedBeforeNow(): void {
         $pricingService = $this->createPricingService([
             'candidate_omnibus_reference_price' => null,

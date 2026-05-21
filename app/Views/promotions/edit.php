@@ -164,12 +164,14 @@ $colorValue = $promotion['color'] ?: '#3b82f6';
                                 <th><?= trans_e('promotions.preview.price') ?></th>
                                 <th><?= trans_e('promotions.preview.lowest_30d') ?></th>
                                 <th><?= trans_e('promotions.preview.new_price') ?></th>
+                                <th><?= trans_e('promotions.preview.cost_price') ?></th>
+                                <th><?= trans_e('promotions.preview.margin_after_discount') ?></th>
                                 <th><?= trans_e('promotions.preview.omnibus_status') ?></th>
                                 <th><?= trans_e('promotions.preview.stock') ?></th>
                             </tr>
                         </thead>
                         <tbody id="preview-table-body">
-                            <tr><td colspan="6" class="promotion-preview-empty"><?= trans_e('promotions.preview.empty_loading') ?></td></tr>
+                            <tr><td colspan="8" class="promotion-preview-empty"><?= trans_e('promotions.preview.empty_loading') ?></td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -958,7 +960,7 @@ function renderPreviewRows(products) {
         : products;
 
     if (visibleProducts.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="promotion-preview-empty">${escapeHtml(appT('promotions.preview.empty_filtered'))}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="promotion-preview-empty">${escapeHtml(appT('promotions.preview.empty_filtered'))}</td></tr>`;
         return;
     }
 
@@ -970,14 +972,24 @@ function renderPreviewRows(products) {
         return formatPreviewMoney(value);
     };
 
+    const renderMarginAfterDiscount = product => {
+        const margin = product.margin_after_discount ?? product.promo_margin;
+        const className = Number(margin) < 0
+            ? 'promotion-preview-margin promotion-preview-margin-invalid'
+            : 'promotion-preview-margin';
+
+        return `<span class="${className}">${formatOptionalMoney(margin)}</span>`;
+    };
+
     const renderOmnibusStatus = product => {
-        const status = product.omnibus_status || 'disabled';
+        const status = product.will_apply ? (product.omnibus_status || 'disabled') : 'invalid';
         const isInvalid = status === 'invalid';
-        const labelKey = isInvalid
+        const labelKey = !product.will_apply || isInvalid
             ? 'promotions.preview.omnibus_invalid'
             : (status === 'valid' ? 'promotions.preview.omnibus_valid' : 'promotions.preview.omnibus_not_checked');
-        const warning = product.omnibus_warning
-            ? `<div class="promotion-preview-omnibus-warning">${escapeHtml(product.omnibus_warning)}</div>`
+        const warningText = product.promotion_warning || product.omnibus_warning || '';
+        const warning = warningText
+            ? `<div class="promotion-preview-omnibus-warning">${escapeHtml(warningText)}</div>`
             : '';
 
         return `<span class="promotion-preview-omnibus-badge promotion-preview-omnibus-${escapeHtml(status)}">${escapeHtml(appT(labelKey))}</span>${warning}`;
@@ -995,6 +1007,8 @@ function renderPreviewRows(products) {
                 ${formatPreviewMoney(product.promo_price)}
                 <div class="promotion-preview-saving">-${formatPreviewMoney(product.savings)}</div>
             </td>
+            <td class="promotion-preview-number">${formatOptionalMoney(product.cost_price)}</td>
+            <td class="promotion-preview-number">${renderMarginAfterDiscount(product)}</td>
             <td class="promotion-preview-omnibus">${renderOmnibusStatus(product)}</td>
             <td class="promotion-preview-stock">${escapeHtml(product.inventory ?? '')}</td>
         </tr>
