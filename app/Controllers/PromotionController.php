@@ -450,6 +450,27 @@ class PromotionController {
                 continue;
             }
 
+            if ($key === '_manual_unblocked_items') {
+                $items = is_array($value) ? $value : [$value];
+                $items = array_values(array_filter(array_map(static function ($item): string {
+                    return trim((string)$item);
+                }, $items), static function (string $item): bool {
+                    return preg_match('/^[pv]_\d+$/', $item) === 1;
+                }));
+
+                if (!empty($items)) {
+                    $normalizedFilters[$key] = array_values(array_unique($items));
+                }
+                continue;
+            }
+
+            if ($key === '_block_below_cost_price') {
+                if (filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
+                    $normalizedFilters[$key] = true;
+                }
+                continue;
+            }
+
             $normalizedKey = $key;
 
             if (strpos($key, 'custom_field:') === 0) {
@@ -466,6 +487,10 @@ class PromotionController {
                     ? $this->normalizeEscapedUnicodeString(trim($value))
                     : $value;
             }
+        }
+
+        if (empty($normalizedFilters['_block_below_cost_price'])) {
+            unset($normalizedFilters['_manual_unblocked_items']);
         }
 
         return $normalizedFilters;

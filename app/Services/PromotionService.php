@@ -16,6 +16,10 @@ class PromotionService {
     private $storeConfigCache = null;
     private const API_PRODUCT_LIMIT = 250;
     private const OMNIBUS_FIELD_NAME = 'lowest_price_30d';
+    private const BLOCK_BELOW_COST_PRICE_FILTER_KEY = '_block_below_cost_price';
+    private const MANUAL_UNBLOCK_FILTER_KEY = '_manual_unblocked_items';
+    private const COST_PRICE_BLOCK_ENABLED_ITEM_FLAG = '_cost_price_block_enabled';
+    private const MANUAL_UNBLOCK_ITEM_FLAG = '_manual_cost_price_unblock';
     
 public function __construct(Database $db = null) {
         $this->promotionModel = new Promotion();
@@ -542,6 +546,8 @@ public function __construct(Database $db = null) {
      */
     public function previewPromotionProducts($filters, $discountPercent, $referenceAt = null, array $context = []) {
         $discountPercent = $this->validateDiscountPercent($discountPercent);
+        $costPriceBlockEnabled = $this->isCostPriceBlockingEnabledFromFilters($filters);
+        $manualUnblockedItems = $this->getManualUnblockedItemKeysFromFilters($filters);
         $skipOmnibusRevalidation = $this->isEditPreviewWithoutOmnibusTermChanges(
             $context + [
                 'filters' => $filters,
@@ -561,6 +567,8 @@ public function __construct(Database $db = null) {
         
         $preview = [];
         foreach ($items as $item) {
+            $item[self::COST_PRICE_BLOCK_ENABLED_ITEM_FLAG] = $costPriceBlockEnabled;
+            $item[self::MANUAL_UNBLOCK_ITEM_FLAG] = $this->isItemManuallyUnblocked($item, $manualUnblockedItems);
             $row = $this->buildPromotionPreviewRow(
                 $item,
                 $discountPercent,
@@ -1379,6 +1387,11 @@ public function __construct(Database $db = null) {
             return null;
         }
 
+        $promotionFilters = $promotion['filters'] ?? [];
+        $product[self::COST_PRICE_BLOCK_ENABLED_ITEM_FLAG] = $this->isCostPriceBlockingEnabledFromFilters($promotionFilters);
+        $manualUnblockedItems = $this->getManualUnblockedItemKeysFromFilters($promotionFilters);
+        $product[self::MANUAL_UNBLOCK_ITEM_FLAG] = $this->isItemManuallyUnblocked($product, $manualUnblockedItems);
+
         try {
             $discount = $this->validateDiscountPercent($promotion['discount_percent'] ?? null);
         } catch (\InvalidArgumentException $e) {
@@ -1582,6 +1595,7 @@ public function __construct(Database $db = null) {
     }
 
     private function applyCostPriceGuard(array $validation, array $item, float $promoPrice): array {
+        $costPriceBlockEnabled = !empty($item[self::COST_PRICE_BLOCK_ENABLED_ITEM_FLAG]);
         $costPrice = $this->normalizeCostPrice($item['cost_price'] ?? null);
         $taxRate = $this->normalizeTaxRate($item['tax_rate'] ?? null);
         $promoPriceExTax = $this->calculateTaxExclusivePrice($promoPrice, $taxRate);
@@ -1591,18 +1605,26 @@ public function __construct(Database $db = null) {
         $isValid = $costPrice === null
             || $promoPriceExTax === null
             || !$this->isPromoPriceBelowCostPrice($promoPriceExTax, $costPrice);
+        $isManualOverride = $costPriceBlockEnabled && !$isValid && !empty($item[self::MANUAL_UNBLOCK_ITEM_FLAG]);
 
         $validation['cost_price'] = $costPrice;
+        $validation['cost_price_block_enabled'] = $costPriceBlockEnabled;
         $validation['tax_rate'] = $taxRate;
         $validation['promo_price_ex_tax'] = $promoPriceExTax;
         $validation['promo_margin'] = $promoMargin;
         $validation['margin_after_discount'] = $promoMargin;
         $validation['cost_price_valid'] = $isValid;
-        $validation['cost_price_status'] = $costPrice === null || $promoPriceExTax === null ? 'not_checked' : ($isValid ? 'valid' : 'invalid');
+        $validation['cost_price_overridden'] = $isManualOverride;
+        $validation['cost_price_status'] = $costPrice === null || $promoPriceExTax === null
+            ? 'not_checked'
+            : (!$costPriceBlockEnabled ? 'disabled' : ($isValid ? 'valid' : ($isManualOverride ? 'overridden' : 'invalid')));
         $validation['cost_price_warning'] = '';
 
-        if (!$isValid) {
+        if ($costPriceBlockEnabled && !$isValid && !$isManualOverride) {
             $validation['will_apply'] = false;
+        }
+
+        if ($costPriceBlockEnabled && !$isValid) {
             $validation['cost_price_warning'] = $this->buildCostPriceWarning($costPrice);
         }
 
@@ -1616,9 +1638,13 @@ public function __construct(Database $db = null) {
             $invalidReasons[] = $validation['omnibus_invalid_reason'];
         }
 
-        if (!$isValid) {
+        if ($costPriceBlockEnabled && !$isValid) {
             $warnings[] = $validation['cost_price_warning'];
-            $invalidReasons[] = 'below_cost_price';
+            if ($isManualOverride) {
+                $warnings[] = $this->buildCostPriceOverrideWarning();
+            } else {
+                $invalidReasons[] = 'below_cost_price';
+            }
         }
 
         $validation['promotion_warning'] = implode(' ', array_values(array_unique(array_filter($warnings))));
@@ -1663,6 +1689,14 @@ public function __construct(Database $db = null) {
             'promotions.preview.below_cost_price',
             ['cost_price' => number_format($costPrice, 2, '.', '')],
             'Promo price is below cost price.'
+        );
+    }
+
+    private function buildCostPriceOverrideWarning(): string {
+        return $this->translateMessage(
+            'promotions.preview.cost_price_override_warning',
+            [],
+            'Cost price block was manually removed by an administrator.'
         );
     }
 
@@ -1961,8 +1995,8 @@ public function __construct(Database $db = null) {
 
         if (
             array_key_exists('filters', $newData)
-            && $this->normalizeFiltersForComparison($existingPromotion['filters'] ?? [])
-                !== $this->normalizeFiltersForComparison($newData['filters'] ?? [])
+            && $this->normalizeFiltersForComparison($existingPromotion['filters'] ?? [], false)
+                !== $this->normalizeFiltersForComparison($newData['filters'] ?? [], false)
         ) {
             return true;
         }
@@ -2025,7 +2059,7 @@ public function __construct(Database $db = null) {
         return $dateTime ? $dateTime->format('Y-m-d H:i') : null;
     }
 
-    private function normalizeFiltersForComparison($filters): string {
+    private function normalizeFiltersForComparison($filters, bool $includeSyncControls = true): string {
         if (is_string($filters)) {
             $decoded = json_decode($filters, true);
             $filters = is_array($decoded) ? $decoded : [];
@@ -2033,6 +2067,11 @@ public function __construct(Database $db = null) {
 
         if (!is_array($filters)) {
             $filters = [];
+        }
+
+        if (!$includeSyncControls) {
+            unset($filters[self::BLOCK_BELOW_COST_PRICE_FILTER_KEY]);
+            unset($filters[self::MANUAL_UNBLOCK_FILTER_KEY]);
         }
 
         $normalized = $this->sortFilterValueForComparison($filters);
@@ -2386,6 +2425,58 @@ public function __construct(Database $db = null) {
 
     private function getPromotionItemKey($productId, $variantId = null) {
         return $variantId ? "v_{$variantId}" : "p_{$productId}";
+    }
+
+    private function isCostPriceBlockingEnabledFromFilters($filters): bool {
+        if (is_string($filters)) {
+            $decoded = json_decode($filters, true);
+            $filters = is_array($decoded) ? $decoded : [];
+        }
+
+        if (!is_array($filters)) {
+            return false;
+        }
+
+        return !empty($filters[self::BLOCK_BELOW_COST_PRICE_FILTER_KEY]);
+    }
+
+    private function getManualUnblockedItemKeysFromFilters($filters): array {
+        if (is_string($filters)) {
+            $decoded = json_decode($filters, true);
+            $filters = is_array($decoded) ? $decoded : [];
+        }
+
+        if (!is_array($filters)) {
+            return [];
+        }
+
+        $keys = $filters[self::MANUAL_UNBLOCK_FILTER_KEY] ?? [];
+        if (!is_array($keys)) {
+            $keys = [$keys];
+        }
+
+        $normalized = [];
+        foreach ($keys as $key) {
+            $key = trim((string)$key);
+            if ($key !== '' && preg_match('/^[pv]_\d+$/', $key)) {
+                $normalized[$key] = true;
+            }
+        }
+
+        return $normalized;
+    }
+
+    private function isItemManuallyUnblocked(array $item, array $manualUnblockedItems): bool {
+        $productId = (int)($item['product_id'] ?? 0);
+        if ($productId <= 0) {
+            return false;
+        }
+
+        $variantId = isset($item['variant_id']) && $item['variant_id'] !== null && $item['variant_id'] !== ''
+            ? (int)$item['variant_id']
+            : null;
+
+        return isset($manualUnblockedItems[$this->getPromotionItemKey($productId, $variantId)]);
     }
 
     private function buildRestoreUpdates(array $items): array {

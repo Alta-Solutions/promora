@@ -70,7 +70,7 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertSame('not_below_30_day_lowest', $result['omnibus_invalid_reason']);
     }
 
-    public function testPreviewBlocksPromotionWhenPromoPriceIsBelowCostPrice(): void {
+    public function testPreviewDoesNotBlockBelowCostPriceWhenCostGuardIsDisabledByDefault(): void {
         $service = $this->createPromotionService($this->createPricingService([
             'candidate_omnibus_reference_price' => null,
             'omnibus_reference_price' => null,
@@ -88,7 +88,40 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
             'tax_rate' => 20.00,
         ]), 20.00, '2026-05-05 00:00:00');
 
+        $this->assertTrue($row['will_apply']);
+        $this->assertFalse($row['cost_price_block_enabled']);
+        $this->assertFalse($row['cost_price_valid']);
+        $this->assertSame('disabled', $row['cost_price_status']);
+        $this->assertSame(85.00, $row['cost_price']);
+        $this->assertSame(20.00, $row['tax_rate']);
+        $this->assertSame(66.6667, $row['promo_price_ex_tax']);
+        $this->assertSame(-18.33, $row['promo_margin']);
+        $this->assertSame(-18.33, $row['margin_after_discount']);
+        $this->assertSame([], $row['promotion_invalid_reasons']);
+        $this->assertSame('', $row['promotion_warning']);
+    }
+
+    public function testPreviewBlocksPromotionWhenPromoPriceIsBelowCostPriceAndCostGuardIsEnabled(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionPreviewRow');
+        $method->setAccessible(true);
+        $row = $method->invoke($service, $this->productItem([
+            'price' => 100.00,
+            'cost_price' => 85.00,
+            'tax_rate' => 20.00,
+            '_cost_price_block_enabled' => true,
+        ]), 20.00, '2026-05-05 00:00:00');
+
         $this->assertFalse($row['will_apply']);
+        $this->assertTrue($row['cost_price_block_enabled']);
         $this->assertFalse($row['cost_price_valid']);
         $this->assertSame(85.00, $row['cost_price']);
         $this->assertSame(20.00, $row['tax_rate']);
@@ -133,6 +166,82 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertSame(0.00, $candidate['promo_margin']);
         $this->assertSame(0.00, $candidate['margin_after_discount']);
         $this->assertSame([], $candidate['promotion_invalid_reasons']);
+    }
+
+    public function testPromotionCandidateAllowsBelowCostPriceWhenManuallyUnblocked(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionCandidate');
+        $method->setAccessible(true);
+        $candidate = $method->invoke($service, $this->productItem([
+            'price' => 100.00,
+            'cost_price' => 85.00,
+            'tax_rate' => 20.00,
+        ]), [
+            'id' => 77,
+            'name' => 'Manual override promotion',
+            'custom_field_value' => 'Manual override promotion',
+            'discount_percent' => 20.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'created_at' => '2026-05-05 10:23:00',
+            'priority' => 1,
+            'filters' => json_encode([
+                'sku' => 'TEST-123',
+                '_block_below_cost_price' => true,
+                '_manual_unblocked_items' => ['p_123'],
+            ]),
+        ]);
+
+        $this->assertTrue($candidate['will_apply']);
+        $this->assertFalse($candidate['cost_price_valid']);
+        $this->assertTrue($candidate['cost_price_overridden']);
+        $this->assertSame('overridden', $candidate['cost_price_status']);
+        $this->assertSame(-18.33, $candidate['margin_after_discount']);
+        $this->assertSame([], $candidate['promotion_invalid_reasons']);
+    }
+
+    public function testManualCostPriceOverrideDoesNotBypassOmnibusBlock(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => 50.00,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => 50.00,
+            'is_price_drop_candidate' => true,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => 'not_below_30_day_lowest',
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionCandidate');
+        $method->setAccessible(true);
+        $candidate = $method->invoke($service, $this->productItem([
+            'price' => 100.00,
+            'cost_price' => 85.00,
+            'tax_rate' => 20.00,
+        ]), [
+            'id' => 77,
+            'name' => 'Manual override promotion',
+            'custom_field_value' => 'Manual override promotion',
+            'discount_percent' => 20.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'created_at' => '2026-05-05 10:23:00',
+            'priority' => 1,
+            'filters' => json_encode([
+                'sku' => 'TEST-123',
+                '_block_below_cost_price' => true,
+                '_manual_unblocked_items' => ['p_123'],
+            ]),
+        ]);
+
+        $this->assertFalse($candidate['will_apply']);
+        $this->assertTrue($candidate['cost_price_overridden']);
+        $this->assertSame('not_below_30_day_lowest', $candidate['promotion_invalid_reason']);
+        $this->assertNotContains('below_cost_price', $candidate['promotion_invalid_reasons']);
     }
 
     public function testPreviewReferenceDateCannotBeBackdatedBeforeNow(): void {
@@ -443,7 +552,10 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         ], 77, [$this->activePromotion([
             'id' => 77,
             'discount_percent' => 20.00,
-            'filters' => json_encode(['sku' => 'TEST-123']),
+            'filters' => json_encode([
+                'sku' => 'TEST-123',
+                '_block_below_cost_price' => true,
+            ]),
         ])]);
 
         $this->assertCount(1, $result['restore']);
@@ -585,6 +697,52 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertTrue($method->invoke($service, $existing, array_replace($existing, ['discount_percent' => 25.00])));
         $this->assertTrue($method->invoke($service, $existing, array_replace($existing, ['filters' => ['sku' => 'OTHER-SKU']])));
         $this->assertTrue($method->invoke($service, $existing, array_replace($existing, ['custom_field_value' => 'Changed field'])));
+        $this->assertTrue($method->invoke($service, $existing, array_replace($existing, [
+            'filters' => [
+                'sku' => 'TEST-123',
+                '_manual_unblocked_items' => ['p_123'],
+            ],
+        ])));
+        $this->assertTrue($method->invoke($service, $existing, array_replace($existing, [
+            'filters' => [
+                'sku' => 'TEST-123',
+                '_block_below_cost_price' => true,
+            ],
+        ])));
+    }
+
+    public function testPromotionOmnibusTermsIgnoreManualUnblockOnlyChanges(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('hasPromotionOmnibusTermsChanged');
+        $method->setAccessible(true);
+
+        $existing = $this->activePromotion([
+            'id' => 77,
+            'discount_percent' => 20.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'filters' => json_encode(['sku' => 'TEST-123']),
+        ]);
+
+        $this->assertFalse($method->invoke($service, $existing, array_replace($existing, [
+            'filters' => [
+                'sku' => 'TEST-123',
+                '_manual_unblocked_items' => ['p_123'],
+            ],
+        ])));
+        $this->assertFalse($method->invoke($service, $existing, array_replace($existing, [
+            'filters' => [
+                'sku' => 'TEST-123',
+                '_block_below_cost_price' => true,
+            ],
+        ])));
     }
 
     private function validateAgainstOmnibus(array $dto, array $item, float $promoPrice): array {

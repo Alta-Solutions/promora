@@ -17,6 +17,17 @@
         unset($filters['exclude']);
     }
 
+    $manualUnblockedItems = [];
+    if (isset($filters['_manual_unblocked_items'])) {
+        $manualUnblockedItems = is_array($filters['_manual_unblocked_items'])
+            ? array_values(array_filter(array_map('strval', $filters['_manual_unblocked_items'])))
+            : [];
+        unset($filters['_manual_unblocked_items']);
+    }
+
+    $blockBelowCostPrice = !empty($filters['_block_below_cost_price']);
+    unset($filters['_block_below_cost_price']);
+
     $nameValue = $promotionDefaults['name'] ?? '';
     $customFieldValue = $promotionDefaults['custom_field_value'] ?? $nameValue;
     $descriptionValue = $promotionDefaults['description'] ?? '';
@@ -85,6 +96,18 @@
                         <div class="form-group promotion-field">
                             <label class="form-label"><?= trans_e('common.priority') ?></label>
                             <input type="number" name="priority" class="form-input" value="<?= htmlspecialchars($priorityValue) ?>" min="0">
+                        </div>
+
+                        <div class="form-group promotion-field promotion-full-field">
+                            <label class="promotion-checkbox-row">
+                                <input
+                                    type="checkbox"
+                                    id="block-below-cost-price"
+                                    <?= $blockBelowCostPrice ? 'checked' : '' ?>
+                                >
+                                <span><?= trans_e('promotions.form.block_below_cost_price') ?></span>
+                            </label>
+                            <small class="promotion-field-help"><?= trans_e('promotions.form.block_below_cost_price_help') ?></small>
                         </div>
 
                         <div class="form-group promotion-field promotion-full-field">
@@ -215,6 +238,9 @@ const PRODUCT_SKU_FILTER_TYPE = 'sku:in';
 const PRODUCT_SELECT_ALL_VALUE = '__promotion_select_all_product_search__';
 const PRODUCT_PARENT_SELECT_ALL_PREFIX = '__promotion_select_all_parent_variants__:';
 const STATIC_TOM_SELECT_FILTER_TYPES = ['categories:in', 'brand_id'];
+const BLOCK_BELOW_COST_PRICE_FILTER_KEY = '_block_below_cost_price';
+const MANUAL_UNBLOCK_FILTER_KEY = '_manual_unblocked_items';
+let manualUnblockedItemKeys = new Set(<?= json_encode($manualUnblockedItems) ?>);
 
 function padDateTimePart(value) {
     return String(value).padStart(2, '0');
@@ -924,6 +950,7 @@ function renderFilters() {
 
 function buildFiltersPayload() {
     const filtersObj = {};
+    const costPriceBlockEnabled = document.getElementById('block-below-cost-price')?.checked === true;
     currentFilters.forEach(filter => {
         filtersObj[filter.type] = filter.value;
     });
@@ -935,6 +962,15 @@ function buildFiltersPayload() {
 
     if (Object.keys(excludeFiltersObj).length > 0) {
         filtersObj.exclude = excludeFiltersObj;
+    }
+
+    if (costPriceBlockEnabled) {
+        filtersObj[BLOCK_BELOW_COST_PRICE_FILTER_KEY] = true;
+
+        const manualUnblockedItems = Array.from(manualUnblockedItemKeys).filter(key => /^[pv]_\d+$/.test(key));
+        if (manualUnblockedItems.length > 0) {
+            filtersObj[MANUAL_UNBLOCK_FILTER_KEY] = manualUnblockedItems;
+        }
     }
 
     return filtersObj;
@@ -985,6 +1021,55 @@ function formatPreviewMoney(value) {
     return Number.isFinite(numericValue) ? numericValue.toFixed(2) : '0.00';
 }
 
+function getPreviewItemKey(product) {
+    if (!product || !product.product_id) {
+        return '';
+    }
+
+    return product.variant_id ? `v_${product.variant_id}` : `p_${product.product_id}`;
+}
+
+function canManuallyUnblockProduct(product) {
+    const reasons = Array.isArray(product.promotion_invalid_reasons)
+        ? product.promotion_invalid_reasons
+        : [];
+
+    return !product.will_apply
+        && !product.cost_price_overridden
+        && reasons.length === 1
+        && reasons.includes('below_cost_price');
+}
+
+function toggleManualUnblock(itemKey, shouldUnblock) {
+    if (!itemKey) {
+        return;
+    }
+
+    if (shouldUnblock) {
+        manualUnblockedItemKeys.add(itemKey);
+    } else {
+        manualUnblockedItemKeys.delete(itemKey);
+    }
+
+    updatePreview();
+}
+
+function bindPreviewOverrideButtons(tbody) {
+    tbody.querySelectorAll('[data-preview-override-key]').forEach(button => {
+        button.addEventListener('click', () => {
+            toggleManualUnblock(
+                button.dataset.previewOverrideKey || '',
+                button.dataset.previewOverrideAction === 'unblock'
+            );
+        });
+    });
+}
+
+function pruneManualUnblocks(products) {
+    const currentKeys = new Set(products.map(getPreviewItemKey).filter(Boolean));
+    manualUnblockedItemKeys = new Set(Array.from(manualUnblockedItemKeys).filter(key => currentKeys.has(key)));
+}
+
 function renderPreviewRows(products) {
     const tbody = document.getElementById('preview-table-body');
     const searchInput = document.getElementById('preview-search');
@@ -1020,7 +1105,41 @@ function renderPreviewRows(products) {
         return `<span class="${className}">${formatOptionalMoney(margin)}</span>`;
     };
 
+    const renderManualOverrideAction = product => {
+        const itemKey = getPreviewItemKey(product);
+        const isOverridden = !!product.cost_price_overridden;
+        const canUnblock = canManuallyUnblockProduct(product);
+
+        if (!itemKey || (!isOverridden && !canUnblock)) {
+            return '';
+        }
+
+        const action = isOverridden ? 'block' : 'unblock';
+        const label = isOverridden
+            ? appT('promotions.preview.manual_reblock')
+            : appT('promotions.preview.manual_unblock');
+
+        return `
+            <button
+                type="button"
+                class="promotion-preview-override-button"
+                data-preview-override-key="${escapeHtml(itemKey)}"
+                data-preview-override-action="${escapeHtml(action)}"
+            >${escapeHtml(label)}</button>
+        `;
+    };
+
     const renderOmnibusStatus = product => {
+        const action = renderManualOverrideAction(product);
+        if (product.cost_price_overridden && product.will_apply) {
+            const warningText = product.promotion_warning || product.cost_price_warning || '';
+            const warning = warningText
+                ? `<div class="promotion-preview-omnibus-warning">${escapeHtml(warningText)}</div>`
+                : '';
+
+            return `<span class="promotion-preview-omnibus-badge promotion-preview-omnibus-overridden">${escapeHtml(appT('promotions.preview.manual_override_badge'))}</span>${warning}${action}`;
+        }
+
         const status = product.will_apply ? (product.omnibus_status || 'disabled') : 'invalid';
         const isInvalid = status === 'invalid';
         const labelKey = !product.will_apply || isInvalid
@@ -1031,7 +1150,7 @@ function renderPreviewRows(products) {
             ? `<div class="promotion-preview-omnibus-warning">${escapeHtml(warningText)}</div>`
             : '';
 
-        return `<span class="promotion-preview-omnibus-badge promotion-preview-omnibus-${escapeHtml(status)}">${escapeHtml(appT(labelKey))}</span>${warning}`;
+        return `<span class="promotion-preview-omnibus-badge promotion-preview-omnibus-${escapeHtml(status)}">${escapeHtml(appT(labelKey))}</span>${warning}${action}`;
     };
 
     tbody.innerHTML = visibleProducts.map(product => `
@@ -1052,6 +1171,8 @@ function renderPreviewRows(products) {
             <td class="promotion-preview-stock">${escapeHtml(product.inventory ?? '')}</td>
         </tr>
     `).join('');
+
+    bindPreviewOverrideButtons(tbody);
 }
 
 function applyPreviewSearch() {
@@ -1081,6 +1202,7 @@ async function updatePreview() {
         if (result.success) {
             const data = result.data;
             const products = data.products || [];
+            pruneManualUnblocks(products);
             
             document.getElementById('preview-count').textContent = data.total_products;
             previewProducts = products;
@@ -1096,6 +1218,7 @@ async function updatePreview() {
 
 document.getElementById('preview-search')?.addEventListener('input', applyPreviewSearch);
 document.getElementById('promo-discount')?.addEventListener('input', schedulePreviewUpdate);
+document.getElementById('block-below-cost-price')?.addEventListener('change', schedulePreviewUpdate);
 
 // Initial preview
 setTimeout(updatePreview, 500);
