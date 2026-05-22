@@ -16,16 +16,19 @@ class QueueService {
     }
 
     public function createJob($type, $promotionId = null, $totalItems = 0) {
+        $storeHash = $this->requireStoreHash('create sync job');
+
         $this->db->query(
             "INSERT INTO sync_jobs (store_hash, job_type, promotion_id, total_items, status, attempts, created_at) 
              VALUES (?, ?, ?, ?, 'pending', 0, NOW())",
-            [$this->storeHash, $type, $promotionId, $totalItems]
+            [$storeHash, $type, $promotionId, $totalItems]
         );
         return $this->db->lastInsertId();
     }
 
     public function createJobIfNotOpen($type, $promotionId = null, $totalItems = 0): array {
-        $lockName = 'sync_job:' . (string)$this->storeHash . ':' . (string)$type . ':' . ($promotionId === null ? 'null' : (string)$promotionId);
+        $storeHash = $this->requireStoreHash('create sync job');
+        $lockName = 'sync_job:' . $storeHash . ':' . (string)$type . ':' . ($promotionId === null ? 'null' : (string)$promotionId);
         $lockAcquired = $this->acquireLock($lockName, 5);
 
         if (!$lockAcquired) {
@@ -63,7 +66,8 @@ class QueueService {
     }
 
     public function createOmnibusSyncJob(int $totalItems, bool $deduplicateOpenJobs = true): array {
-        $lockName = 'omnibus_sync:' . (string)$this->storeHash;
+        $storeHash = $this->requireStoreHash('create Omnibus sync job');
+        $lockName = 'omnibus_sync:' . $storeHash;
         $lockAcquired = $this->acquireLock($lockName, 5);
 
         if (!$lockAcquired) {
@@ -100,6 +104,18 @@ class QueueService {
         } finally {
             $this->releaseLock($lockName);
         }
+    }
+
+    private function requireStoreHash(string $operation): string {
+        $storeHash = trim((string)$this->storeHash);
+
+        if ($storeHash === '') {
+            throw new \InvalidArgumentException("Store context required to {$operation}.");
+        }
+
+        $this->storeHash = $storeHash;
+
+        return $storeHash;
     }
 
     // --- IZMENJENO: Sada gleda i 'next_run_at' ---

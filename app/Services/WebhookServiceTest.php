@@ -4,6 +4,7 @@ use PHPUnit\Framework\TestCase;
 use App\Services\WebhookService;
 use App\Models\Database;
 use App\Services\BigCommerceAPI;
+use App\Services\ProductCacheService;
 use App\Services\WebhookSuppressionService;
 
 // Definišemo konstantu da znamo da smo u test modu (za izbegavanje exit-a u servisu)
@@ -128,7 +129,7 @@ class WebhookServiceTest extends TestCase {
         $this->assertTrue($result);
     }
 
-    public function testProcessWebhookSkipsSuppressedProductUpdate() {
+    public function testProcessWebhookRefreshesCacheForSuppressedProductUpdate() {
         $suppressionMock = $this->createMock(WebhookSuppressionService::class);
         $suppressionMock->expects($this->once())
                         ->method('consumeProductUpdate')
@@ -140,7 +141,9 @@ class WebhookServiceTest extends TestCase {
                         ->onlyMethods(['updateProductCache', 'createBigCommerceAPI'])
                         ->getMock();
 
-        $service->expects($this->never())->method('updateProductCache');
+        $service->expects($this->once())
+                ->method('updateProductCache')
+                ->with(123, false, true);
         $service->method('createBigCommerceAPI')->willReturn($this->apiMock);
 
         $this->dbMock->method('fetchOne')
@@ -155,5 +158,56 @@ class WebhookServiceTest extends TestCase {
 
         $this->assertTrue($result);
         $this->assertSame(202, $service->getLastStatusCode());
+    }
+
+    public function testSuppressedProductRefreshReEvaluatesWhenCategoriesChange() {
+        $product = [
+            'id' => 123,
+            'name' => 'Updated product',
+            'sku' => 'SKU-123',
+            'brand_id' => 7,
+            'categories' => [20],
+            'is_visible' => true,
+            'is_featured' => false,
+            'availability' => 'available',
+            'condition' => 'new',
+        ];
+
+        $this->dbMock->method('getStoreContext')->willReturn('test_hash');
+        $this->dbMock->method('fetchOne')->willReturn([
+            'sku' => 'SKU-123',
+            'brand_id' => 7,
+            'categories' => json_encode([10]),
+            'is_visible' => true,
+            'is_featured' => false,
+            'availability' => 'available',
+            'condition' => 'new',
+        ]);
+
+        $this->apiMock->expects($this->once())
+                      ->method('call')
+                      ->with('GET', 'catalog/products/123?include=variants,images,custom_fields')
+                      ->willReturn(['body' => ['data' => $product]]);
+
+        $cacheServiceMock = $this->getMockBuilder(ProductCacheService::class)
+                                 ->disableOriginalConstructor()
+                                 ->onlyMethods(['batchCacheProducts'])
+                                 ->getMock();
+        $cacheServiceMock->expects($this->once())
+                         ->method('batchCacheProducts')
+                         ->with([$product]);
+
+        $service = $this->getMockBuilder(WebhookService::class)
+                        ->setConstructorArgs([$this->dbMock, $this->apiMock])
+                        ->onlyMethods(['createProductCacheService', 'reEvaluatePromotionsForProduct'])
+                        ->getMock();
+        $service->method('createProductCacheService')->willReturn($cacheServiceMock);
+        $service->expects($this->once())
+                ->method('reEvaluatePromotionsForProduct')
+                ->with(123);
+
+        $method = new \ReflectionMethod(WebhookService::class, 'updateProductCache');
+        $method->setAccessible(true);
+        $method->invoke($service, 123, false, true);
     }
 }

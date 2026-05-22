@@ -85,13 +85,16 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $row = $method->invoke($service, $this->productItem([
             'price' => 100.00,
             'cost_price' => 85.00,
+            'tax_rate' => 20.00,
         ]), 20.00, '2026-05-05 00:00:00');
 
         $this->assertFalse($row['will_apply']);
         $this->assertFalse($row['cost_price_valid']);
         $this->assertSame(85.00, $row['cost_price']);
-        $this->assertSame(-5.00, $row['promo_margin']);
-        $this->assertSame(-5.00, $row['margin_after_discount']);
+        $this->assertSame(20.00, $row['tax_rate']);
+        $this->assertSame(66.6667, $row['promo_price_ex_tax']);
+        $this->assertSame(-18.33, $row['promo_margin']);
+        $this->assertSame(-18.33, $row['margin_after_discount']);
         $this->assertSame('below_cost_price', $row['promotion_invalid_reason']);
         $this->assertContains('below_cost_price', $row['promotion_invalid_reasons']);
         $this->assertNotSame('', $row['promotion_warning']);
@@ -110,8 +113,9 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionCandidate');
         $method->setAccessible(true);
         $candidate = $method->invoke($service, $this->productItem([
-            'price' => 100.00,
+            'price' => 120.00,
             'cost_price' => 80.00,
+            'tax_rate' => 20.00,
         ]), [
             'id' => 77,
             'name' => 'Break-even promotion',
@@ -124,6 +128,8 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
 
         $this->assertTrue($candidate['will_apply']);
         $this->assertTrue($candidate['cost_price_valid']);
+        $this->assertSame(20.00, $candidate['tax_rate']);
+        $this->assertSame(80.00, $candidate['promo_price_ex_tax']);
         $this->assertSame(0.00, $candidate['promo_margin']);
         $this->assertSame(0.00, $candidate['margin_after_discount']);
         $this->assertSame([], $candidate['promotion_invalid_reasons']);

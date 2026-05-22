@@ -35,6 +35,9 @@ Key fields:
 - `variant_id`
 - `price`
 - `sale_price`
+- `cost_price`
+- `tax_class_id`
+- `tax_rate`
 - `custom_fields`
 - `images`
 - `cached_at`

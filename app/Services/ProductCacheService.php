@@ -7,6 +7,8 @@ class ProductCacheService {
     private $db;
     private $api;
     private $storeHash;
+    private $taxRatesByClass = null;
+    private $taxRatesLoaded = false;
     
     // Konstanta za veličinu batch-a. MySQL obično odlično rukuje sa 1000-5000.
     private const DB_BATCH_SIZE = 100;
@@ -86,7 +88,7 @@ class ProductCacheService {
         }
 
         $sqlTemplate = "INSERT INTO products_cache 
-            (id, store_hash, product_id, variant_id, type, name, sku, price, sale_price, cost_price, retail_price, weight, 
+            (id, store_hash, product_id, variant_id, type, name, sku, price, sale_price, cost_price, retail_price, tax_class_id, tax_rate, weight,
              inventory_level, inventory_warning_level, brand_id, brand_name, 
              categories, is_visible, is_featured, availability, `condition`, 
              option_values, date_created, date_modified, custom_fields, images, cached_at)
@@ -103,11 +105,14 @@ class ProductCacheService {
         // Niz za grupno logovanje cena
         $pricesToLog = [];
         $initialPricesToSeed = [];
+        $taxRatesByClass = $this->getStoreTaxRatesByClass();
         
         foreach ($products as $product) {
             // --- 1. Keširanje osnovnog proizvoda ---
             $compositeId = $this->generateCompositeId($product['id'], null);
-            $valuePlaceholders[] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+            $taxClassId = $this->normalizeTaxClassId($product['tax_class_id'] ?? null);
+            $taxRate = $this->resolveProductTaxRate($taxRatesByClass, $taxClassId);
+            $valuePlaceholders[] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
             
             // Priprema parametara za jedan red (mora biti striktan redosled)
             $params = array_merge($params, [
@@ -122,6 +127,8 @@ class ProductCacheService {
                 $product['sale_price'] ?? null,
                 $product['cost_price'] ?? null,
                 $product['retail_price'] ?? null,
+                $taxClassId,
+                $taxRate,
                 $product['weight'] ?? null,
                 $product['inventory_level'] ?? 0,
                 $product['inventory_warning_level'] ?? 0,
@@ -174,7 +181,7 @@ class ProductCacheService {
                 if (!$isSimpleProduct) {
                     foreach ($product['variants'] as $variant) {
                         $compositeId = $this->generateCompositeId($product['id'], $variant['id']);
-                        $valuePlaceholders[] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+                        $valuePlaceholders[] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
                         
                         // Varijanta može imati svoju cenu, ili nasleđuje cenu od osnovnog proizvoda
                         $variantPrice = $variant['price'] ?? $product['price'];
@@ -204,6 +211,8 @@ class ProductCacheService {
                             $variant['sale_price'] ?? null,
                             $variant['cost_price'] ?? null,
                             $variant['retail_price'] ?? null,
+                            $taxClassId,
+                            $taxRate,
                             $variant['weight'] ?? $product['weight'],
                             $variant['inventory_level'] ?? 0,
                             $variant['inventory_warning_level'] ?? 0,
@@ -255,6 +264,8 @@ class ProductCacheService {
              sale_price = VALUES(sale_price),
              cost_price = VALUES(cost_price),
              retail_price = VALUES(retail_price),
+             tax_class_id = VALUES(tax_class_id),
+             tax_rate = VALUES(tax_rate),
              weight = VALUES(weight),
              inventory_level = VALUES(inventory_level),
              inventory_warning_level = VALUES(inventory_warning_level),
@@ -442,6 +453,67 @@ class ProductCacheService {
         $this->db->query("DELETE FROM product_custom_field_index WHERE store_hash = ?", [$this->storeHash]);
         return true;
     }
+
+    private function getStoreTaxRatesByClass(): ?array {
+        if ($this->taxRatesLoaded) {
+            return $this->taxRatesByClass;
+        }
+
+        $this->taxRatesLoaded = true;
+
+        try {
+            $settings = $this->api->getTaxSettings();
+            $taxZoneId = $settings['store_tax_zone_id']
+                ?? $settings['guest_shopper_tax_zone_id']
+                ?? null;
+
+            if (!$taxZoneId) {
+                $this->taxRatesByClass = null;
+                return $this->taxRatesByClass;
+            }
+
+            $taxRates = $this->api->getTaxRates(['tax_zone_id:in' => (int)$taxZoneId]);
+            $this->taxRatesByClass = $this->buildTaxRatesByClass($taxRates);
+        } catch (\Exception $e) {
+            error_log("Unable to fetch BigCommerce tax rates for store {$this->storeHash}: " . $e->getMessage());
+            $this->taxRatesByClass = null;
+        }
+
+        return $this->taxRatesByClass;
+    }
+
+    private function buildTaxRatesByClass(array $taxRates): array {
+        $ratesByClass = [];
+
+        foreach ($taxRates as $taxRate) {
+            if (isset($taxRate['enabled']) && !$taxRate['enabled']) {
+                continue;
+            }
+
+            foreach ($taxRate['class_rates'] ?? [] as $classRate) {
+                if (!isset($classRate['tax_class_id']) || !isset($classRate['rate']) || !is_numeric($classRate['rate'])) {
+                    continue;
+                }
+
+                $taxClassId = (int)$classRate['tax_class_id'];
+                $ratesByClass[$taxClassId] = round(($ratesByClass[$taxClassId] ?? 0.0) + (float)$classRate['rate'], 4);
+            }
+        }
+
+        return $ratesByClass;
+    }
+
+    private function normalizeTaxClassId($taxClassId): int {
+        return is_numeric($taxClassId) ? (int)$taxClassId : 0;
+    }
+
+    private function resolveProductTaxRate(?array $taxRatesByClass, int $taxClassId): ?float {
+        if ($taxRatesByClass === null) {
+            return null;
+        }
+
+        return $taxRatesByClass[$taxClassId] ?? 0.0;
+    }
     
     private function generateCompositeId($productId, $variantId = null) {
         // IZMENA: Generiše jedinstveni string ID koji uključuje i store_hash i variant_id
@@ -481,7 +553,7 @@ class ProductCacheService {
 
         $isCompatible =
             (($columnMap['id'] ?? null) === 'varchar') &&
-            isset($columnMap['type'], $columnMap['variant_id'], $columnMap['option_values']) &&
+            isset($columnMap['type'], $columnMap['variant_id'], $columnMap['option_values'], $columnMap['tax_class_id'], $columnMap['tax_rate']) &&
             isset($indexMap['store_product_variant']) &&
             $indexMap['store_product_variant'] === ['store_hash', 'product_id', 'variant_id'];
 
@@ -501,6 +573,14 @@ class ProductCacheService {
 
         if (!isset($columnMap['option_values'])) {
             $this->db->query("ALTER TABLE products_cache ADD COLUMN option_values JSON NULL AFTER `condition`");
+        }
+
+        if (!isset($columnMap['tax_class_id'])) {
+            $this->db->query("ALTER TABLE products_cache ADD COLUMN tax_class_id INT UNSIGNED NULL AFTER retail_price");
+        }
+
+        if (!isset($columnMap['tax_rate'])) {
+            $this->db->query("ALTER TABLE products_cache ADD COLUMN tax_rate DECIMAL(10, 4) NULL AFTER tax_class_id");
         }
 
         if (isset($indexMap['unique_store_product'])) {

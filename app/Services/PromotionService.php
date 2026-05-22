@@ -1470,14 +1470,22 @@ public function __construct(Database $db = null) {
 
     private function applyCostPriceGuard(array $validation, array $item, float $promoPrice): array {
         $costPrice = $this->normalizeCostPrice($item['cost_price'] ?? null);
-        $promoMargin = $costPrice !== null ? round($promoPrice - $costPrice, 2) : null;
-        $isValid = $costPrice === null || !$this->isPromoPriceBelowCostPrice($promoPrice, $costPrice);
+        $taxRate = $this->normalizeTaxRate($item['tax_rate'] ?? null);
+        $promoPriceExTax = $this->calculateTaxExclusivePrice($promoPrice, $taxRate);
+        $promoMargin = $costPrice !== null && $promoPriceExTax !== null
+            ? round($promoPriceExTax - $costPrice, 2)
+            : null;
+        $isValid = $costPrice === null
+            || $promoPriceExTax === null
+            || !$this->isPromoPriceBelowCostPrice($promoPriceExTax, $costPrice);
 
         $validation['cost_price'] = $costPrice;
+        $validation['tax_rate'] = $taxRate;
+        $validation['promo_price_ex_tax'] = $promoPriceExTax;
         $validation['promo_margin'] = $promoMargin;
         $validation['margin_after_discount'] = $promoMargin;
         $validation['cost_price_valid'] = $isValid;
-        $validation['cost_price_status'] = $costPrice === null ? 'not_checked' : ($isValid ? 'valid' : 'invalid');
+        $validation['cost_price_status'] = $costPrice === null || $promoPriceExTax === null ? 'not_checked' : ($isValid ? 'valid' : 'invalid');
         $validation['cost_price_warning'] = '';
 
         if (!$isValid) {
@@ -1514,6 +1522,23 @@ public function __construct(Database $db = null) {
 
         $costPrice = (float)$costPrice;
         return $costPrice > 0 ? $costPrice : null;
+    }
+
+    private function normalizeTaxRate($taxRate): ?float {
+        if ($taxRate === null || $taxRate === '' || !is_numeric($taxRate)) {
+            return null;
+        }
+
+        $taxRate = (float)$taxRate;
+        return $taxRate >= 0 ? $taxRate : null;
+    }
+
+    private function calculateTaxExclusivePrice(float $taxInclusivePrice, ?float $taxRate): ?float {
+        if ($taxRate === null) {
+            return null;
+        }
+
+        return round($taxInclusivePrice / (1 + ($taxRate / 100)), 4);
     }
 
     private function isPromoPriceBelowCostPrice(float $promoPrice, float $costPrice): bool {

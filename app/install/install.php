@@ -55,6 +55,8 @@ try {
             `sale_price` DECIMAL(20, 4) NULL,
             `cost_price` DECIMAL(20, 4) NULL,
             `retail_price` DECIMAL(20, 4) NULL,
+            `tax_class_id` INT UNSIGNED NULL,
+            `tax_rate` DECIMAL(10, 4) NULL,
             `weight` DECIMAL(20, 4) NULL,
             `inventory_level` INT NOT NULL DEFAULT 0,
             `inventory_warning_level` INT NOT NULL DEFAULT 0,

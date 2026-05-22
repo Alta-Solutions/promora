@@ -96,4 +96,43 @@ class BigCommerceAPITest extends TestCase {
             'sale_price' => 14.92,
         ]], $api->requests[0]['data']);
     }
+
+    public function testGetTaxSettingsUsesTaxSettingsEndpoint() {
+        $api = new TestableBigCommerceAPI([
+            'status' => 200,
+            'body' => [
+                'data' => [
+                    'store_tax_zone_id' => 3,
+                ],
+            ],
+        ]);
+
+        $settings = $api->getTaxSettings();
+
+        $this->assertSame('GET', $api->requests[0]['method']);
+        $this->assertSame('tax/settings', $api->requests[0]['endpoint']);
+        $this->assertSame(['store_tax_zone_id' => 3], $settings);
+    }
+
+    public function testGetTaxRatesUsesTaxZoneFilter() {
+        $api = new TestableBigCommerceAPI([
+            'status' => 200,
+            'body' => [
+                'data' => [
+                    [
+                        'tax_zone_id' => 3,
+                        'class_rates' => [
+                            ['tax_class_id' => 0, 'rate' => 21.00],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $rates = $api->getTaxRates(['tax_zone_id:in' => 3]);
+
+        $this->assertSame('GET', $api->requests[0]['method']);
+        $this->assertSame('tax/rates?tax_zone_id%3Ain=3', $api->requests[0]['endpoint']);
+        $this->assertSame(21.00, $rates[0]['class_rates'][0]['rate']);
+    }
 }

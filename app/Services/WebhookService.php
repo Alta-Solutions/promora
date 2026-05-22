@@ -225,6 +225,7 @@ class WebhookService {
 
         try {
             if ($this->isSuppressedProductUpdate($storeHash, $scope, $productId)) {
+                $this->updateProductCache($productId, false, true);
                 $this->markWebhookEventProcessed($eventId);
                 $this->lastStatusCode = 202;
                 return true;
@@ -267,7 +268,15 @@ class WebhookService {
         return $this->lastError;
     }
 
-    protected function updateProductCache($productId) {
+    protected function updateProductCache(
+        $productId,
+        bool $reEvaluatePromotions = true,
+        bool $reEvaluateOnCatalogFilterChange = false
+    ) {
+        $previousFingerprint = $reEvaluateOnCatalogFilterChange
+            ? $this->getCachedCatalogFilterFingerprint((int)$productId)
+            : null;
+
         $response = $this->api->call('GET', "catalog/products/{$productId}?include=variants,images,custom_fields");
         $product = $response['body']['data'] ?? null;
 
@@ -275,9 +284,60 @@ class WebhookService {
             throw new \RuntimeException("Product {$productId} could not be fetched from BigCommerce.");
         }
 
+        if (!$reEvaluatePromotions && $reEvaluateOnCatalogFilterChange && $previousFingerprint !== null) {
+            $currentFingerprint = $this->buildCatalogFilterFingerprint($product);
+            $reEvaluatePromotions = $currentFingerprint !== $previousFingerprint;
+        }
+
         $cacheService = $this->createProductCacheService();
         $cacheService->batchCacheProducts([$product]);
-        $this->reEvaluatePromotionsForProduct($productId);
+
+        if ($reEvaluatePromotions) {
+            $this->reEvaluatePromotionsForProduct($productId);
+        }
+    }
+
+    private function getCachedCatalogFilterFingerprint(int $productId): ?string {
+        $storeHash = $this->db->getStoreContext();
+        if (!$storeHash) {
+            return null;
+        }
+
+        $row = $this->db->fetchOne(
+            "SELECT sku, brand_id, categories, is_visible, is_featured, availability, `condition`
+             FROM products_cache
+             WHERE product_id = ? AND variant_id IS NULL AND store_hash = ?
+             LIMIT 1",
+            [$productId, $storeHash]
+        );
+
+        return $row ? $this->buildCatalogFilterFingerprint($row) : null;
+    }
+
+    private function buildCatalogFilterFingerprint(array $product): string {
+        $categories = $product['categories'] ?? [];
+        if (is_string($categories)) {
+            $decoded = json_decode($categories, true);
+            $categories = is_array($decoded) ? $decoded : [];
+        }
+        if (!is_array($categories)) {
+            $categories = [];
+        }
+
+        $categories = array_values(array_unique(array_map('intval', $categories)));
+        sort($categories, SORT_NUMERIC);
+
+        return json_encode([
+            'sku' => (string)($product['sku'] ?? ''),
+            'brand_id' => isset($product['brand_id']) && $product['brand_id'] !== null
+                ? (int)$product['brand_id']
+                : null,
+            'categories' => $categories,
+            'is_visible' => (bool)($product['is_visible'] ?? false),
+            'is_featured' => (bool)($product['is_featured'] ?? false),
+            'availability' => (string)($product['availability'] ?? ''),
+            'condition' => (string)($product['condition'] ?? ''),
+        ]);
     }
 
     protected function updateProductInventory($productId, $newInventory = null, $variantId = null) {

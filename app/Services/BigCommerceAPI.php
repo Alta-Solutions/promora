@@ -332,6 +332,21 @@ class BigCommerceAPI {
         
         return $allProducts;
     }
+
+    public function getTaxSettings(): array {
+        $response = $this->request('GET', 'tax/settings');
+        return $response['body']['data'] ?? [];
+    }
+
+    public function getTaxRates(array $filters = []): array {
+        $endpoint = 'tax/rates';
+        if (!empty($filters)) {
+            $endpoint .= '?' . http_build_query($filters);
+        }
+
+        $response = $this->request('GET', $endpoint);
+        return $response['body']['data'] ?? [];
+    }
     
     /**
      * Batch update products using BigCommerce native batch endpoint
