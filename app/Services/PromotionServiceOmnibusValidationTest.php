@@ -420,6 +420,173 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertSame(15.64, $candidate['omnibus_reference_price']);
     }
 
+    public function testPromotionReconciliationRestoresProductWhenMarginRuleNoLongerPasses(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('getPromotionItemsNoLongerApplicable');
+        $method->setAccessible(true);
+
+        $result = $method->invoke($service, [
+            $this->productItem([
+                'id' => 501,
+                'price' => 100.00,
+                'cost_price' => 85.00,
+                'tax_rate' => 20.00,
+            ]),
+        ], 77, [$this->activePromotion([
+            'id' => 77,
+            'discount_percent' => 20.00,
+            'filters' => json_encode(['sku' => 'TEST-123']),
+        ])]);
+
+        $this->assertCount(1, $result['restore']);
+        $this->assertSame([], $result['apply']);
+    }
+
+    public function testPromotionReconciliationKeepsProductWhenCurrentPromotionStillPasses(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('getPromotionItemsNoLongerApplicable');
+        $method->setAccessible(true);
+
+        $result = $method->invoke($service, [
+            $this->productItem([
+                'id' => 502,
+                'price' => 120.00,
+                'cost_price' => 80.00,
+                'tax_rate' => 20.00,
+            ]),
+        ], 77, [$this->activePromotion([
+            'id' => 77,
+            'discount_percent' => 20.00,
+            'filters' => json_encode(['sku' => 'TEST-123']),
+        ])]);
+
+        $this->assertSame([], $result['restore']);
+        $this->assertSame([], $result['apply']);
+    }
+
+    public function testPromotionReconciliationMovesProductToCurrentBestPromotion(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('getPromotionItemsNoLongerApplicable');
+        $method->setAccessible(true);
+
+        $result = $method->invoke($service, [
+            $this->productItem([
+                'id' => 503,
+                'price' => 120.00,
+                'cost_price' => 50.00,
+                'tax_rate' => 20.00,
+            ]),
+        ], 77, [
+            $this->activePromotion([
+                'id' => 77,
+                'discount_percent' => 20.00,
+                'filters' => json_encode(['sku' => 'OTHER-SKU']),
+                'priority' => 10,
+            ]),
+            $this->activePromotion([
+                'id' => 88,
+                'name' => 'Fallback promotion',
+                'custom_field_value' => 'Fallback promotion',
+                'discount_percent' => 10.00,
+                'filters' => json_encode(['sku' => 'TEST-123']),
+                'priority' => 1,
+            ]),
+        ]);
+
+        $this->assertSame([], $result['restore']);
+        $this->assertCount(1, $result['apply']);
+        $this->assertSame(88, (int)$result['apply'][0]['promotion_id']);
+    }
+
+    public function testPromotionSyncRelevantChangesIgnoresMetadataOnlyEdits(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('hasPromotionSyncRelevantChanges');
+        $method->setAccessible(true);
+
+        $existing = $this->activePromotion([
+            'id' => 77,
+            'discount_percent' => 20.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'end_date' => '2026-06-05 10:23:00',
+            'filters' => json_encode(['sku:in' => ['A', 'B']]),
+            'custom_field_value' => 'Promo field',
+            'color' => '#3b82f6',
+            'description' => 'Old description',
+        ]);
+
+        $this->assertFalse($method->invoke($service, $existing, [
+            'status' => 'active',
+            'discount_percent' => 20.00,
+            'start_date' => '2026-05-05T10:23',
+            'end_date' => '2026-06-05 10:23:00',
+            'priority' => 1,
+            'filters' => ['sku:in' => ['B', 'A']],
+            'custom_field_value' => 'Promo field',
+            'name' => 'Renamed promotion',
+            'color' => '#111111',
+            'description' => 'New description',
+        ]));
+    }
+
+    public function testPromotionSyncRelevantChangesDetectsRuleAndFieldChanges(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => null,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => null,
+            'is_price_drop_candidate' => false,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => null,
+        ]));
+
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('hasPromotionSyncRelevantChanges');
+        $method->setAccessible(true);
+
+        $existing = $this->activePromotion([
+            'id' => 77,
+            'discount_percent' => 20.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'end_date' => '2026-06-05 10:23:00',
+            'filters' => json_encode(['sku' => 'TEST-123']),
+            'custom_field_value' => 'Promo field',
+        ]);
+
+        $this->assertTrue($method->invoke($service, $existing, array_replace($existing, ['discount_percent' => 25.00])));
+        $this->assertTrue($method->invoke($service, $existing, array_replace($existing, ['filters' => ['sku' => 'OTHER-SKU']])));
+        $this->assertTrue($method->invoke($service, $existing, array_replace($existing, ['custom_field_value' => 'Changed field'])));
+    }
+
     private function validateAgainstOmnibus(array $dto, array $item, float $promoPrice): array {
         $serviceClass = new ReflectionClass(PromotionService::class);
         $service = $this->createPromotionService($this->createPricingService($dto));
@@ -479,6 +646,22 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
             'inventory_level' => 10,
             'brand_name' => 'Test brand',
             'is_visible' => 1,
+        ];
+    }
+
+    private function activePromotion(array $overrides = []): array {
+        return $overrides + [
+            'id' => 77,
+            'name' => 'Active promotion',
+            'custom_field_value' => 'Active promotion',
+            'discount_percent' => 20.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'end_date' => '2026-06-05 10:23:00',
+            'created_at' => '2026-05-05 10:23:00',
+            'omnibus_terms_updated_at' => '2026-05-05 10:23:00',
+            'priority' => 1,
+            'filters' => json_encode(['sku' => 'TEST-123']),
+            'status' => 'active',
         ];
     }
 

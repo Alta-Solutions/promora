@@ -138,12 +138,19 @@ do {
                     $processedCount
                 );
 
-                $successCount += $results['processed'];
+                $cleanedCount = $results['cleaned'] ?? 0;
+                $successCount += $results['processed'] + $cleanedCount;
                 $errorCount += $results['errors'];
 
                 $batchProcessed = $results['processed'] + $results['errors'];
                 if ($batchProcessed === 0) {
-                    logMsg("Warning: Batch returned 0 items. Stopping loop.");
+                    if ($cleanedCount > 0) {
+                        logMsg("Reconciled {$cleanedCount} existing promotion items. No filter batch items returned.");
+                        $processedCount = $job['total_items'];
+                        $queue->updateProgress($job['id'], $processedCount);
+                    } else {
+                        logMsg("Warning: Batch returned 0 items. Stopping loop.");
+                    }
                     break;
                 }
 
