@@ -30,6 +30,71 @@ function hasProductsCacheTypeColumn(Database $db): bool {
     return $hasType;
 }
 
+function normalizeWorkerProductIds(array $productIds): array {
+    $normalized = [];
+
+    foreach ($productIds as $productId) {
+        if (!is_numeric($productId)) {
+            continue;
+        }
+
+        $productId = (int)$productId;
+        if ($productId > 0) {
+            $normalized[$productId] = true;
+        }
+    }
+
+    $productIds = array_keys($normalized);
+    sort($productIds, SORT_NUMERIC);
+    return $productIds;
+}
+
+function mergeWorkerProductIds(array ...$lists): array {
+    $merged = [];
+
+    foreach ($lists as $list) {
+        foreach (normalizeWorkerProductIds($list) as $productId) {
+            $merged[$productId] = true;
+        }
+    }
+
+    $productIds = array_keys($merged);
+    sort($productIds, SORT_NUMERIC);
+    return $productIds;
+}
+
+function isOmnibusEnabledForStore(Database $db, string $storeHash): bool {
+    $storeConfig = $db->fetchOne(
+        "SELECT enable_omnibus FROM bigcommerce_stores WHERE store_hash = ?",
+        [$storeHash]
+    );
+
+    return !empty($storeConfig['enable_omnibus']);
+}
+
+function queueTargetedOmnibusSyncIfNeeded(Database $db, array $job, array $productIds): void {
+    $productIds = normalizeWorkerProductIds($productIds);
+    if (empty($productIds) || empty($job['store_hash']) || !isOmnibusEnabledForStore($db, $job['store_hash'])) {
+        return;
+    }
+
+    $targetedQueue = new QueueService($job['store_hash']);
+    try {
+        $result = $targetedQueue->createTargetedOmnibusSyncJob($productIds, [
+            'source' => $job['job_type'],
+            'promotion_id' => $job['promotion_id'] ?? null,
+            'source_job_id' => $job['id'] ?? null,
+        ]);
+
+        logMsg(
+            "Targeted Omnibus sync {$result['reason']} for " . count($productIds) .
+            " product(s). Job ID: " . ($result['job_id'] ?? 'n/a')
+        );
+    } catch (\Throwable $e) {
+        logMsg("Unable to queue targeted Omnibus sync: " . $e->getMessage());
+    }
+}
+
 logMsg("--- Worker started ---");
 
 $maxExecutionTime = 55;
@@ -52,6 +117,7 @@ do {
     $processedCount = 0;
     $successCount = 0;
     $errorCount = 0;
+    $omnibusProductIds = [];
 
     try {
         logMsg("Processing Job #{$job['id']} (Type: {$job['job_type']}) for Store: {$job['store_hash']}");
@@ -64,7 +130,12 @@ do {
 
         if ($job['job_type'] === 'cleanup') {
             logMsg("Processing Cleanup Job (Removing all promotions)...");
-            $cleanedCount = $promotionService->cleanupAllProductsBatch();
+            $cleanupResult = $promotionService->cleanupAllProductsBatch();
+            $cleanedCount = (int)($cleanupResult['processed'] ?? 0);
+            $omnibusProductIds = mergeWorkerProductIds(
+                $omnibusProductIds,
+                $cleanupResult['omnibus_product_ids'] ?? []
+            );
             $processedCount = $job['total_items'];
             $successCount = $cleanedCount;
             logMsg("Cleanup finished. Removed {$cleanedCount} items.");
@@ -76,6 +147,10 @@ do {
 
                 $successCount += $results['processed'];
                 $errorCount += $results['errors'];
+                $omnibusProductIds = mergeWorkerProductIds(
+                    $omnibusProductIds,
+                    $results['omnibus_product_ids'] ?? []
+                );
 
                 if ($results['processed'] === 0) {
                     break;
@@ -89,6 +164,39 @@ do {
                 "UPDATE promotions SET status = 'expired' WHERE id = ? AND status = 'active' AND end_date < NOW()",
                 [$job['promotion_id']]
             );
+        } elseif ($job['job_type'] === 'omnibus_sync_products') {
+            $productIds = $queue->extractProductIdsFromPayload($job['payload'] ?? null);
+            logMsg("Processing Targeted Omnibus Sync Job for store {$job['store_hash']}... Products: " . count($productIds));
+
+            if (empty($productIds)) {
+                logMsg("Targeted Omnibus job payload has no valid product IDs.");
+            }
+
+            $omnibusService = new \App\Services\OmnibusSyncService($job['store_hash']);
+
+            while ($processedCount < count($productIds)) {
+                $batchIds = array_slice($productIds, $processedCount, $batchSize);
+                if (empty($batchIds)) {
+                    break;
+                }
+
+                $results = $omnibusService->processBatch($batchIds);
+
+                $successCount += $results['success'] ?? 0;
+                $errorCount += $results['errors'] ?? 0;
+
+                $batchProcessed = $results['processed'] ?? count($batchIds);
+                if ($batchProcessed <= 0) {
+                    $batchProcessed = count($batchIds);
+                }
+
+                $processedCount += $batchProcessed;
+                $queue->updateProgress($job['id'], min($processedCount, count($productIds)));
+
+                if (function_exists('gc_collect_cycles')) {
+                    gc_collect_cycles();
+                }
+            }
         } elseif ($job['job_type'] === 'omnibus_sync') {
             logMsg("Processing Omnibus Sync Job for store {$job['store_hash']}... Total items: {$job['total_items']}");
             $omnibusService = new \App\Services\OmnibusSyncService($job['store_hash']);
@@ -141,6 +249,10 @@ do {
                 $cleanedCount = $results['cleaned'] ?? 0;
                 $successCount += $results['processed'] + $cleanedCount;
                 $errorCount += $results['errors'];
+                $omnibusProductIds = mergeWorkerProductIds(
+                    $omnibusProductIds,
+                    $results['omnibus_product_ids'] ?? []
+                );
 
                 $batchProcessed = $results['processed'] + $results['errors'];
                 if ($batchProcessed === 0) {
@@ -163,7 +275,16 @@ do {
             }
         }
 
+        $finalProcessedCount = (int)($job['total_items'] ?? 0);
+        if ($finalProcessedCount > 0) {
+            $queue->updateProgress($job['id'], $finalProcessedCount);
+        }
+
         $queue->updateJobStatus($job['id'], 'completed');
+
+        if (in_array($job['job_type'], ['sync_promotion', 'cleanup', 'cleanup_single'], true)) {
+            queueTargetedOmnibusSyncIfNeeded($db, $job, $omnibusProductIds);
+        }
 
         $duration = microtime(true) - $jobStartTime;
         $promotionService->logSync(

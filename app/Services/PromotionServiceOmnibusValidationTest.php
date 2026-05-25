@@ -359,6 +359,83 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertLessThanOrEqual($after->getTimestamp(), $referenceAt->getTimestamp());
     }
 
+    public function testEditPreviewDoesNotSkipOmnibusRevalidationForNewMatchingProduct(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => 70.00,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => 70.00,
+            'is_price_drop_candidate' => true,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => 'not_below_30_day_lowest',
+        ]));
+        $promotion = [
+            'id' => 43,
+            'discount_percent' => 10.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'created_at' => '2026-05-06 08:33:26',
+            'omnibus_terms_updated_at' => null,
+            'updated_at' => '2026-05-13 12:00:00',
+            'filters' => '{"brand_id":["444"]}',
+        ];
+        $filters = ['brand_id' => ['444']];
+
+        $this->setPrivateProperty($service, 'promotionModel', $this->promotionModelReturning($promotion));
+        $this->setPrivateProperty($service, 'cacheService', $this->cacheServiceReturning([$this->productItem()]));
+        $this->setPrivateProperty($service, 'db', $this->dbReturningNoPromotionProduct());
+
+        $preview = $service->previewPromotionProducts($filters, 10.00, '2026-05-05T10:23', [
+            'promotion_id' => 43,
+            'discount_percent' => 10.00,
+            'filters' => $filters,
+            'start_date' => '2026-05-05T10:23',
+        ]);
+        $row = $preview['products'][0];
+
+        $this->assertSame(1, $preview['total_invalid_products']);
+        $this->assertFalse($row['will_apply']);
+        $this->assertSame('invalid', $row['omnibus_status']);
+        $this->assertSame('not_below_30_day_lowest', $row['omnibus_invalid_reason']);
+        $this->assertArrayNotHasKey('omnibus_revalidation_skipped', $row);
+    }
+
+    public function testEditPreviewSkipsOmnibusRevalidationForAlreadySyncedProduct(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => 70.00,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => 70.00,
+            'is_price_drop_candidate' => true,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => 'not_below_30_day_lowest',
+        ]));
+        $promotion = [
+            'id' => 43,
+            'discount_percent' => 10.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'created_at' => '2026-05-06 08:33:26',
+            'omnibus_terms_updated_at' => null,
+            'updated_at' => '2026-05-13 12:00:00',
+            'filters' => '{"brand_id":["444"]}',
+        ];
+        $filters = ['brand_id' => ['444']];
+
+        $this->setPrivateProperty($service, 'promotionModel', $this->promotionModelReturning($promotion));
+        $this->setPrivateProperty($service, 'cacheService', $this->cacheServiceReturning([$this->productItem()]));
+        $this->setPrivateProperty($service, 'db', $this->dbReturningSyncedPromotionProduct('2026-05-11 20:55:52'));
+
+        $preview = $service->previewPromotionProducts($filters, 10.00, '2026-05-05T10:23', [
+            'promotion_id' => 43,
+            'discount_percent' => 10.00,
+            'filters' => $filters,
+            'start_date' => '2026-05-05T10:23',
+        ]);
+        $row = $preview['products'][0];
+
+        $this->assertSame(0, $preview['total_invalid_products']);
+        $this->assertTrue($row['will_apply']);
+        $this->assertSame('valid', $row['omnibus_status']);
+        $this->assertTrue($row['omnibus_revalidation_skipped']);
+    }
+
     public function testExistingPromotionProductSkipsRevalidationWhenTermsDidNotChange(): void {
         $pricingService = $this->createPricingService([
             'candidate_omnibus_reference_price' => null,
@@ -837,6 +914,20 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         };
     }
 
+    private function cacheServiceReturning(array $items): object {
+        return new class($items) {
+            private $items;
+
+            public function __construct(array $items) {
+                $this->items = $items;
+            }
+
+            public function getProductsByFilters($filters = [], $limit = null, $offset = 0): array {
+                return $this->items;
+            }
+        };
+    }
+
     private function dbReturningSyncedPromotionProduct(string $syncedAt): object {
         return new class($syncedAt) {
             private $syncedAt;
@@ -847,6 +938,14 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
 
             public function fetchOne($sql, $params = []): array {
                 return ['synced_at' => $this->syncedAt];
+            }
+        };
+    }
+
+    private function dbReturningNoPromotionProduct(): object {
+        return new class {
+            public function fetchOne($sql, $params = []): array {
+                return [];
             }
         };
     }

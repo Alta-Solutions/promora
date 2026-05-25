@@ -132,10 +132,6 @@ public function __construct(Database $db = null) {
         $queue = new QueueService($this->storeHash);
         $jobId = $queue->createJob('cleanup_single', $promotionId, $totalItems > 0 ? $totalItems : 1);
 
-        if ($queueOmnibus) {
-            $this->queueOmnibusSyncJobIfEnabled($queue);
-        }
-
         return ['created' => true, 'job_id' => (int)$jobId, 'total' => $totalItems];
     }
 
@@ -143,7 +139,6 @@ public function __construct(Database $db = null) {
         $queue = new QueueService($this->storeHash);
 
         $this->queueJobForPromotion($queue, $promotionId, $filters);
-        $this->queueOmnibusSyncJobIfEnabled($queue);
     }
 
     private function queueJobForPromotion(QueueService $queue, $promotionId, $filters): void {
@@ -267,7 +262,6 @@ public function __construct(Database $db = null) {
             if ($totalItems > 0 && !$this->findOpenJobByType('cleanup_single') && !$this->findOpenJob('cleanup')) {
                 $queue->createJob('cleanup', null, $totalItems);
                 $jobsCreated++;
-                $this->queueOmnibusSyncJobIfEnabled($queue);
             }
             return ['message' => 'Nema aktivnih promocija. Zakazan posao čišćenja.', 'jobs' => $jobsCreated];
         }
@@ -286,10 +280,6 @@ public function __construct(Database $db = null) {
             } else {
                 $jobsSkipped++;
             }
-        }
-
-        if ($expiredCleanupJobs > 0) {
-            $this->queueOmnibusSyncJobIfEnabled($queue);
         }
 
         return [
@@ -341,7 +331,8 @@ public function __construct(Database $db = null) {
         $debugLog[] = "Mode: LOCAL CACHE (Fast)";
         
         // Update promotion statuses
-        $expiredCleanedCount = $this->updateExpiredPromotions();
+        $expiredCleanupResult = $this->updateExpiredPromotions();
+        $expiredCleanedCount = (int)($expiredCleanupResult['processed'] ?? 0);
         if ($expiredCleanedCount > 0) {
             $debugLog[] = "Cleaned {$expiredCleanedCount} products from expired promotions";
         }
@@ -353,7 +344,8 @@ public function __construct(Database $db = null) {
         
         if (empty($promotions)) {
             $debugLog[] = "No active promotions - cleaning up all promotional products";
-            $cleanedCount = $this->cleanupAllProductsBatch();
+            $cleanupResult = $this->cleanupAllProductsBatch();
+            $cleanedCount = (int)($cleanupResult['processed'] ?? 0);
             $debugLog[] = "Cleaned {$cleanedCount} products";
 
             if (($cleanedCount + $expiredCleanedCount) > 0) {
@@ -486,7 +478,8 @@ public function __construct(Database $db = null) {
         $debugLog[] = "Database records saved/updated in batch.";
         
         // Cleanup expired products (sada će koristiti batch metode)
-        $cleanedCount = $this->cleanupExpiredProductsBatch($productPromotions);
+        $cleanupResult = $this->cleanupExpiredProductsBatch($productPromotions);
+        $cleanedCount = (int)($cleanupResult['processed'] ?? 0);
         $debugLog[] = "Cleaned {$cleanedCount} expired products";
         
         // 🚀 OPTIMIZACIJA: Direktno ažuriranje lokalnog keša (bez API poziva)
@@ -548,19 +541,17 @@ public function __construct(Database $db = null) {
         $discountPercent = $this->validateDiscountPercent($discountPercent);
         $costPriceBlockEnabled = $this->isCostPriceBlockingEnabledFromFilters($filters);
         $manualUnblockedItems = $this->getManualUnblockedItemKeysFromFilters($filters);
-        $skipOmnibusRevalidation = $this->isEditPreviewWithoutOmnibusTermChanges(
-            $context + [
-                'filters' => $filters,
-                'discount_percent' => $discountPercent,
-                'start_date' => $referenceAt,
-            ]
-        );
+        $previewContext = $context + [
+            'filters' => $filters,
+            'discount_percent' => $discountPercent,
+            'start_date' => $referenceAt,
+        ];
+        $existingPreviewPromotion = $this->findPromotionFromPreviewContext($previewContext);
+        $skipOmnibusRevalidation = is_array($existingPreviewPromotion)
+            && !$this->hasPromotionOmnibusTermsChanged($existingPreviewPromotion, $previewContext);
         $omnibusReferenceAt = $this->resolvePreviewOmnibusReferenceAt(
             $referenceAt,
-            $context + [
-                'filters' => $filters,
-                'discount_percent' => $discountPercent,
-            ]
+            $previewContext
         );
         // getProductsByFilters sada vraća i proizvode i varijante
         $items = $this->cacheService->getProductsByFilters($filters);
@@ -569,12 +560,14 @@ public function __construct(Database $db = null) {
         foreach ($items as $item) {
             $item[self::COST_PRICE_BLOCK_ENABLED_ITEM_FLAG] = $costPriceBlockEnabled;
             $item[self::MANUAL_UNBLOCK_ITEM_FLAG] = $this->isItemManuallyUnblocked($item, $manualUnblockedItems);
+            $skipItemOmnibusRevalidation = $skipOmnibusRevalidation
+                && $this->isExistingPromotionProductCurrentForTerms($item, $existingPreviewPromotion);
             $row = $this->buildPromotionPreviewRow(
                 $item,
                 $discountPercent,
                 $omnibusReferenceAt,
                 true,
-                $skipOmnibusRevalidation,
+                $skipItemOmnibusRevalidation,
                 !empty($context['promotion_id'])
             );
             if ($row !== null) {
@@ -629,9 +622,10 @@ public function __construct(Database $db = null) {
         }
     }
     
-    private function updateExpiredPromotions() {
+    private function updateExpiredPromotions(): array {
         $now = date('Y-m-d H:i:s');
         $cleanedProductsCount = 0;
+        $omnibusProductIds = [];
         
         $expiredPromotions = $this->db->fetchAll(
             "SELECT id, name FROM promotions WHERE store_hash = ? AND status = 'active' AND end_date < ?",
@@ -651,12 +645,15 @@ public function __construct(Database $db = null) {
 
                 // Batch uklanjanje sale_price (postojeće)
                 [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($items);
-                if (!empty($productUpdates)) {
-                    $this->api->batchUpdateProducts($productUpdates);
-                }
-                if (!empty($variantUpdates)) {
-                    $this->api->batchUpdateVariants($variantUpdates);
-                }
+                $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
+                $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
+                $omnibusProductIds = $this->mergeProductIdLists(
+                    $omnibusProductIds,
+                    $this->extractProductIdsForSuccessfulRestoreUpdates(
+                        array_merge($productUpdates, $variantUpdates),
+                        array_merge($productResults, $variantResults)
+                    )
+                );
                 if (!empty($cacheUpdates)) {
                     $this->cacheService->updatePriceCacheDirectly($cacheUpdates);
                 }
@@ -679,17 +676,20 @@ public function __construct(Database $db = null) {
             $cleanedProductsCount = count(array_filter($cleanResults, fn($r) => $r['success']));
         }
         
-        return $cleanedProductsCount;
+        return [
+            'processed' => $cleanedProductsCount,
+            'omnibus_product_ids' => $omnibusProductIds,
+        ];
     }
     
-    public function cleanupAllProductsBatch() {
+    public function cleanupAllProductsBatch(): array {
         $allProducts = $this->fetchPromotionProductsWithCachePrice(
             "pp.store_hash = ?",
             [$this->storeHash]
         );
         
         if (empty($allProducts)) {
-            return 0;
+            return ['processed' => 0, 'omnibus_product_ids' => []];
         }
         
         [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($allProducts);
@@ -715,10 +715,16 @@ public function __construct(Database $db = null) {
             $this->db->query("DELETE FROM promotion_products WHERE store_hash = ?", [$this->storeHash]);
         }
         
-        return $cleanedCount;
+        return [
+            'processed' => $cleanedCount,
+            'omnibus_product_ids' => $this->extractProductIdsForSuccessfulRestoreUpdates(
+                array_merge($productUpdates, $variantUpdates),
+                array_merge($productResults, $variantResults)
+            ),
+        ];
     }
     
-    private function cleanupExpiredProductsBatch($activeProducts) {
+    private function cleanupExpiredProductsBatch($activeProducts): array {
         $activeItemKeys = array_fill_keys(array_keys($activeProducts), true);
         $allExistingItems = $this->fetchPromotionProductsWithCachePrice(
             "pp.store_hash = ?",
@@ -730,7 +736,7 @@ public function __construct(Database $db = null) {
         }));
         
         if (empty($toClean)) {
-            return 0;
+            return ['processed' => 0, 'omnibus_product_ids' => []];
         }
         
         [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($toClean);
@@ -759,7 +765,13 @@ public function __construct(Database $db = null) {
             array_merge([$this->storeHash], $dbIdsToDelete)
         );
         
-        return $cleanedCount;
+        return [
+            'processed' => $cleanedCount,
+            'omnibus_product_ids' => $this->extractProductIdsForSuccessfulRestoreUpdates(
+                array_merge($productUpdates, $variantUpdates),
+                array_merge($productResults, $variantResults)
+            ),
+        ];
     }
 
     /**
@@ -775,7 +787,7 @@ public function __construct(Database $db = null) {
         );
         
         if (empty($items)) {
-            return ['processed' => 0, 'errors' => 0];
+            return ['processed' => 0, 'errors' => 0, 'omnibus_product_ids' => []];
         }
         
         $productIds = array_column($items, 'product_id');
@@ -795,6 +807,10 @@ public function __construct(Database $db = null) {
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
         $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
         $errors = count(array_filter($productResults, fn($r) => !$r['success'])) + count(array_filter($variantResults, fn($r) => !$r['success']));
+        $omnibusProductIds = $this->extractProductIdsForSuccessfulRestoreUpdates(
+            array_merge($productUpdates, $variantUpdates),
+            array_merge($productResults, $variantResults)
+        );
 
         // 4. Ukloni Custom Fields (Batch)
         $productsToClearFields = [];
@@ -821,7 +837,8 @@ public function __construct(Database $db = null) {
         
         return [
             'processed' => count($items),
-            'errors' => $errors
+            'errors' => $errors,
+            'omnibus_product_ids' => $omnibusProductIds,
         ];
     }
     
@@ -996,10 +1013,15 @@ public function __construct(Database $db = null) {
 
         $products = $this->cacheService->getProductsByFilters(json_decode($promotion['filters'], true));
         $activePromotions = $this->promotionModel->findActive();
-        $reconciledCount = $this->reconcilePromotionProductsForPromotion($promotion, $activePromotions);
+        $reconciliationResult = $this->reconcilePromotionProductsForPromotion($promotion, $activePromotions);
+        $reconciledCount = $reconciliationResult['changed'] ?? 0;
         
         $stats = $this->processProductsBatch($products, $promotionId);
         $stats['cleaned'] = $reconciledCount;
+        $stats['omnibus_product_ids'] = $this->mergeProductIdLists(
+            $stats['omnibus_product_ids'] ?? [],
+            $reconciliationResult['omnibus_product_ids'] ?? []
+        );
 
         $duration = round(microtime(true) - $startTime, 2);
         
@@ -1014,14 +1036,20 @@ public function __construct(Database $db = null) {
 
         $filters = json_decode($promotion['filters'], true);
         $activePromotions = $this->promotionModel->findActive();
-        $reconciledCount = $offset === 0
+        $reconciliationResult = $offset === 0
             ? $this->reconcilePromotionProductsForPromotion($promotion, $activePromotions)
-            : 0;
+            : ['changed' => 0, 'omnibus_product_ids' => []];
+        $reconciledCount = $reconciliationResult['changed'] ?? 0;
         
         // 1. Dohvati proizvode i varijante
         $items = $this->cacheService->getProductsByFilters($filters, $limit, $offset);
         if (empty($items)) {
-            return ['processed' => 0, 'errors' => 0, 'cleaned' => $reconciledCount];
+            return [
+                'processed' => 0,
+                'errors' => 0,
+                'cleaned' => $reconciledCount,
+                'omnibus_product_ids' => $reconciliationResult['omnibus_product_ids'] ?? [],
+            ];
         }
 
         $productPromotions = [];
@@ -1062,6 +1090,7 @@ public function __construct(Database $db = null) {
                 'processed' => 0, 
                 'errors' => count($items),
                 'cleaned' => $reconciledCount,
+                'omnibus_product_ids' => $reconciliationResult['omnibus_product_ids'] ?? [],
             ];
         }
         // 3. Razdvajanje ažuriranja za proizvode i za varijante
@@ -1071,12 +1100,16 @@ public function __construct(Database $db = null) {
             'processed' => $applyResults['processed'],
             'errors' => count($items) - $applyResults['processed'],
             'cleaned' => $reconciledCount,
+            'omnibus_product_ids' => $this->mergeProductIdLists(
+                $applyResults['omnibus_product_ids'] ?? [],
+                $reconciliationResult['omnibus_product_ids'] ?? []
+            ),
         ];
     }
 
     private function applyPromotionCandidatesBatch(array $productPromotions, array $sourceItems = []): array {
         if (empty($productPromotions)) {
-            return ['processed' => 0, 'errors' => 0, 'applied' => []];
+            return ['processed' => 0, 'errors' => 0, 'applied' => [], 'omnibus_product_ids' => []];
         }
 
         $productUpdates = [];
@@ -1102,7 +1135,7 @@ public function __construct(Database $db = null) {
         $appliedPromotions = $this->filterPromotionsWithSuccessfulPriceUpdates($productPromotions, $priceResults);
 
         if (empty($appliedPromotions)) {
-            return ['processed' => 0, 'errors' => count($productPromotions), 'applied' => []];
+            return ['processed' => 0, 'errors' => count($productPromotions), 'applied' => [], 'omnibus_product_ids' => []];
         }
 
         $existingFieldsMap = $this->buildExistingFieldsMap($sourceItems);
@@ -1133,6 +1166,7 @@ public function __construct(Database $db = null) {
             'processed' => count($appliedPromotions),
             'errors' => count($productPromotions) - count($appliedPromotions),
             'applied' => $appliedPromotions,
+            'omnibus_product_ids' => $this->extractUniqueProductIds($appliedPromotions),
         ];
     }
 
@@ -1172,10 +1206,10 @@ public function __construct(Database $db = null) {
         return array_column($rows, 'custom_field_id', 'product_id');
     }
 
-    private function reconcilePromotionProductsForPromotion(array $promotion, array $activePromotions): int {
+    private function reconcilePromotionProductsForPromotion(array $promotion, array $activePromotions): array {
         $promotionId = (int)($promotion['id'] ?? 0);
         if ($promotionId <= 0) {
-            return 0;
+            return ['changed' => 0, 'omnibus_product_ids' => []];
         }
 
         $existingItems = $this->fetchPromotionProductsWithCachePrice(
@@ -1184,22 +1218,32 @@ public function __construct(Database $db = null) {
         );
 
         if (empty($existingItems)) {
-            return 0;
+            return ['changed' => 0, 'omnibus_product_ids' => []];
         }
 
         $reconciliation = $this->getPromotionItemsNoLongerApplicable($existingItems, $promotionId, $activePromotions);
         $changedCount = 0;
+        $omnibusProductIds = [];
 
         if (!empty($reconciliation['apply'])) {
             $applyResults = $this->applyPromotionCandidatesBatch($reconciliation['apply'], $existingItems);
             $changedCount += $applyResults['processed'];
+            $omnibusProductIds = $this->mergeProductIdLists(
+                $omnibusProductIds,
+                $applyResults['omnibus_product_ids'] ?? []
+            );
         }
 
         if (!empty($reconciliation['restore'])) {
-            $changedCount += $this->cleanupPromotionProductItems($reconciliation['restore']);
+            $cleanupResults = $this->cleanupPromotionProductItems($reconciliation['restore']);
+            $changedCount += $cleanupResults['processed'];
+            $omnibusProductIds = $this->mergeProductIdLists(
+                $omnibusProductIds,
+                $cleanupResults['omnibus_product_ids'] ?? []
+            );
         }
 
-        return $changedCount;
+        return ['changed' => $changedCount, 'omnibus_product_ids' => $omnibusProductIds];
     }
 
     private function getPromotionItemsNoLongerApplicable(array $items, int $promotionId, array $activePromotions): array {
@@ -1228,9 +1272,9 @@ public function __construct(Database $db = null) {
         ];
     }
 
-    private function cleanupPromotionProductItems(array $items): int {
+    private function cleanupPromotionProductItems(array $items): array {
         if (empty($items)) {
-            return 0;
+            return ['processed' => 0, 'omnibus_product_ids' => []];
         }
 
         [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($items);
@@ -1259,12 +1303,19 @@ public function __construct(Database $db = null) {
             );
         }
 
-        return $cleanedCount;
+        return [
+            'processed' => $cleanedCount,
+            'omnibus_product_ids' => $this->extractProductIdsForSuccessfulRestoreUpdates(
+                array_merge($productUpdates, $variantUpdates),
+                array_merge($productResults, $variantResults)
+            ),
+        ];
     }
 
     private function processProductsBatch($products, $specificPromoId = null) {
         $synced = 0;
         $errors = 0;
+        $omnibusProductIds = [];
         
         // Dohvati sve trenutno aktivne promocije za poređenje prioriteta
         $activePromotions = $this->promotionModel->findActive();
@@ -1278,9 +1329,17 @@ public function __construct(Database $db = null) {
                     // Primeni cenu i custom field
                     $this->applyPromotionToProduct($product, $bestPromo);
                     $synced++;
+                    $omnibusProductIds = $this->mergeProductIdLists(
+                        $omnibusProductIds,
+                        [(int)$product['product_id']]
+                    );
                 } else {
                     // Ako proizvod više ne upada ni u jednu promociju, vrati originalnu cenu
                     $this->removePromotionFromProduct($product);
+                    $omnibusProductIds = $this->mergeProductIdLists(
+                        $omnibusProductIds,
+                        [(int)$product['product_id']]
+                    );
                 }
             } catch (\Exception $e) {
                 $errors++;
@@ -1288,7 +1347,7 @@ public function __construct(Database $db = null) {
             }
         }
 
-        return ['synced' => $synced, 'errors' => $errors];
+        return ['synced' => $synced, 'errors' => $errors, 'omnibus_product_ids' => $omnibusProductIds];
     }
 
     /**
@@ -2407,6 +2466,69 @@ public function __construct(Database $db = null) {
         }
 
         return array_values($updates);
+    }
+
+    private function extractUniqueProductIds(array $items): array {
+        $productIds = [];
+
+        foreach ($items as $item) {
+            $productId = is_array($item) ? ($item['product_id'] ?? null) : $item;
+            if (!is_numeric($productId)) {
+                continue;
+            }
+
+            $productId = (int)$productId;
+            if ($productId > 0) {
+                $productIds[$productId] = true;
+            }
+        }
+
+        $productIds = array_keys($productIds);
+        sort($productIds, SORT_NUMERIC);
+        return $productIds;
+    }
+
+    private function mergeProductIdLists(array ...$lists): array {
+        $merged = [];
+
+        foreach ($lists as $list) {
+            foreach ($this->extractUniqueProductIds($list) as $productId) {
+                $merged[$productId] = true;
+            }
+        }
+
+        $productIds = array_keys($merged);
+        sort($productIds, SORT_NUMERIC);
+        return $productIds;
+    }
+
+    private function extractProductIdsForSuccessfulRestoreUpdates(array $updates, array $priceResults): array {
+        $successfulKeys = $this->getSuccessfulPriceUpdateKeys($priceResults);
+        if (empty($successfulKeys)) {
+            return [];
+        }
+
+        $productIds = [];
+        foreach ($updates as $update) {
+            $productId = (int)($update['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $variantId = $update['id'] ?? ($update['variant_id'] ?? null);
+            $key = $this->getPromotionItemKey(
+                $productId,
+                $variantId !== null && $variantId !== '' ? (int)$variantId : null
+            );
+
+            if (isset($successfulKeys[$key])) {
+                $productIds[$productId] = true;
+            }
+        }
+
+        $productIds = array_keys($productIds);
+        sort($productIds, SORT_NUMERIC);
+        return $productIds;
     }
 
     private function buildPromotionCachePriceUpdates(array $promotions): array {

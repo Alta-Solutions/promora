@@ -42,6 +42,11 @@ The sync flow calculates best promotion candidates, updates BigCommerce prices
 and custom fields, updates `products_cache`, logs effective price changes, and
 records rows in `promotion_products`.
 
+When a queued promotion sync or cleanup changes `sale_price`, the worker queues
+`omnibus_sync_products` with only the affected parent product IDs. This keeps the
+`lowest_price_30d` custom field current without requiring a full-store Omnibus
+sync after every promotion job.
+
 ## Cleanup
 
 Cleanup jobs restore prices/custom fields for products no longer covered by a
@@ -64,6 +69,8 @@ writes so the app does not need read-after-write API calls.
 
 Manual Omnibus sync creates an `omnibus_sync` job. The worker runs
 `OmnibusSyncService::processBatch()` over parent products from `products_cache`.
+Targeted jobs use `omnibus_sync_products` and pass product IDs from the job
+payload to the same service method.
 
 The service aggregates reference prices across variants when needed and delegates
 BigCommerce custom field writes to `OmnibusFieldService`.

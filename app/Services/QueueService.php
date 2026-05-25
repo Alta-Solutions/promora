@@ -6,6 +6,7 @@ use App\Models\Database;
 class QueueService {
     private $db;
     private $storeHash;
+    private $syncJobsPayloadColumnEnsured = false;
     
     // Konstanta: Maksimalan broj pokušaja
     private const MAX_RETRIES = 3; 
@@ -106,6 +107,99 @@ class QueueService {
         }
     }
 
+    public function createTargetedOmnibusSyncJob(array $productIds, array $meta = []): array {
+        $storeHash = $this->requireStoreHash('create targeted Omnibus sync job');
+        $productIds = $this->normalizeProductIds($productIds);
+
+        if (empty($productIds)) {
+            return [
+                'created' => false,
+                'job_id' => null,
+                'reason' => 'no_products',
+                'message' => 'No product IDs were provided for targeted Omnibus sync.',
+            ];
+        }
+
+        $lockName = 'omnibus_sync_products:' . $storeHash;
+        $lockAcquired = $this->acquireLock($lockName, 5);
+
+        if (!$lockAcquired) {
+            return [
+                'created' => false,
+                'job_id' => null,
+                'reason' => 'lock_timeout',
+                'message' => 'Nije moguce rezervisati targeted Omnibus sync u ovom trenutku.',
+            ];
+        }
+
+        try {
+            $this->ensureSyncJobsPayloadColumn();
+
+            $pendingFullJob = $this->findJobByTypeAndStatus('omnibus_sync', 'pending');
+            if ($pendingFullJob) {
+                return [
+                    'created' => false,
+                    'job_id' => (int)$pendingFullJob['id'],
+                    'reason' => 'covered_by_full_sync',
+                    'message' => 'Pending full Omnibus sync already covers these products.',
+                    'job' => $pendingFullJob,
+                ];
+            }
+
+            $pendingTargetedJob = $this->findJobByTypeAndStatus('omnibus_sync_products', 'pending');
+            if ($pendingTargetedJob) {
+                $existingPayload = $this->decodePayload($pendingTargetedJob['payload'] ?? null);
+                $mergedProductIds = $this->normalizeProductIds(array_merge(
+                    $existingPayload['product_ids'] ?? [],
+                    $productIds
+                ));
+                $payload = $this->buildTargetedOmnibusPayload(
+                    $mergedProductIds,
+                    $meta + [
+                        'merged_from_job_id' => (int)$pendingTargetedJob['id'],
+                    ]
+                );
+
+                $this->db->query(
+                    "UPDATE sync_jobs
+                     SET payload = ?, total_items = ?, updated_at = NOW()
+                     WHERE id = ?",
+                    [json_encode($payload, JSON_UNESCAPED_SLASHES), count($mergedProductIds), (int)$pendingTargetedJob['id']]
+                );
+
+                return [
+                    'created' => false,
+                    'job_id' => (int)$pendingTargetedJob['id'],
+                    'reason' => 'merged',
+                    'message' => 'Targeted Omnibus sync products were merged into an existing pending job.',
+                    'product_ids' => $mergedProductIds,
+                ];
+            }
+
+            $payload = $this->buildTargetedOmnibusPayload($productIds, $meta);
+            $this->db->query(
+                "INSERT INTO sync_jobs (store_hash, job_type, promotion_id, payload, total_items, status, attempts, created_at)
+                 VALUES (?, 'omnibus_sync_products', ?, ?, ?, 'pending', 0, NOW())",
+                [
+                    $storeHash,
+                    isset($meta['promotion_id']) ? (int)$meta['promotion_id'] : null,
+                    json_encode($payload, JSON_UNESCAPED_SLASHES),
+                    count($productIds),
+                ]
+            );
+
+            return [
+                'created' => true,
+                'job_id' => (int)$this->db->lastInsertId(),
+                'reason' => 'created',
+                'message' => 'Targeted Omnibus sync job je uspesno zakazan.',
+                'product_ids' => $productIds,
+            ];
+        } finally {
+            $this->releaseLock($lockName);
+        }
+    }
+
     private function requireStoreHash(string $operation): string {
         $storeHash = trim((string)$this->storeHash);
 
@@ -180,6 +274,11 @@ class QueueService {
              LIMIT 1",
             [$this->storeHash, $jobType]
         );
+    }
+
+    public function extractProductIdsFromPayload($payload): array {
+        $payload = $this->decodePayload($payload);
+        return $this->normalizeProductIds($payload['product_ids'] ?? []);
     }
 
     public function purgeOldJobs(int $completedRetentionDays = 14, int $failedRetentionDays = 90): array {
@@ -263,6 +362,19 @@ class QueueService {
         );
     }
 
+    private function findJobByTypeAndStatus(string $jobType, string $status) {
+        return $this->db->fetchOne(
+            "SELECT *
+             FROM sync_jobs
+             WHERE store_hash = ?
+               AND job_type = ?
+               AND status = ?
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1",
+            [$this->storeHash, $jobType, $status]
+        );
+    }
+
     private function findOpenJob($jobType, $promotionId = null) {
         return $this->db->fetchOne(
             "SELECT *
@@ -288,5 +400,67 @@ class QueueService {
         } catch (\Throwable $e) {
             // Lock cleanup failure should not break the main flow.
         }
+    }
+
+    private function ensureSyncJobsPayloadColumn(): void {
+        if ($this->syncJobsPayloadColumnEnsured) {
+            return;
+        }
+
+        $column = $this->db->fetchOne("SHOW COLUMNS FROM sync_jobs LIKE 'payload'");
+        if (!$column) {
+            $this->db->query("ALTER TABLE sync_jobs ADD COLUMN payload LONGTEXT NULL AFTER promotion_id");
+        }
+
+        $this->syncJobsPayloadColumnEnsured = true;
+    }
+
+    private function normalizeProductIds(array $productIds): array {
+        $normalized = [];
+        foreach ($productIds as $productId) {
+            if (!is_numeric($productId)) {
+                continue;
+            }
+
+            $productId = (int)$productId;
+            if ($productId > 0) {
+                $normalized[$productId] = true;
+            }
+        }
+
+        $productIds = array_keys($normalized);
+        sort($productIds, SORT_NUMERIC);
+        return $productIds;
+    }
+
+    private function buildTargetedOmnibusPayload(array $productIds, array $meta): array {
+        $payload = [
+            'product_ids' => $this->normalizeProductIds($productIds),
+        ];
+
+        foreach (['source', 'promotion_id', 'source_job_id', 'merged_from_job_id'] as $key) {
+            if (!array_key_exists($key, $meta) || $meta[$key] === null || $meta[$key] === '') {
+                continue;
+            }
+
+            $payload[$key] = in_array($key, ['promotion_id', 'source_job_id', 'merged_from_job_id'], true)
+                ? (int)$meta[$key]
+                : (string)$meta[$key];
+        }
+
+        return $payload;
+    }
+
+    private function decodePayload($payload): array {
+        if (is_array($payload)) {
+            return $payload;
+        }
+
+        if (!is_string($payload) || trim($payload) === '') {
+            return [];
+        }
+
+        $decoded = json_decode($payload, true);
+        return is_array($decoded) ? $decoded : [];
     }
 }

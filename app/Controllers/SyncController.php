@@ -133,17 +133,26 @@ class SyncController {
             return;
         }
 
-        $percentage = ($job['total_items'] > 0) 
-            ? round(($job['processed_items'] / $job['total_items']) * 100) 
+        $total = max(0, (int)($job['total_items'] ?? 0));
+        $processed = max(0, (int)($job['processed_items'] ?? 0));
+
+        if ($job['status'] === 'completed' && $total > 0) {
+            $processed = $total;
+        } elseif ($total > 0) {
+            $processed = min($processed, $total);
+        }
+
+        $percentage = ($total > 0)
+            ? min(100, max(0, round(($processed / $total) * 100)))
             : 0;
 
         echo json_encode([
             'active' => true,
-            'job_id' => $job['id'],
-            'type' => $job['job_type'],
-            'status' => $job['status'],
-            'processed' => $job['processed_items'],
-            'total' => $job['total_items'],
+            'job_id' => (int)$job['id'],
+            'type' => (string)$job['job_type'],
+            'status' => (string)$job['status'],
+            'processed' => $processed,
+            'total' => $total,
             'percentage' => $percentage
         ]);
     }
