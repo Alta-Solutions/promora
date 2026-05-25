@@ -84,6 +84,15 @@ Common `job_type` values:
 - `cleanup`
 - `cleanup_single`
 - `omnibus_sync`
+- `omnibus_sync_products`
+
+`payload` is nullable JSON text used by targeted jobs. For
+`omnibus_sync_products`, it contains normalized parent product IDs and source
+metadata, for example:
+
+```json
+{"product_ids":[10625,11839],"source":"sync_promotion","promotion_id":113,"source_job_id":9775}
+```
 
 ### `sync_log`
 

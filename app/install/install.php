@@ -147,6 +147,7 @@ try {
             `store_hash` VARCHAR(255) NOT NULL,
             `job_type` VARCHAR(50) NOT NULL,
             `promotion_id` INT NULL,
+            `payload` LONGTEXT NULL,
             `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
             `total_items` INT NOT NULL DEFAULT 0,
             `processed_items` INT NOT NULL DEFAULT 0,

@@ -185,6 +185,25 @@ function startPolling() {
     syncInterval = setInterval(checkSyncStatus, 3000);
 }
 
+function clampPercent(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return 0;
+    return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function getSyncJobTypeLabel(type) {
+    const labels = {
+        sync_promotion: appT('dashboard.job_type_sync_promotion'),
+        single_sync: appT('dashboard.job_type_sync_promotion'),
+        cleanup: appT('dashboard.job_type_cleanup'),
+        cleanup_single: appT('dashboard.job_type_cleanup_single'),
+        omnibus_sync: appT('dashboard.job_type_omnibus_sync'),
+        omnibus_sync_products: appT('dashboard.job_type_omnibus_sync_products')
+    };
+
+    return labels[type] || appT('dashboard.job_type_unknown');
+}
+
 async function checkSyncStatus() {
     try {
         const response = await fetch('?route=sync&action=getActiveJobStatus');
@@ -194,13 +213,16 @@ async function checkSyncStatus() {
         if (data.active) {
             container.style.display = 'block';
 
-            let percent = 0;
-            if (data.total > 0) {
-                percent = Math.round((data.processed / data.total) * 100);
-            }
+            const total = Math.max(0, Number.parseInt(data.total, 10) || 0);
+            const processed = Math.max(0, Math.min(Number.parseInt(data.processed, 10) || 0, total || Number.MAX_SAFE_INTEGER));
+            const percent = clampPercent(
+                data.percentage !== undefined && data.percentage !== null && Number.isFinite(Number(data.percentage))
+                    ? data.percentage
+                    : (total > 0 ? (processed / total) * 100 : 0)
+            );
 
             document.getElementById('sync-bar').style.width = percent + '%';
-            document.getElementById('sync-stats').textContent = `${data.processed} / ${data.total} (${percent}%)`;
+            document.getElementById('sync-stats').textContent = `${processed} / ${total} (${percent}%)`;
 
             let statusText = appT('dashboard.sync_in_progress');
             let barColor = '#3b82f6';
@@ -216,7 +238,7 @@ async function checkSyncStatus() {
                 barColor = '#10b981';
             }
 
-            document.getElementById('sync-title').textContent = statusText;
+            document.getElementById('sync-title').textContent = `${statusText} · ${getSyncJobTypeLabel(data.type)}`;
             document.getElementById('sync-bar').style.background = barColor;
         } else {
             container.style.display = 'none';
