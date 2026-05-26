@@ -15,7 +15,6 @@ class PromotionService {
     private $omnibusPricingService;
     private $storeConfigCache = null;
     private const API_PRODUCT_LIMIT = 250;
-    private const OMNIBUS_FIELD_NAME = 'lowest_price_30d';
     private const BLOCK_BELOW_COST_PRICE_FILTER_KEY = '_block_below_cost_price';
     private const MANUAL_UNBLOCK_FILTER_KEY = '_manual_unblocked_items';
     private const COST_PRICE_BLOCK_ENABLED_ITEM_FLAG = '_cost_price_block_enabled';
@@ -419,22 +418,7 @@ public function __construct(Database $db = null) {
         }
         
         // BATCH UPDATE: Apply sale prices to BigCommerce
-        $productUpdates = [];
-        $variantUpdates = [];
-        foreach ($productPromotions as $promo) {
-            if (!empty($promo['variant_id'])) {
-                $variantUpdates[] = [
-                    'product_id' => $promo['product_id'],
-                    'id' => $promo['variant_id'],
-                    'sale_price' => $promo['promo_price']
-                ];
-            } else {
-                $productUpdates[] = [
-                    'product_id' => $promo['product_id'],
-                    'sale_price' => $promo['promo_price']
-                ];
-            }
-        }
+        [$productUpdates, $variantUpdates] = $this->buildPriceUpdateBatches($productPromotions);
         
         $productPriceResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
         $variantPriceResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
@@ -567,8 +551,7 @@ public function __construct(Database $db = null) {
                 $discountPercent,
                 $omnibusReferenceAt,
                 true,
-                $skipItemOmnibusRevalidation,
-                !empty($context['promotion_id'])
+                $skipItemOmnibusRevalidation
             );
             if ($row !== null) {
                 $preview[] = $row;
@@ -791,17 +774,7 @@ public function __construct(Database $db = null) {
         }
         
         $productIds = array_column($items, 'product_id');
-        $productUpdates = [];
-        $variantUpdates = [];
-
-        // 2. Pripremi uklanjanje sale_price
-        foreach ($items as $item) {
-            if ($item['variant_id']) {
-                $variantUpdates[] = ['product_id' => $item['product_id'], 'id' => $item['variant_id'], 'sale_price' => null];
-            } else {
-                $productUpdates[] = ['product_id' => $item['product_id'], 'sale_price' => null];
-            }
-        }
+        [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($items);
         
         // 3. Ukloni sale_price na BigCommerce
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
@@ -829,10 +802,6 @@ public function __construct(Database $db = null) {
             $this->customFieldService->batchRemovePromotionFields($productsToClearFields);
         }
 
-        $cacheUpdates = [];
-        foreach(array_merge($productUpdates, $variantUpdates) as $upd) {
-            $cacheUpdates[] = ['product_id' => $upd['product_id'], 'variant_id' => $upd['id'] ?? null, 'sale_price' => $upd['sale_price']];
-        }
         $this->cacheService->updatePriceCacheDirectly($cacheUpdates);
         
         return [
@@ -1112,22 +1081,7 @@ public function __construct(Database $db = null) {
             return ['processed' => 0, 'errors' => 0, 'applied' => [], 'omnibus_product_ids' => []];
         }
 
-        $productUpdates = [];
-        $variantUpdates = [];
-        foreach ($productPromotions as $promo) {
-            if (!empty($promo['variant_id'])) {
-                $variantUpdates[] = [
-                    'product_id' => $promo['product_id'],
-                    'id' => $promo['variant_id'],
-                    'sale_price' => $promo['promo_price'],
-                ];
-            } else {
-                $productUpdates[] = [
-                    'product_id' => $promo['product_id'],
-                    'sale_price' => $promo['promo_price'],
-                ];
-            }
-        }
+        [$productUpdates, $variantUpdates] = $this->buildPriceUpdateBatches($productPromotions);
 
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
         $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
@@ -1397,8 +1351,7 @@ public function __construct(Database $db = null) {
         float $discountPercent,
         $referenceAt = null,
         bool $referenceAtResolved = false,
-        bool $skipOmnibusRevalidation = false,
-        bool $allowExistingFieldRepair = false
+        bool $skipOmnibusRevalidation = false
     ): ?array {
         if (empty($item['price']) || (float)$item['price'] <= 0) {
             return null;
@@ -1417,11 +1370,6 @@ public function __construct(Database $db = null) {
         );
         if ($skipOmnibusRevalidation) {
             $omnibus = $this->markOmnibusRevalidationSkipped($omnibus);
-        } elseif ($allowExistingFieldRepair && empty($omnibus['will_apply'])) {
-            $existingReference = $this->getExistingOmnibusFieldRepairReference($item, $promoPrice);
-            if ($existingReference !== null) {
-                $omnibus = $this->markOmnibusExistingFieldRepairAllowed($omnibus, $existingReference);
-            }
         }
         $validation = $this->applyCostPriceGuard($omnibus, $item, $promoPrice);
 
@@ -1469,11 +1417,6 @@ public function __construct(Database $db = null) {
             && $this->isExistingPromotionProductCurrentForTerms($product, $promotion)
         ) {
             $omnibus = $this->markOmnibusRevalidationSkipped($omnibus);
-        } elseif (empty($omnibus['will_apply'])) {
-            $existingReference = $this->getExistingOmnibusFieldRepairReference($product, $promoPrice);
-            if ($existingReference !== null) {
-                $omnibus = $this->markOmnibusExistingFieldRepairAllowed($omnibus, $existingReference);
-            }
         }
         $validation = $this->applyCostPriceGuard($omnibus, $product, $promoPrice);
 
@@ -1899,94 +1842,6 @@ public function __construct(Database $db = null) {
         $omnibus['omnibus_revalidation_skipped'] = true;
 
         return $omnibus;
-    }
-
-    private function markOmnibusExistingFieldRepairAllowed(array $omnibus, float $referencePrice): array {
-        $omnibus['lowest_price_30d'] = $referencePrice;
-        $omnibus['omnibus_reference_price'] = $referencePrice;
-        $omnibus['omnibus_valid'] = true;
-        $omnibus['will_apply'] = true;
-        $omnibus['omnibus_status'] = 'valid';
-        $omnibus['omnibus_warning'] = '';
-        $omnibus['omnibus_invalid_reason'] = null;
-        $omnibus['omnibus_existing_field_repair_allowed'] = true;
-
-        return $omnibus;
-    }
-
-    private function getExistingOmnibusFieldRepairReference(array $product, float $promoPrice): ?float {
-        $variantId = isset($product['variant_id']) && $product['variant_id'] !== null
-            ? (int)$product['variant_id']
-            : null;
-        $referencePrice = $this->extractExistingOmnibusFieldPrice($product['custom_fields'] ?? null, $variantId);
-        if ($referencePrice === null || $referencePrice <= 0) {
-            return null;
-        }
-
-        return $this->isPromoPriceBelowOmnibusReference($promoPrice, $referencePrice)
-            ? $referencePrice
-            : null;
-    }
-
-    private function extractExistingOmnibusFieldPrice($rawFields, ?int $variantId = null): ?float {
-        $fields = is_string($rawFields) ? json_decode($rawFields, true) : $rawFields;
-        if (!is_array($fields)) {
-            return null;
-        }
-
-        foreach ($fields as $field) {
-            if (!is_array($field) || ($field['name'] ?? null) !== self::OMNIBUS_FIELD_NAME) {
-                continue;
-            }
-
-            return $this->parseStoredPriceValue($field['value'] ?? null, $variantId);
-        }
-
-        return null;
-    }
-
-    private function parseStoredPriceValue($value, ?int $variantId = null): ?float {
-        if (is_int($value) || is_float($value)) {
-            return (float)$value;
-        }
-
-        if (!is_string($value)) {
-            return null;
-        }
-
-        $value = trim($value);
-        if ($value === '') {
-            return null;
-        }
-
-        if ($value[0] === '{') {
-            $decoded = json_decode($value, true);
-            if (!is_array($decoded)) {
-                return null;
-            }
-
-            if ($variantId === null) {
-                return null;
-            }
-
-            $variantKey = (string)$variantId;
-            $variantValues = $decoded['values'] ?? $decoded;
-            if (!is_array($variantValues) || !array_key_exists($variantKey, $variantValues)) {
-                return null;
-            }
-
-            return $this->parseStoredPriceValue($variantValues[$variantKey], null);
-        }
-
-        if (is_numeric($value)) {
-            return (float)$value;
-        }
-
-        if (!preg_match('/-?\d+(?:[.,]\d+)?/', $value, $matches)) {
-            return null;
-        }
-
-        return (float)str_replace(',', '.', $matches[0]);
     }
 
     private function isExistingPromotionProductCurrentForTerms(array $product, array $promotion): bool {
@@ -2545,6 +2400,34 @@ public function __construct(Database $db = null) {
         return $updates;
     }
 
+    private function buildPriceUpdateBatches(array $productPromotions): array {
+        $productUpdates = [];
+        $variantUpdates = [];
+
+        foreach ($productPromotions as $promo) {
+            $productId = (int)($promo['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            if (!empty($promo['variant_id'])) {
+                $variantUpdates[] = [
+                    'product_id' => $productId,
+                    'id' => (int)$promo['variant_id'],
+                    'sale_price' => $promo['promo_price'],
+                ];
+                continue;
+            }
+
+            $productUpdates[] = [
+                'product_id' => $productId,
+                'sale_price' => $promo['promo_price'],
+            ];
+        }
+
+        return [$productUpdates, $variantUpdates];
+    }
+
     private function getPromotionItemKey($productId, $variantId = null) {
         return $variantId ? "v_{$variantId}" : "p_{$productId}";
     }
@@ -2607,21 +2490,26 @@ public function __construct(Database $db = null) {
         $cacheUpdates = [];
 
         foreach ($items as $item) {
+            $productId = (int)($item['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
             $cacheUpdates[] = [
-                'product_id' => $item['product_id'],
+                'product_id' => $productId,
                 'variant_id' => $item['variant_id'] ?? null,
                 'sale_price' => null
             ];
 
             if (!empty($item['variant_id'])) {
                 $variantUpdates[] = [
-                    'product_id' => $item['product_id'],
-                    'id' => $item['variant_id'],
+                    'product_id' => $productId,
+                    'id' => (int)$item['variant_id'],
                     'sale_price' => null
                 ];
             } else {
                 $productUpdates[] = [
-                    'product_id' => $item['product_id'],
+                    'product_id' => $productId,
                     'sale_price' => null
                 ];
             }

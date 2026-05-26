@@ -1,5 +1,10 @@
 # Codex Task: Omnibus Variant Range Fallback
 
+> Legacy note: this document applies only to the previous parent custom-field
+> JSON workaround. New frontend work must read `promora.lowest_price_30d`
+> metafields and should not implement a range fallback from parent JSON. See
+> `docs/omnibus.md` for the current frontend contract.
+
 Target project:
 
 ```text

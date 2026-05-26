@@ -11,6 +11,7 @@ class OmnibusSyncService {
     private $api;
     private $cacheService;
     private $omnibusFieldService;
+    private $omnibusMetafieldService;
     private $omnibusPricingService;
     private $priceLogger;
     private $productsCacheHasType;
@@ -26,6 +27,7 @@ class OmnibusSyncService {
         $this->api = new BigCommerceAPI($storeHash);
         $this->cacheService = new ProductCacheService($this->db);
         $this->omnibusFieldService = new OmnibusFieldService($this->api, $this->db);
+        $this->omnibusMetafieldService = new OmnibusMetafieldService($this->api);
         $this->omnibusPricingService = new OmnibusPricingService($this->db);
         $this->priceLogger = new PriceLogger($this->db);
     }
@@ -127,7 +129,8 @@ class OmnibusSyncService {
         }
 
         try {
-            $apiResults = $this->omnibusFieldService->batchSyncLowestPriceFields($updates, $productsCacheMap);
+            $apiResults = $this->omnibusMetafieldService->syncLowestPriceMetafields($updates);
+            $this->syncLegacyCustomFields($updates, $productsCacheMap);
 
             $successCount = 0;
             foreach ($apiResults as $result) {
@@ -156,6 +159,7 @@ class OmnibusSyncService {
     ): array {
         $rowsForPricing = $this->selectRowsForPricing($productRows);
         $hasVariantRows = $this->hasVariantRows($rowsForPricing);
+        $variantIds = $this->extractVariantIds($rowsForPricing);
         $lowestReference = null;
         $variantReferences = [];
         $lastDto = null;
@@ -214,8 +218,20 @@ class OmnibusSyncService {
             'lowest_price_last_30_days' => $lastDto['lowest_price_last_30_days'] ?? null,
             'is_discounted_now' => $referenceValue !== null,
             'omnibus_reference_price' => $referenceValue,
+            'product_reference_price' => $hasVariantRows ? null : $lowestReference,
+            'variant_reference_prices' => $variantReferences,
+            'variant_ids' => $variantIds,
+            'has_variants' => $hasVariantRows,
             'effective_currency' => $lastDto['effective_currency'] ?? $currency,
         ];
+    }
+
+    private function syncLegacyCustomFields(array $updates, array $productsCacheMap): void {
+        try {
+            $this->omnibusFieldService->batchSyncLowestPriceFields($updates, $productsCacheMap);
+        } catch (\Throwable $e) {
+            error_log("Omnibus legacy custom field sync failed for store {$this->storeHash}: " . $e->getMessage());
+        }
     }
 
     private function hasVariantRows(array $rows): bool {
@@ -226,6 +242,22 @@ class OmnibusSyncService {
         }
 
         return false;
+    }
+
+    private function extractVariantIds(array $rows): array {
+        $ids = [];
+        foreach ($rows as $row) {
+            if (!isset($row['variant_id']) || $row['variant_id'] === null) {
+                continue;
+            }
+
+            $variantId = (int)$row['variant_id'];
+            if ($variantId > 0) {
+                $ids[$variantId] = $variantId;
+            }
+        }
+
+        return array_values($ids);
     }
 
     private function buildVariantReferencePayload(array $variantReferences, string $currency): ?array {

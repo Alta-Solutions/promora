@@ -497,7 +497,7 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertSame('not_below_30_day_lowest', $candidate['omnibus_invalid_reason']);
     }
 
-    public function testExistingOmnibusFieldAllowsPartialSyncRepairWhenPromoPriceIsBelowDisplayedReference(): void {
+    public function testLegacyOmnibusCustomFieldDoesNotBypassHistoryValidation(): void {
         $pricingService = $this->createPricingService([
             'candidate_omnibus_reference_price' => null,
             'omnibus_reference_price' => null,
@@ -516,41 +516,6 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
             ]),
         ]), [
             'id' => 43,
-            'name' => 'Partially synced promotion',
-            'custom_field_value' => 'Partially synced promotion',
-            'discount_percent' => 10.00,
-            'start_date' => '2026-05-05 10:23:00',
-            'created_at' => '2026-05-06 08:33:26',
-            'omnibus_terms_updated_at' => '2026-05-06 08:33:26',
-            'priority' => 1,
-        ]);
-
-        $this->assertTrue($candidate['will_apply']);
-        $this->assertTrue($candidate['omnibus_valid']);
-        $this->assertTrue($candidate['omnibus_existing_field_repair_allowed']);
-        $this->assertSame(100.00, $candidate['omnibus_reference_price']);
-        $this->assertNull($candidate['omnibus_invalid_reason']);
-    }
-
-    public function testExistingOmnibusFieldDoesNotRepairWhenPromoPriceIsNotBelowDisplayedReference(): void {
-        $pricingService = $this->createPricingService([
-            'candidate_omnibus_reference_price' => null,
-            'omnibus_reference_price' => null,
-            'rolling_lowest_price_last_30_days' => 70.00,
-            'is_price_drop_candidate' => false,
-            'is_valid_omnibus_reduction' => false,
-            'invalid_reduction_reason' => null,
-        ]);
-        $service = $this->createPromotionService($pricingService);
-
-        $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionCandidate');
-        $method->setAccessible(true);
-        $candidate = $method->invoke($service, $this->productItem([
-            'custom_fields' => json_encode([
-                ['id' => 987, 'name' => 'lowest_price_30d', 'value' => '90'],
-            ]),
-        ]), [
-            'id' => 43,
             'name' => 'Invalid promotion',
             'custom_field_value' => 'Invalid promotion',
             'discount_percent' => 10.00,
@@ -564,46 +529,6 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertFalse($candidate['omnibus_valid']);
         $this->assertArrayNotHasKey('omnibus_existing_field_repair_allowed', $candidate);
         $this->assertSame('not_below_30_day_lowest', $candidate['omnibus_invalid_reason']);
-    }
-
-    public function testExistingVariantOmnibusFieldAllowsRepairForMatchingVariantReference(): void {
-        $pricingService = $this->createPricingService([
-            'candidate_omnibus_reference_price' => null,
-            'omnibus_reference_price' => null,
-            'rolling_lowest_price_last_30_days' => 10.00,
-            'is_price_drop_candidate' => false,
-            'is_valid_omnibus_reduction' => false,
-            'invalid_reduction_reason' => null,
-        ]);
-        $service = $this->createPromotionService($pricingService);
-
-        $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionCandidate');
-        $method->setAccessible(true);
-        $candidate = $method->invoke($service, $this->productItem([
-            'product_id' => 5472,
-            'variant_id' => 5648,
-            'price' => 18.65,
-            'custom_fields' => json_encode([
-                [
-                    'id' => 987,
-                    'name' => 'lowest_price_30d',
-                    'value' => '{"type":"variant_prior_prices","currency":"EUR","values":{"5631":"6.23","5648":"15.64"}}',
-                ],
-            ]),
-        ]), [
-            'id' => 55,
-            'name' => 'Variant repair promotion',
-            'custom_field_value' => 'Na popustu',
-            'discount_percent' => 20.00,
-            'start_date' => '2026-05-12 11:03:00',
-            'created_at' => '2026-05-12 11:11:28',
-            'omnibus_terms_updated_at' => '2026-05-12 11:11:28',
-            'priority' => 1,
-        ]);
-
-        $this->assertTrue($candidate['will_apply']);
-        $this->assertTrue($candidate['omnibus_existing_field_repair_allowed']);
-        $this->assertSame(15.64, $candidate['omnibus_reference_price']);
     }
 
     public function testPromotionReconciliationRestoresProductWhenMarginRuleNoLongerPasses(): void {

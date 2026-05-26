@@ -44,9 +44,11 @@ When editing code, verify that every query touching store-owned data includes
 - `CustomFieldService`: batches custom field writes/removals.
 - `PriceLogger`: records effective price changes and seeds Omnibus baseline history.
 - `OmnibusPricingService`: calculates current display/reference data from price history.
-- `OmnibusSyncService`: refreshes `lowest_price_30d` custom fields from cached products.
-- `OmnibusFieldService`: creates, updates, deletes, and cache-syncs the
-  `lowest_price_30d` custom field.
+- `OmnibusSyncService`: refreshes Omnibus lowest-price storefront metadata from cached products.
+- `OmnibusMetafieldService`: creates, updates, and deletes the canonical
+  `promora.lowest_price_30d` product and variant metafields.
+- `OmnibusFieldService`: maintains the legacy `lowest_price_30d` product custom
+  field during storefront migration; promotion validation does not read it.
 - `WebhookService`: receives product and inventory changes and updates local state.
 - `WebhookSuppressionService`: suppresses webhook loops caused by app-originated API writes.
 

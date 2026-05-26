@@ -144,6 +144,7 @@ class OmnibusSyncServiceTest extends TestCase {
         $this->assertSame('2026-05-13 15:11:03', $pricingService->referenceAt->format('Y-m-d H:i:s'));
         $this->assertSame('2026-05-13 15:11:03', $pricingService->options['current_price_observed_at']);
         $this->assertTrue($update['is_discounted_now']);
+        $this->assertSame(12.22, $update['product_reference_price']);
         $this->assertSame(12.22, $update['omnibus_reference_price']);
     }
 
@@ -247,6 +248,12 @@ class OmnibusSyncServiceTest extends TestCase {
         ], 'EUR');
 
         $this->assertTrue($update['is_discounted_now']);
+        $this->assertTrue($update['has_variants']);
+        $this->assertSame([5631, 5648], $update['variant_ids']);
+        $this->assertSame([
+            '5631' => 6.23,
+            '5648' => 15.64,
+        ], $update['variant_reference_prices']);
         $this->assertSame([
             'type' => 'variant_prior_prices',
             'currency' => 'EUR',

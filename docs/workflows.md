@@ -72,8 +72,11 @@ Manual Omnibus sync creates an `omnibus_sync` job. The worker runs
 Targeted jobs use `omnibus_sync_products` and pass product IDs from the job
 payload to the same service method.
 
-The service aggregates reference prices across variants when needed and delegates
-BigCommerce custom field writes to `OmnibusFieldService`.
+The service calculates product and variant reference prices, writes the canonical
+`promora.lowest_price_30d` BigCommerce metafields through
+`OmnibusMetafieldService`, and updates the legacy `lowest_price_30d` product
+custom field only as a storefront migration fallback. Promotion application does
+not read the legacy custom field.
 
 See `docs/omnibus.md` before changing this flow.
 
