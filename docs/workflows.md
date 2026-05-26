@@ -42,10 +42,10 @@ The sync flow calculates best promotion candidates, updates BigCommerce prices
 and custom fields, updates `products_cache`, logs effective price changes, and
 records rows in `promotion_products`.
 
-When a queued promotion sync or cleanup changes `sale_price`, the worker queues
-`omnibus_sync_products` with only the affected parent product IDs. This keeps the
-`lowest_price_30d` custom field current without requiring a full-store Omnibus
-sync after every promotion job.
+When a queued promotion sync, manual single-promotion resync, or cleanup changes
+`sale_price`, the worker queues `omnibus_sync_products` with only the affected
+parent product IDs. Promotion and cleanup jobs are processed before Omnibus jobs
+so the targeted Omnibus sync sees the updated local price cache.
 
 ## Cleanup
 

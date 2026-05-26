@@ -282,7 +282,7 @@ do {
 
         $queue->updateJobStatus($job['id'], 'completed');
 
-        if (in_array($job['job_type'], ['sync_promotion', 'cleanup', 'cleanup_single'], true)) {
+        if (in_array($job['job_type'], ['sync_promotion', 'single_sync', 'cleanup', 'cleanup_single'], true)) {
             queueTargetedOmnibusSyncIfNeeded($db, $job, $omnibusProductIds);
         }
 
