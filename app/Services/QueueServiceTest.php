@@ -270,6 +270,49 @@ class QueueServiceTest extends TestCase {
         );
     }
 
+    public function testNextPendingJobPrioritizesPromotionWorkBeforeOmnibusWork(): void {
+        $db = new class {
+            public $sql = null;
+
+            public function fetchOne($sql, $params = []) {
+                $this->sql = preg_replace('/\s+/', ' ', trim($sql));
+                return false;
+            }
+        };
+
+        $service = $this->createQueueService($db, 'store-a');
+        $service->getNextPendingJob();
+
+        $this->assertStringContainsString("WHEN 'sync_promotion' THEN 10", $db->sql);
+        $this->assertStringContainsString("WHEN 'single_sync' THEN 10", $db->sql);
+        $this->assertStringContainsString("WHEN 'cleanup_single' THEN 20", $db->sql);
+        $this->assertStringContainsString("WHEN 'omnibus_sync_products' THEN 30", $db->sql);
+        $this->assertStringContainsString("WHEN 'omnibus_sync' THEN 40", $db->sql);
+        $this->assertStringContainsString('created_at ASC, id ASC', $db->sql);
+    }
+
+    public function testActiveJobDisplayUsesSameJobTypePriority(): void {
+        $db = new class {
+            public $sql = null;
+            public $params = null;
+
+            public function fetchOne($sql, $params = []) {
+                $this->sql = preg_replace('/\s+/', ' ', trim($sql));
+                $this->params = $params;
+                return false;
+            }
+        };
+
+        $service = $this->createQueueService($db, 'store-a');
+        $service->getActiveJob();
+
+        $this->assertSame(['store-a'], $db->params);
+        $this->assertStringContainsString("WHEN 'sync_promotion' THEN 10", $db->sql);
+        $this->assertStringContainsString("WHEN 'single_sync' THEN 10", $db->sql);
+        $this->assertStringContainsString("WHEN 'omnibus_sync_products' THEN 30", $db->sql);
+        $this->assertStringContainsString("WHEN 'omnibus_sync' THEN 40", $db->sql);
+    }
+
     private function createQueueService($db, ?string $storeHash): QueueService {
         $reflection = new ReflectionClass(QueueService::class);
         $service = $reflection->newInstanceWithoutConstructor();

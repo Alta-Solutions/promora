@@ -81,6 +81,7 @@ Queue table consumed by `bin/worker.php`.
 Common `job_type` values:
 
 - `sync_promotion`
+- `single_sync`
 - `cleanup`
 - `cleanup_single`
 - `omnibus_sync`

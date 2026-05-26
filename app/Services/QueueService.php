@@ -218,7 +218,19 @@ class QueueService {
             "SELECT * FROM sync_jobs
              WHERE status = 'pending'
              AND (next_run_at IS NULL OR next_run_at <= NOW())
-             ORDER BY created_at ASC, id ASC LIMIT 1"
+             ORDER BY
+                CASE job_type
+                    WHEN 'sync_promotion' THEN 10
+                    WHEN 'single_sync' THEN 10
+                    WHEN 'cleanup_single' THEN 20
+                    WHEN 'cleanup' THEN 20
+                    WHEN 'omnibus_sync_products' THEN 30
+                    WHEN 'omnibus_sync' THEN 40
+                    ELSE 50
+                END,
+                created_at ASC,
+                id ASC
+             LIMIT 1"
         );
     }
 
@@ -251,6 +263,15 @@ class QueueService {
                     WHEN 'processing' THEN 1 
                     WHEN 'pending' THEN 2 
                     ELSE 3 
+                END,
+                CASE job_type
+                    WHEN 'sync_promotion' THEN 10
+                    WHEN 'single_sync' THEN 10
+                    WHEN 'cleanup_single' THEN 20
+                    WHEN 'cleanup' THEN 20
+                    WHEN 'omnibus_sync_products' THEN 30
+                    WHEN 'omnibus_sync' THEN 40
+                    ELSE 50
                 END,
                 updated_at DESC 
              LIMIT 1",
