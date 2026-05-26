@@ -10,6 +10,7 @@ class OmnibusFieldService {
     private $db;
 
     private const FIELD_NAME = 'lowest_price_30d';
+    private const MAX_CUSTOM_FIELD_VALUE_LENGTH = 250;
 
     public function __construct(BigCommerceAPI $api, Database $db = null) {
         $this->api = $api;
@@ -37,6 +38,28 @@ class OmnibusFieldService {
             [$existingFieldId, $existingFieldValue] = $this->extractExistingFieldState(
                 $existingProductsCache[$productId]['custom_fields'] ?? null
             );
+
+            if ($fieldValue !== null && strlen($fieldValue) > self::MAX_CUSTOM_FIELD_VALUE_LENGTH) {
+                if ($existingFieldId) {
+                    $requests[$productId] = [
+                        'method' => 'DELETE',
+                        'endpoint' => "catalog/products/{$productId}/custom-fields/{$existingFieldId}",
+                    ];
+                    $requestMeta[$productId] = [
+                        'action' => 'delete',
+                        'field_id' => $existingFieldId,
+                        'field_value' => null,
+                        'reason' => 'legacy_value_too_long',
+                    ];
+                } else {
+                    $results[$productId] = [
+                        'status' => 204,
+                        'body' => ['message' => 'Legacy Omnibus custom field omitted because value exceeds BigCommerce length limit'],
+                        'skipped' => true,
+                    ];
+                }
+                continue;
+            }
 
             if ($referencePrice === null) {
                 if ($existingFieldId) {

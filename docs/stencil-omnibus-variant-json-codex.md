@@ -1,5 +1,11 @@
 # Codex Task: Stencil Omnibus Variant JSON
 
+> Legacy note: this document describes the previous parent custom-field JSON
+> workaround. New frontend work must read `promora.lowest_price_30d` metafields:
+> product metafields for simple products and variant metafields for selected
+> variants. See `docs/omnibus.md` for the current frontend contract. Do not add
+> new storefront behavior that depends on the JSON custom-field format.
+
 Target project:
 
 ```text

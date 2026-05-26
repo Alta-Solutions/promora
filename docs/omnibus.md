@@ -1,7 +1,7 @@
 # Omnibus Lowest Price Tracker
 
 The Omnibus feature tracks the lowest reference price in the previous 30 days
-and writes it to the BigCommerce product custom field `lowest_price_30d`.
+and writes it to BigCommerce metafields that are readable by the storefront.
 
 ## Main Files
 
@@ -9,6 +9,7 @@ and writes it to the BigCommerce product custom field `lowest_price_30d`.
 - `app/Services/ProductCacheService.php`
 - `app/Services/OmnibusPricingService.php`
 - `app/Services/OmnibusSyncService.php`
+- `app/Services/OmnibusMetafieldService.php`
 - `app/Services/OmnibusFieldService.php`
 - `app/Services/PromotionService.php`
 
@@ -111,14 +112,13 @@ revalidation when their `promotion_products.synced_at` is newer than the last
 Omnibus terms update. They can still be synced so metadata/custom fields are
 refreshed.
 
-If BigCommerce is left in a partial state where `lowest_price_30d` already
-exists on a product but the sale price or promotion custom field was not applied,
-promotion sync may repair the missing write even if normal Omnibus revalidation
-would now fail. This repair is allowed only when the target promo price is still
-strictly lower than the already displayed `lowest_price_30d` value. It must not
-be treated as a general force-apply bypass.
+Backend promotion validation must not read BigCommerce storefront metadata as an
+authority. `lowest_price_30d` custom fields and `promora.lowest_price_30d`
+metafields are output artifacts for the storefront. Promotion application uses
+local `product_price_history` through `OmnibusPricingService`, plus the
+explicit existing-promotion revalidation skip described above.
 
-Omnibus custom field sync must use the same lifecycle reference for products
+Omnibus metadata sync must use the same lifecycle reference for products
 that already have an active `promotion_products` row. A retry, webhook refresh,
 manual Omnibus sync, or Sync All run must not reinterpret the same active
 promotion as a new price drop just because price history contains a later
@@ -195,51 +195,57 @@ Implementation guidance:
   calculating the target `promo_price`.
 - The storefront/customer-facing discount percentage must be based on
   `lowest_price_30d`.
-- The BigCommerce custom field `lowest_price_30d` should expose the Omnibus
-  reference price so the storefront can show the correct legal reference.
+- The BigCommerce metafield `promora.lowest_price_30d` should expose the
+  Omnibus reference price so the storefront can show the correct legal
+  reference.
 - If the storefront cannot calculate the customer-facing percentage from
   `lowest_price_30d`, avoid showing a percentage discount and show only the new
   price plus the required prior price.
 
-## BigCommerce Custom Field Sync
+## BigCommerce Metafield Sync
 
-`OmnibusFieldService` owns the `lowest_price_30d` field:
+`OmnibusMetafieldService` owns the canonical storefront storage:
 
-- create the field when there is an active valid reduction
+- simple products use a product metafield
+- variant products use a variant metafield for each affected variant
+- create the metafield when there is an active valid reduction
 - update it when the reference price changes
 - delete it when there is no active valid reduction
-- synchronize the local `products_cache.custom_fields` state after successful API writes
+- use `permission_set = read_and_sf_access`
 
-### Variant Product Quick Fix
-
-For products with variants, the app keeps using the parent product custom field
-`lowest_price_30d`, but writes a JSON payload instead of a single numeric value.
-This is a pragmatic compatibility fix until variant metafields are implemented.
-
-Simple product value:
+Canonical metafield contract:
 
 ```text
-15.64
+namespace: promora
+key: lowest_price_30d
+value: 15.64
+permission_set: read_and_sf_access
 ```
 
-Variant product value:
+`OmnibusFieldService` still maintains the old product custom field
+`lowest_price_30d` as a temporary storefront migration fallback. It must not be
+treated as canonical storage or as backend promotion-validation input. If a
+legacy custom-field value would exceed BigCommerce's 250-character custom-field
+limit, the app skips writing it and removes an existing legacy field when
+present.
 
-```json
-{"type":"variant_prior_prices","currency":"EUR","values":{"5631":"6.23","5648":"15.64"}}
+### Frontend Contract
+
+For simple products, read product metafield:
+
+```text
+promora.lowest_price_30d
 ```
 
-Frontend logic must treat this field as either:
+For variant products, read the selected variant's metafield:
 
-- a simple numeric value for products without variants
-- a JSON map where `values[variant_id]` is the Omnibus prior price for the
-  selected variant
+```text
+promora.lowest_price_30d
+```
 
-Do not display the JSON string directly. If a selected variant has no value in
-the map, hide the lowest-price block for that variant.
-
-Long-term, variant metafields are still the cleaner model because the prior price
-belongs to the variant. This JSON custom-field format is intentionally a quick
-fix for storefront compatibility.
+During rollout, the old product custom field may be used only as a storefront
+display fallback. Do not add new storefront behavior that depends on the legacy
+variant JSON custom-field format.
 
 ## Tests To Update
 

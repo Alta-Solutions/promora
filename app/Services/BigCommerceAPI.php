@@ -539,6 +539,74 @@ class BigCommerceAPI {
     public function deleteCustomField($productId, $fieldId) {
         return $this->request('DELETE', "catalog/products/{$productId}/custom-fields/{$fieldId}");
     }
+
+    public function getProductMetafields($productId, ?string $namespace = null, ?string $key = null): array {
+        try {
+            $filters = [];
+            if ($namespace !== null && $namespace !== '') {
+                $filters['namespace'] = $namespace;
+            }
+            if ($key !== null && $key !== '') {
+                $filters['key'] = $key;
+            }
+
+            $endpoint = "catalog/products/{$productId}/metafields";
+            if (!empty($filters)) {
+                $endpoint .= '?' . http_build_query($filters);
+            }
+
+            $response = $this->request('GET', $endpoint);
+            return $response['body']['data'] ?? [];
+        } catch (\Exception $e) {
+            return [];
+        }
+    }
+
+    public function createProductMetafield($productId, array $data) {
+        return $this->request('POST', "catalog/products/{$productId}/metafields", $data);
+    }
+
+    public function updateProductMetafield($productId, $metafieldId, array $data) {
+        return $this->request('PUT', "catalog/products/{$productId}/metafields/{$metafieldId}", $data);
+    }
+
+    public function deleteProductMetafield($productId, $metafieldId) {
+        return $this->request('DELETE', "catalog/products/{$productId}/metafields/{$metafieldId}");
+    }
+
+    public function getVariantMetafields($productId, $variantId, ?string $namespace = null, ?string $key = null): array {
+        try {
+            $filters = [];
+            if ($namespace !== null && $namespace !== '') {
+                $filters['namespace'] = $namespace;
+            }
+            if ($key !== null && $key !== '') {
+                $filters['key'] = $key;
+            }
+
+            $endpoint = "catalog/products/{$productId}/variants/{$variantId}/metafields";
+            if (!empty($filters)) {
+                $endpoint .= '?' . http_build_query($filters);
+            }
+
+            $response = $this->request('GET', $endpoint);
+            return $response['body']['data'] ?? [];
+        } catch (\Exception $e) {
+            return [];
+        }
+    }
+
+    public function createVariantMetafield($productId, $variantId, array $data) {
+        return $this->request('POST', "catalog/products/{$productId}/variants/{$variantId}/metafields", $data);
+    }
+
+    public function updateVariantMetafield($productId, $variantId, $metafieldId, array $data) {
+        return $this->request('PUT', "catalog/products/{$productId}/variants/{$variantId}/metafields/{$metafieldId}", $data);
+    }
+
+    public function deleteVariantMetafield($productId, $variantId, $metafieldId) {
+        return $this->request('DELETE', "catalog/products/{$productId}/variants/{$variantId}/metafields/{$metafieldId}");
+    }
     
     public function getCategories() {
         $response = $this->request('GET', 'catalog/categories?limit=250');
@@ -699,7 +767,7 @@ class BigCommerceAPI {
     }
 
     private function getWebhookSuppressionReason(string $endpoint): string {
-        if (strpos($endpoint, '/custom-fields') !== false) {
+        if (strpos($endpoint, '/custom-fields') !== false || strpos($endpoint, '/metafields') !== false) {
             return 'app_custom_field_update';
         }
 
