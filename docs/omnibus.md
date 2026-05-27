@@ -99,11 +99,15 @@ price change in order to bypass the 30-day lowest-price validation. A future
 scheduled promotion still uses its future `start_date`.
 
 `omnibus_terms_updated_at` is updated only when the promotion terms that affect
-the price reduction change, such as:
+the price reduction for already-applied products change, such as:
 
 - discount percentage
 - start date
-- product filters
+
+Filter changes are scope changes. Newly matching products must be validated
+against the real application time, but products that already have an active
+`promotion_products` row for the same promotion must not be reinterpreted as a
+new price drop solely because the filter set was expanded.
 
 Metadata-only edits, such as changing the internal name, description, color, or
 custom field label, must not make an already-applied promotion look like a new

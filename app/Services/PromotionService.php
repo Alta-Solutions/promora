@@ -533,10 +533,10 @@ public function __construct(Database $db = null) {
         $existingPreviewPromotion = $this->findPromotionFromPreviewContext($previewContext);
         $skipOmnibusRevalidation = is_array($existingPreviewPromotion)
             && !$this->hasPromotionOmnibusTermsChanged($existingPreviewPromotion, $previewContext);
-        $omnibusReferenceAt = $this->resolvePreviewOmnibusReferenceAt(
-            $referenceAt,
-            $previewContext
-        );
+        $existingPromotionReferenceAt = is_array($existingPreviewPromotion)
+            ? $this->resolvePromotionOmnibusReferenceAt($existingPreviewPromotion)
+            : null;
+        $newPreviewItemReferenceAt = $this->resolveNewPreviewItemOmnibusReferenceAt($referenceAt);
         // getProductsByFilters sada vraća i proizvode i varijante
         $items = $this->cacheService->getProductsByFilters($filters);
         
@@ -546,6 +546,9 @@ public function __construct(Database $db = null) {
             $item[self::MANUAL_UNBLOCK_ITEM_FLAG] = $this->isItemManuallyUnblocked($item, $manualUnblockedItems);
             $skipItemOmnibusRevalidation = $skipOmnibusRevalidation
                 && $this->isExistingPromotionProductCurrentForTerms($item, $existingPreviewPromotion);
+            $omnibusReferenceAt = $skipItemOmnibusRevalidation && $existingPromotionReferenceAt !== null
+                ? $existingPromotionReferenceAt
+                : $newPreviewItemReferenceAt;
             $row = $this->buildPromotionPreviewRow(
                 $item,
                 $discountPercent,
@@ -1407,14 +1410,18 @@ public function __construct(Database $db = null) {
 
         $originalPrice = (float)$product['price'];
         $promoPrice = $this->calculatePromoPrice($originalPrice, $discount);
+        $existingPromotionProductCurrentForTerms = $this->isExistingPromotionProductCurrentForTerms($product, $promotion);
+        $omnibusReferenceAt = $existingPromotionProductCurrentForTerms
+            ? $this->resolvePromotionOmnibusReferenceAt($promotion)
+            : $this->resolveNewPromotionProductOmnibusReferenceAt($promotion);
         $omnibus = $this->validatePromotionPriceAgainstOmnibus(
             $product,
             $promoPrice,
-            $this->resolvePromotionOmnibusReferenceAt($promotion)
+            $omnibusReferenceAt
         );
         if (
             empty($omnibus['will_apply'])
-            && $this->isExistingPromotionProductCurrentForTerms($product, $promotion)
+            && $existingPromotionProductCurrentForTerms
         ) {
             $omnibus = $this->markOmnibusRevalidationSkipped($omnibus);
         }
@@ -1779,6 +1786,20 @@ public function __construct(Database $db = null) {
         return $this->latestDateTime($dates);
     }
 
+    private function resolveNewPreviewItemOmnibusReferenceAt($submittedStartDate): \DateTimeImmutable {
+        return $this->latestDateTime([
+            $this->normalizeReferenceAt($submittedStartDate),
+            $this->normalizeReferenceAt('now'),
+        ]);
+    }
+
+    private function resolveNewPromotionProductOmnibusReferenceAt(array $promotion): \DateTimeImmutable {
+        return $this->latestDateTime([
+            $this->resolvePromotionOmnibusReferenceAt($promotion),
+            $this->normalizeReferenceAt('now'),
+        ]);
+    }
+
     private function normalizeOptionalReferenceAt($referenceAt): ?\DateTimeImmutable {
         if ($referenceAt instanceof \DateTimeImmutable) {
             return $referenceAt;
@@ -1903,14 +1924,6 @@ public function __construct(Database $db = null) {
             array_key_exists('start_date', $newData)
             && $this->normalizeDateForComparison($existingPromotion['start_date'] ?? null)
                 !== $this->normalizeDateForComparison($newData['start_date'] ?? null)
-        ) {
-            return true;
-        }
-
-        if (
-            array_key_exists('filters', $newData)
-            && $this->normalizeFiltersForComparison($existingPromotion['filters'] ?? [], false)
-                !== $this->normalizeFiltersForComparison($newData['filters'] ?? [], false)
         ) {
             return true;
         }
