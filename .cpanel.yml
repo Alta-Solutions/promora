@@ -11,5 +11,5 @@ deployment:
     - /bin/cp -a app bigcommerce-app bin public webhook "$DEPLOYPATH"
     - /bin/cp -a .htaccess composer.json composer.lock config.php favicon.ico index.php README.md "$DEPLOYPATH"
     - test -f "$DEPLOYPATH/.env" || (echo "Missing production .env at $DEPLOYPATH/.env"; exit 1)
-    - cd "$DEPLOYPATH" && unset COMPOSER && "$COMPOSER_BIN" install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+    - cd "$DEPLOYPATH" && unset COMPOSER && "$PHPBIN" "$COMPOSER_BIN" install --no-dev --prefer-dist --optimize-autoloader --no-interaction
     - cd "$DEPLOYPATH" && "$PHPBIN" app/install/install.php
