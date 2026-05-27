@@ -276,6 +276,7 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
             'invalid_reduction_reason' => null,
         ]);
         $service = $this->createPromotionService($pricingService);
+        $this->setPrivateProperty($service, 'db', $this->dbReturningSyncedPromotionProduct('2026-05-12 20:55:52'));
         $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionCandidate');
         $method->setAccessible(true);
 
@@ -495,6 +496,39 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertFalse($candidate['will_apply']);
         $this->assertFalse($candidate['omnibus_valid']);
         $this->assertSame('not_below_30_day_lowest', $candidate['omnibus_invalid_reason']);
+    }
+
+    public function testNewPromotionProductUsesCurrentReferenceWhenPromotionScopeExpands(): void {
+        $pricingService = $this->createPricingService([
+            'candidate_omnibus_reference_price' => 70.00,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => 70.00,
+            'is_price_drop_candidate' => true,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => 'not_below_30_day_lowest',
+        ]);
+        $service = $this->createPromotionService($pricingService);
+        $this->setPrivateProperty($service, 'db', $this->dbReturningNoPromotionProduct());
+
+        $before = new DateTimeImmutable('now');
+        $method = (new ReflectionClass(PromotionService::class))->getMethod('buildPromotionCandidate');
+        $method->setAccessible(true);
+        $candidate = $method->invoke($service, $this->productItem(), [
+            'id' => 43,
+            'name' => 'Expanded promotion',
+            'custom_field_value' => 'Expanded promotion',
+            'discount_percent' => 10.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'created_at' => '2026-05-06 08:33:26',
+            'omnibus_terms_updated_at' => '2026-05-06 08:33:26',
+            'priority' => 1,
+            'filters' => json_encode(['sku:in' => ['TEST-123', 'NEW-SKU']]),
+        ]);
+        $after = new DateTimeImmutable('now');
+
+        $this->assertFalse($candidate['will_apply']);
+        $this->assertGreaterThanOrEqual($before->getTimestamp(), $pricingService->referenceAt->getTimestamp());
+        $this->assertLessThanOrEqual($after->getTimestamp(), $pricingService->referenceAt->getTimestamp());
     }
 
     public function testLegacyOmnibusCustomFieldDoesNotBypassHistoryValidation(): void {
@@ -743,6 +777,11 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
             'filters' => [
                 'sku' => 'TEST-123',
                 '_block_below_cost_price' => true,
+            ],
+        ])));
+        $this->assertFalse($method->invoke($service, $existing, array_replace($existing, [
+            'filters' => [
+                'sku:in' => ['TEST-123', 'NEW-SKU'],
             ],
         ])));
     }
