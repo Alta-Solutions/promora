@@ -67,6 +67,33 @@ class OmnibusSyncServiceTest extends TestCase {
         $this->assertSame(80.0, $priceLogger->seeds[0]['price']);
     }
 
+    public function testInitialHistorySeedUsesFirstObservedPromoPriceActivationForWindowBoundary(): void {
+        $priceLogger = new class {
+            public $seeds = [];
+
+            public function seedInitialPriceHistoryBatch(string $storeHash, array $pricesToSeed): int {
+                $this->seeds = $pricesToSeed;
+                return count($pricesToSeed);
+            }
+        };
+
+        $service = $this->createService($priceLogger);
+        $this->invokeSeedInitialPriceHistory($service, [
+            11878 => [[
+                'product_id' => 11878,
+                'variant_id' => null,
+                'type' => 'product',
+                'price' => '37.38',
+                'sale_price' => '31.77',
+                'cached_at' => '2026-06-01 15:02:42',
+            ]],
+        ], [
+            '11878:base' => new DateTimeImmutable('2026-06-01 15:02:38'),
+        ]);
+
+        $this->assertSame('2026-05-02 15:02:38', $priceLogger->seeds[0]['recorded_at']);
+    }
+
     public function testActivePromotionReferenceMapUsesPromotionLifecycleDate(): void {
         $service = $this->createService(new class {
             public function seedInitialPriceHistoryBatch(string $storeHash, array $pricesToSeed): int {
@@ -277,10 +304,14 @@ class OmnibusSyncServiceTest extends TestCase {
         return $service;
     }
 
-    private function invokeSeedInitialPriceHistory(OmnibusSyncService $service, array $productsById): void {
+    private function invokeSeedInitialPriceHistory(
+        OmnibusSyncService $service,
+        array $productsById,
+        array $priceActivationMap = []
+    ): void {
         $method = new ReflectionMethod($service, 'seedInitialPriceHistory');
         $method->setAccessible(true);
-        $method->invoke($service, $productsById, 'EUR');
+        $method->invoke($service, $productsById, 'EUR', $priceActivationMap);
     }
 
     private function setPrivateProperty(object $object, string $property, $value): void {

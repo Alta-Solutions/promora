@@ -112,9 +112,9 @@ class OmnibusSyncService {
             $productsById[(int)$product['product_id']][] = $product;
         }
 
-        $this->seedInitialPriceHistory($productsById, $currency);
         $promotionReferenceMap = $this->fetchActivePromotionReferenceMap($productIds);
         $priceActivationMap = $this->fetchCurrentPriceActivationMap($productsById, $promotionReferenceMap, $currency);
+        $this->seedInitialPriceHistory($productsById, $currency, $priceActivationMap);
 
         $updates = [];
 
@@ -505,7 +505,11 @@ class OmnibusSyncService {
         return isset($product['price']) ? (float)$product['price'] : null;
     }
 
-    private function seedInitialPriceHistory(array $productsById, string $currency): void {
+    private function seedInitialPriceHistory(
+        array $productsById,
+        string $currency,
+        array $priceActivationMap = []
+    ): void {
         $candidates = [];
 
         foreach ($productsById as $productId => $productRows) {
@@ -518,7 +522,12 @@ class OmnibusSyncService {
                 $variantId = isset($row['variant_id']) && $row['variant_id'] !== null
                     ? (int)$row['variant_id']
                     : null;
-                $seedRecordedAt = $this->resolveInitialHistoryRecordedAt($row['cached_at'] ?? null);
+                $activationAt = $priceActivationMap[$this->buildPromotionReferenceKey((int)$productId, $variantId)]
+                    ?? null;
+                $seedRecordedAt = $this->resolveInitialHistoryRecordedAt(
+                    $row['cached_at'] ?? null,
+                    $activationAt
+                );
 
                 $candidates[] = [
                     'product_id' => (int)$productId,
@@ -550,11 +559,19 @@ class OmnibusSyncService {
         return $regularPrice;
     }
 
-    private function resolveInitialHistoryRecordedAt($cachedAt): string {
+    private function resolveInitialHistoryRecordedAt($cachedAt, $activationAt = null): string {
         try {
-            $observedAt = $cachedAt
-                ? new \DateTimeImmutable((string)$cachedAt)
-                : new \DateTimeImmutable('now');
+            if ($activationAt instanceof \DateTimeImmutable) {
+                $observedAt = $activationAt;
+            } elseif ($activationAt instanceof \DateTimeInterface) {
+                $observedAt = \DateTimeImmutable::createFromInterface($activationAt);
+            } elseif ($activationAt) {
+                $observedAt = new \DateTimeImmutable((string)$activationAt);
+            } elseif ($cachedAt) {
+                $observedAt = new \DateTimeImmutable((string)$cachedAt);
+            } else {
+                $observedAt = new \DateTimeImmutable('now');
+            }
         } catch (\Throwable $e) {
             $observedAt = new \DateTimeImmutable('now');
         }
