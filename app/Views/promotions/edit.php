@@ -29,6 +29,11 @@ $descriptionValue = $promotion['description'] ?? '';
 $discountValue = $promotion['discount_percent'] ?? 0;
 $priorityValue = $promotion['priority'] ?? 0;
 $colorValue = $promotion['color'] ?: '#3b82f6';
+$isActivePromotion = ($promotion['status'] ?? '') === 'active';
+$canUseActivePromotionCorrection = !empty($canUseActivePromotionCorrection);
+$isCorrectionSelected = $canUseActivePromotionCorrection
+    && ($omnibusChangeType ?? 'standard') === 'active_discount_correction';
+$omnibusCorrectionReason = $omnibusCorrectionReason ?? '';
 ?>
 
 <div class="promotion-create-page">
@@ -86,6 +91,51 @@ $colorValue = $promotion['color'] ?: '#3b82f6';
                             <label class="form-label"><?= trans_e('common.priority') ?></label>
                             <input type="number" name="priority" class="form-input" value="<?= htmlspecialchars($priorityValue) ?>" min="0">
                         </div>
+
+                        <?php if ($isActivePromotion): ?>
+                            <div class="form-group promotion-field promotion-full-field promotion-correction-box">
+                                <div class="promotion-correction-title"><?= trans_e('promotions.form.active_correction_title') ?></div>
+                                <label class="promotion-radio-row">
+                                    <input
+                                        type="radio"
+                                        name="omnibus_change_type"
+                                        value="standard"
+                                        <?= !$isCorrectionSelected ? 'checked' : '' ?>
+                                    >
+                                    <span>
+                                        <strong><?= trans_e('promotions.form.active_correction_standard') ?></strong>
+                                        <small><?= trans_e('promotions.form.active_correction_standard_help') ?></small>
+                                    </span>
+                                </label>
+                                <label class="promotion-radio-row">
+                                    <input
+                                        type="radio"
+                                        name="omnibus_change_type"
+                                        value="active_discount_correction"
+                                        <?= $isCorrectionSelected ? 'checked' : '' ?>
+                                        <?= !$canUseActivePromotionCorrection ? 'disabled' : '' ?>
+                                    >
+                                    <span>
+                                        <strong><?= trans_e('promotions.form.active_correction_bypass') ?></strong>
+                                        <small><?= trans_e('promotions.form.active_correction_bypass_help') ?></small>
+                                    </span>
+                                </label>
+                                <?php if (!$canUseActivePromotionCorrection): ?>
+                                    <small class="promotion-correction-identity-warning"><?= trans_e('promotions.form.active_correction_identity_missing') ?></small>
+                                <?php endif; ?>
+                                <div id="omnibus-correction-reason-wrap" <?= !$isCorrectionSelected ? 'hidden' : '' ?>>
+                                    <label class="form-label" for="omnibus-correction-reason"><?= trans_e('promotions.form.active_correction_reason') ?> <span class="required-marker">*</span></label>
+                                    <textarea
+                                        name="omnibus_correction_reason"
+                                        id="omnibus-correction-reason"
+                                        class="form-textarea promotion-correction-reason"
+                                        maxlength="1000"
+                                        placeholder="<?= trans_e('promotions.form.active_correction_reason_placeholder') ?>"
+                                        <?= $isCorrectionSelected ? 'required' : '' ?>
+                                    ><?= htmlspecialchars($omnibusCorrectionReason, ENT_QUOTES, 'UTF-8') ?></textarea>
+                                </div>
+                            </div>
+                        <?php endif; ?>
 
                         <div class="form-group promotion-field promotion-full-field">
                             <label class="promotion-checkbox-row">
@@ -225,6 +275,31 @@ const STATIC_TOM_SELECT_FILTER_TYPES = ['categories:in', 'brand_id'];
 const BLOCK_BELOW_COST_PRICE_FILTER_KEY = '_block_below_cost_price';
 const MANUAL_UNBLOCK_FILTER_KEY = '_manual_unblocked_items';
 let manualUnblockedItemKeys = new Set(<?= json_encode($manualUnblockedItems) ?>);
+
+function getOmnibusChangeType() {
+    return document.querySelector('input[name="omnibus_change_type"]:checked')?.value || 'standard';
+}
+
+function syncOmnibusCorrectionReasonVisibility() {
+    const reasonWrap = document.getElementById('omnibus-correction-reason-wrap');
+    const reasonInput = document.getElementById('omnibus-correction-reason');
+    const correctionSelected = getOmnibusChangeType() === 'active_discount_correction';
+
+    if (!reasonWrap || !reasonInput) {
+        return;
+    }
+
+    reasonWrap.hidden = !correctionSelected;
+    reasonInput.required = correctionSelected;
+}
+
+document.querySelectorAll('input[name="omnibus_change_type"]').forEach(input => {
+    input.addEventListener('change', () => {
+        syncOmnibusCorrectionReasonVisibility();
+        schedulePreviewUpdate();
+    });
+});
+syncOmnibusCorrectionReasonVisibility();
 
 function padDateTimePart(value) {
     return String(value).padStart(2, '0');
@@ -1151,6 +1226,7 @@ async function updatePreview() {
         params.append('filters', JSON.stringify(filtersObj));
         params.append('discount_percent', discount);
         params.append('start_date', document.getElementById('start-date')?.value || '');
+        params.append('omnibus_change_type', getOmnibusChangeType());
 
         const response = await fetch('?route=promotions&action=preview', {
             method: 'POST',

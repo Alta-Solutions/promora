@@ -74,6 +74,33 @@ Tracks products currently affected by a promotion. It has a unique key across
 `store_hash`, `product_id`, and `variant_id`, so only one promotion can own a
 given product/variant at a time.
 
+Lifecycle fields:
+
+- `first_applied_at`: first application time for the current owning promotion.
+- `omnibus_reference_at`: locked Omnibus lifecycle reference for the current
+  owning promotion. It is preserved across retries and audited corrections, and
+  reset when another promotion takes ownership.
+
+### `promotion_revisions`
+
+Audit log for controlled edits that preserve an active promotion lifecycle.
+Current rows use `change_type = active_discount_correction`.
+
+Key fields:
+
+- `store_hash`
+- `promotion_id`
+- `reason`
+- `actor_source`
+- `actor_user_id`
+- `actor_email`
+- `actor_is_owner`
+- `old_discount_percent`
+- `new_discount_percent`
+- `old_terms`
+- `new_terms`
+- `created_at`
+
 ### `sync_jobs`
 
 Queue table consumed by `bin/worker.php`.

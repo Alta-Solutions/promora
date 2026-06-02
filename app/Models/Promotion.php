@@ -193,6 +193,50 @@ class Promotion {
                 "ALTER TABLE promotions ADD COLUMN omnibus_terms_updated_at DATETIME NULL AFTER created_at"
             );
         }
+
+        $firstAppliedAtColumn = $this->db->fetchOne(
+            "SELECT COLUMN_NAME
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'promotion_products' AND COLUMN_NAME = 'first_applied_at'"
+        );
+
+        if (!$firstAppliedAtColumn) {
+            $this->db->query(
+                "ALTER TABLE promotion_products ADD COLUMN first_applied_at DATETIME NULL AFTER custom_field_id"
+            );
+        }
+
+        $omnibusReferenceAtColumn = $this->db->fetchOne(
+            "SELECT COLUMN_NAME
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'promotion_products' AND COLUMN_NAME = 'omnibus_reference_at'"
+        );
+
+        if (!$omnibusReferenceAtColumn) {
+            $this->db->query(
+                "ALTER TABLE promotion_products ADD COLUMN omnibus_reference_at DATETIME NULL AFTER first_applied_at"
+            );
+        }
+
+        $this->db->query(
+            "CREATE TABLE IF NOT EXISTS promotion_revisions (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                store_hash VARCHAR(255) NOT NULL,
+                promotion_id INT NOT NULL,
+                change_type VARCHAR(50) NOT NULL,
+                reason TEXT NOT NULL,
+                actor_source VARCHAR(50) NOT NULL,
+                actor_user_id VARCHAR(255) NULL,
+                actor_email VARCHAR(255) NULL,
+                actor_is_owner TINYINT(1) NOT NULL DEFAULT 0,
+                old_discount_percent DECIMAL(5, 2) NOT NULL,
+                new_discount_percent DECIMAL(5, 2) NOT NULL,
+                old_terms LONGTEXT NULL,
+                new_terms LONGTEXT NULL,
+                created_at DATETIME NOT NULL,
+                INDEX idx_store_promotion_created (store_hash, promotion_id, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
     }
 
     private function buildListWhereClause(bool $includeExpired, ?string $storeHash, string $search, array &$params): string {

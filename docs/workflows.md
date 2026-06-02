@@ -22,6 +22,19 @@ Flow:
 Duplicate-submit protection is intentionally both client-side and server-side.
 Do not remove the server-side token when changing the loading UI.
 
+## Active Promotion Correction
+
+Route: `?route=promotions&action=edit&id={promotion_id}`
+
+An active promotion can be edited in `active_discount_correction` mode when an
+incorrect discount percentage must be fixed without starting a new Omnibus
+lifecycle. The controller takes the actor identity from the verified
+BigCommerce session. The service requires a reason, writes `promotion_revisions`,
+preserves the lifecycle only for existing `promotion_products` rows, and queues
+the regular promotion sync. New filter matches still pass normal Omnibus
+validation. The last 100 audited corrections for the selected store are visible
+under `?route=logs&action=corrections`.
+
 ## Promotion Preview
 
 Route: `?route=promotions&action=preview`

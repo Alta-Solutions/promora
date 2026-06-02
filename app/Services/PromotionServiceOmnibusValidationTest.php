@@ -437,6 +437,84 @@ class PromotionServiceOmnibusValidationTest extends TestCase {
         $this->assertTrue($row['omnibus_revalidation_skipped']);
     }
 
+    public function testEditPreviewWithAuditedCorrectionSkipsRevalidationForAlreadySyncedProduct(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => 70.00,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => 70.00,
+            'is_price_drop_candidate' => true,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => 'not_below_30_day_lowest',
+        ]));
+        $promotion = [
+            'id' => 43,
+            'status' => 'active',
+            'discount_percent' => 10.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'created_at' => '2026-05-06 08:33:26',
+            'omnibus_terms_updated_at' => null,
+            'updated_at' => '2026-05-13 12:00:00',
+            'filters' => '{"brand_id":["444"]}',
+        ];
+        $filters = ['brand_id' => ['444']];
+
+        $this->setPrivateProperty($service, 'promotionModel', $this->promotionModelReturning($promotion));
+        $this->setPrivateProperty($service, 'cacheService', $this->cacheServiceReturning([$this->productItem()]));
+        $this->setPrivateProperty($service, 'db', $this->dbReturningSyncedPromotionProduct('2026-05-11 20:55:52'));
+
+        $preview = $service->previewPromotionProducts($filters, 15.00, '2026-05-05T10:23', [
+            'promotion_id' => 43,
+            'discount_percent' => 15.00,
+            'filters' => $filters,
+            'start_date' => '2026-05-05T10:23',
+            'change_type' => 'active_discount_correction',
+        ]);
+        $row = $preview['products'][0];
+
+        $this->assertSame(0, $preview['total_invalid_products']);
+        $this->assertTrue($row['will_apply']);
+        $this->assertTrue($row['omnibus_revalidation_skipped']);
+    }
+
+    public function testEditPreviewWithAuditedCorrectionStillValidatesNewMatchingProduct(): void {
+        $service = $this->createPromotionService($this->createPricingService([
+            'candidate_omnibus_reference_price' => 70.00,
+            'omnibus_reference_price' => null,
+            'rolling_lowest_price_last_30_days' => 70.00,
+            'is_price_drop_candidate' => true,
+            'is_valid_omnibus_reduction' => false,
+            'invalid_reduction_reason' => 'not_below_30_day_lowest',
+        ]));
+        $promotion = [
+            'id' => 43,
+            'status' => 'active',
+            'discount_percent' => 10.00,
+            'start_date' => '2026-05-05 10:23:00',
+            'created_at' => '2026-05-06 08:33:26',
+            'omnibus_terms_updated_at' => null,
+            'updated_at' => '2026-05-13 12:00:00',
+            'filters' => '{"brand_id":["444"]}',
+        ];
+        $filters = ['brand_id' => ['444', '555']];
+
+        $this->setPrivateProperty($service, 'promotionModel', $this->promotionModelReturning($promotion));
+        $this->setPrivateProperty($service, 'cacheService', $this->cacheServiceReturning([$this->productItem()]));
+        $this->setPrivateProperty($service, 'db', $this->dbReturningNoPromotionProduct());
+
+        $preview = $service->previewPromotionProducts($filters, 15.00, '2026-05-05T10:23', [
+            'promotion_id' => 43,
+            'discount_percent' => 15.00,
+            'filters' => $filters,
+            'start_date' => '2026-05-05T10:23',
+            'change_type' => 'active_discount_correction',
+        ]);
+        $row = $preview['products'][0];
+
+        $this->assertSame(1, $preview['total_invalid_products']);
+        $this->assertFalse($row['will_apply']);
+        $this->assertArrayNotHasKey('omnibus_revalidation_skipped', $row);
+    }
+
     public function testExistingPromotionProductSkipsRevalidationWhenTermsDidNotChange(): void {
         $pricingService = $this->createPricingService([
             'candidate_omnibus_reference_price' => null,

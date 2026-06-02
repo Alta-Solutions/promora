@@ -121,6 +121,34 @@ class OmnibusSyncServiceTest extends TestCase {
         $this->assertSame('2026-05-13 09:10:11', $map['1101:base']->format('Y-m-d H:i:s'));
     }
 
+    public function testActivePromotionReferenceMapUsesLockedProductLifecycleWhenItIsNewer(): void {
+        $service = $this->createService(new class {
+            public function seedInitialPriceHistoryBatch(string $storeHash, array $pricesToSeed): int {
+                return count($pricesToSeed);
+            }
+        });
+        $this->setPrivateProperty($service, 'promotionsHasOmnibusTermsUpdatedAt', true);
+        $this->setPrivateProperty($service, 'promotionProductsHasOmnibusReferenceAt', true);
+        $this->setPrivateProperty($service, 'db', new class {
+            public function fetchAll($sql, $params = []): array {
+                return [[
+                    'product_id' => 1101,
+                    'variant_id' => null,
+                    'omnibus_reference_at' => '2026-05-14 11:22:33',
+                    'start_date' => '2026-05-12 15:42:00',
+                    'created_at' => '2026-05-12 15:45:43',
+                    'omnibus_terms_updated_at' => '2026-05-13 09:10:11',
+                ]];
+            }
+        });
+
+        $method = new ReflectionMethod($service, 'fetchActivePromotionReferenceMap');
+        $method->setAccessible(true);
+        $map = $method->invoke($service, [1101]);
+
+        $this->assertSame('2026-05-14 11:22:33', $map['1101:base']->format('Y-m-d H:i:s'));
+    }
+
     public function testAggregatedUpdateUsesCachedObservationWhenActivationHistoryIsMissing(): void {
         $pricingService = new class {
             public ?DateTimeImmutable $referenceAt = null;
@@ -223,6 +251,57 @@ class OmnibusSyncServiceTest extends TestCase {
         ]);
 
         $this->assertSame('2026-05-12 16:33:03', $pricingService->referenceAt->format('Y-m-d H:i:s'));
+    }
+
+    public function testAggregatedUpdateKeepsLockedLifecycleInsteadOfCorrectionPriceActivation(): void {
+        $pricingService = new class {
+            public ?DateTimeImmutable $referenceAt = null;
+
+            public function getDisplayData(
+                string $storeHash,
+                int $productId,
+                ?int $variantId,
+                string $currency,
+                $currentPrice = null,
+                ?DateTimeImmutable $referenceAt = null,
+                array $options = []
+            ): array {
+                $this->referenceAt = $referenceAt;
+
+                return [
+                    'current_price' => '8.5000',
+                    'rolling_lowest_price_last_30_days' => '8.0000',
+                    'lowest_price_last_30_days' => '8.0000',
+                    'is_valid_omnibus_reduction' => true,
+                    'omnibus_reference_price' => '10.0000',
+                    'effective_currency' => $currency,
+                ];
+            }
+        };
+
+        $service = $this->createService(new class {
+            public function seedInitialPriceHistoryBatch(string $storeHash, array $pricesToSeed): int {
+                return count($pricesToSeed);
+            }
+        }, $pricingService);
+        $this->setPrivateProperty($service, 'lockedPromotionReferenceKeys', ['1101:base' => true]);
+
+        $method = new ReflectionMethod($service, 'buildAggregatedUpdateForProduct');
+        $method->setAccessible(true);
+        $method->invoke($service, 1101, [[
+            'product_id' => 1101,
+            'variant_id' => null,
+            'type' => 'product',
+            'price' => '10.00',
+            'sale_price' => '8.50',
+            'cached_at' => '2026-05-20 12:00:00',
+        ]], 'EUR', [
+            '1101:base' => new DateTimeImmutable('2026-05-12 15:45:43'),
+        ], [
+            '1101:base' => new DateTimeImmutable('2026-05-20 11:59:59'),
+        ]);
+
+        $this->assertSame('2026-05-12 15:45:43', $pricingService->referenceAt->format('Y-m-d H:i:s'));
     }
 
     public function testAggregatedUpdateBuildsVariantReferencePayloadForVariantProducts(): void {

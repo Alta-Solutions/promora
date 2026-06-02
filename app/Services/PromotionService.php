@@ -14,11 +14,15 @@ class PromotionService {
     private $storeHash;
     private $omnibusPricingService;
     private $storeConfigCache = null;
+    private $priceHistoryHasVariantId;
     private const API_PRODUCT_LIMIT = 250;
     private const BLOCK_BELOW_COST_PRICE_FILTER_KEY = '_block_below_cost_price';
     private const MANUAL_UNBLOCK_FILTER_KEY = '_manual_unblocked_items';
     private const COST_PRICE_BLOCK_ENABLED_ITEM_FLAG = '_cost_price_block_enabled';
     private const MANUAL_UNBLOCK_ITEM_FLAG = '_manual_cost_price_unblock';
+    private const CHANGE_TYPE_STANDARD = 'standard';
+    private const CHANGE_TYPE_ACTIVE_DISCOUNT_CORRECTION = 'active_discount_correction';
+    private const MAX_CORRECTION_REASON_LENGTH = 1000;
     
 public function __construct(Database $db = null) {
         $this->promotionModel = new Promotion();
@@ -73,7 +77,7 @@ public function __construct(Database $db = null) {
         return $promotionId;
     }
 
-    public function updatePromotion($promotionId, array $data) {
+    public function updatePromotion($promotionId, array $data, array $context = []) {
         $existingPromotion = $this->promotionModel->findById($promotionId);
         if (!$existingPromotion) {
             throw new \InvalidArgumentException("Promotion not found.");
@@ -84,11 +88,18 @@ public function __construct(Database $db = null) {
         $data['status'] = $status;
         $syncRelevantChanges = $this->hasPromotionSyncRelevantChanges($existingPromotion, $data);
         $omnibusTermsChanged = $this->hasPromotionOmnibusTermsChanged($existingPromotion, $data);
-        if ($omnibusTermsChanged) {
+        $correctionRevision = $this->validateActiveDiscountCorrectionRequest(
+            $existingPromotion,
+            $data,
+            $context
+        );
+        if ($omnibusTermsChanged && $correctionRevision === null) {
             $data['omnibus_terms_updated_at'] = date('Y-m-d H:i:s');
         }
 
-        $result = $this->promotionModel->update($promotionId, $data);
+        $result = $correctionRevision === null
+            ? $this->promotionModel->update($promotionId, $data)
+            : $this->savePromotionUpdateWithCorrectionRevision($promotionId, $data, $correctionRevision);
 
         if ($status === 'active' && $syncRelevantChanges) {
             $this->queueActivationJobsForPromotion($promotionId, $data['filters'] ?? []);
@@ -532,7 +543,10 @@ public function __construct(Database $db = null) {
         ];
         $existingPreviewPromotion = $this->findPromotionFromPreviewContext($previewContext);
         $skipOmnibusRevalidation = is_array($existingPreviewPromotion)
-            && !$this->hasPromotionOmnibusTermsChanged($existingPreviewPromotion, $previewContext);
+            && (
+                !$this->hasPromotionOmnibusTermsChanged($existingPreviewPromotion, $previewContext)
+                || $this->isActiveDiscountCorrectionPreview($existingPreviewPromotion, $previewContext)
+            );
         $existingPromotionReferenceAt = is_array($existingPreviewPromotion)
             ? $this->resolvePromotionOmnibusReferenceAt($existingPreviewPromotion)
             : null;
@@ -853,9 +867,13 @@ public function __construct(Database $db = null) {
                         $duplicateIdsToDelete[] = (int)$duplicateRow['id'];
                     }
 
+                    $promotionChanged = (int)($primaryRow['promotion_id'] ?? 0) !== $promo['promotion_id'];
+                    $lifecycleResetSql = $promotionChanged
+                        ? ', first_applied_at = NOW(), omnibus_reference_at = NOW()'
+                        : '';
                     $this->db->query(
                         "UPDATE promotion_products
-                         SET promotion_id = ?, custom_field_id = ?, synced_at = NOW()
+                         SET promotion_id = ?, custom_field_id = ?{$lifecycleResetSql}, synced_at = NOW()
                          WHERE store_hash = ? AND id = ?",
                         [
                             $promo['promotion_id'],
@@ -926,7 +944,7 @@ public function __construct(Database $db = null) {
         }
 
         return $this->db->fetchAll(
-            "SELECT id, product_id, variant_id
+            "SELECT id, promotion_id, product_id, variant_id
              FROM promotion_products
              WHERE store_hash = ? AND (" . implode(' OR ', $conditions) . ")
              ORDER BY product_id ASC, variant_id ASC, synced_at DESC, id DESC",
@@ -943,7 +961,7 @@ public function __construct(Database $db = null) {
         $bindings = [];
 
         foreach ($promotions as $promo) {
-            $values[] = '(?, ?, ?, ?, ?, NOW())';
+            $values[] = '(?, ?, ?, ?, ?, NOW(), NOW(), NOW())';
             $bindings = array_merge($bindings, [
                 $this->storeHash,
                 $promo['promotion_id'],
@@ -955,7 +973,7 @@ public function __construct(Database $db = null) {
 
         $this->db->query(
             "INSERT INTO promotion_products
-             (store_hash, promotion_id, product_id, variant_id, custom_field_id, synced_at)
+             (store_hash, promotion_id, product_id, variant_id, custom_field_id, first_applied_at, omnibus_reference_at, synced_at)
              VALUES " . implode(', ', $values),
             $bindings
         );
@@ -1759,7 +1777,10 @@ public function __construct(Database $db = null) {
 
         if (
             is_array($existingPromotion)
-            && !$this->hasPromotionOmnibusTermsChanged($existingPromotion, $context)
+            && (
+                !$this->hasPromotionOmnibusTermsChanged($existingPromotion, $context)
+                || $this->isActiveDiscountCorrectionPreview($existingPromotion, $context)
+            )
         ) {
             return $this->resolvePromotionOmnibusReferenceAt($existingPromotion);
         }
@@ -1841,7 +1862,10 @@ public function __construct(Database $db = null) {
         $existingPromotion = $this->findPromotionFromPreviewContext($context);
 
         return is_array($existingPromotion)
-            && !$this->hasPromotionOmnibusTermsChanged($existingPromotion, $context);
+            && (
+                !$this->hasPromotionOmnibusTermsChanged($existingPromotion, $context)
+                || $this->isActiveDiscountCorrectionPreview($existingPromotion, $context)
+            );
     }
 
     private function findPromotionFromPreviewContext(array $context): ?array {
@@ -1863,6 +1887,26 @@ public function __construct(Database $db = null) {
         $omnibus['omnibus_revalidation_skipped'] = true;
 
         return $omnibus;
+    }
+
+    private function isActiveDiscountCorrectionPreview(array $existingPromotion, array $context): bool {
+        if (($context['change_type'] ?? self::CHANGE_TYPE_STANDARD) !== self::CHANGE_TYPE_ACTIVE_DISCOUNT_CORRECTION) {
+            return false;
+        }
+
+        if ((string)($existingPromotion['status'] ?? '') !== 'active') {
+            return false;
+        }
+
+        if (
+            $this->normalizeDateForComparison($existingPromotion['start_date'] ?? null)
+                !== $this->normalizeDateForComparison($context['start_date'] ?? null)
+        ) {
+            return false;
+        }
+
+        return round((float)($existingPromotion['discount_percent'] ?? 0), 2)
+            !== round((float)($context['discount_percent'] ?? 0), 2);
     }
 
     private function isExistingPromotionProductCurrentForTerms(array $product, array $promotion): bool {
@@ -1910,6 +1954,224 @@ public function __construct(Database $db = null) {
         }
 
         return null;
+    }
+
+    private function validateActiveDiscountCorrectionRequest(
+        array $existingPromotion,
+        array $newData,
+        array $context
+    ): ?array {
+        $changeType = trim((string)($context['change_type'] ?? self::CHANGE_TYPE_STANDARD));
+        if ($changeType === '') {
+            $changeType = self::CHANGE_TYPE_STANDARD;
+        }
+
+        if ($changeType === self::CHANGE_TYPE_STANDARD) {
+            return null;
+        }
+
+        if ($changeType !== self::CHANGE_TYPE_ACTIVE_DISCOUNT_CORRECTION) {
+            throw new \InvalidArgumentException($this->translateMessage(
+                'promotions.validation.correction_mode_invalid',
+                [],
+                'Unsupported promotion correction mode.'
+            ));
+        }
+
+        if (
+            (string)($existingPromotion['status'] ?? '') !== 'active'
+            || (string)($newData['status'] ?? '') !== 'active'
+        ) {
+            throw new \InvalidArgumentException($this->translateMessage(
+                'promotions.validation.correction_active_only',
+                [],
+                'An Omnibus correction can be used only while the promotion remains active.'
+            ));
+        }
+
+        $oldDiscount = round((float)($existingPromotion['discount_percent'] ?? 0), 2);
+        $newDiscount = round((float)($newData['discount_percent'] ?? 0), 2);
+        if ($oldDiscount === $newDiscount) {
+            throw new \InvalidArgumentException($this->translateMessage(
+                'promotions.validation.correction_discount_required',
+                [],
+                'An Omnibus correction requires a discount percentage change.'
+            ));
+        }
+
+        if (
+            $this->normalizeDateForComparison($existingPromotion['start_date'] ?? null)
+                !== $this->normalizeDateForComparison($newData['start_date'] ?? null)
+        ) {
+            throw new \InvalidArgumentException($this->translateMessage(
+                'promotions.validation.correction_start_date_unchanged',
+                [],
+                'The promotion start date cannot be changed during an Omnibus correction.'
+            ));
+        }
+
+        $reason = trim((string)($context['correction_reason'] ?? ''));
+        if ($reason === '') {
+            throw new \InvalidArgumentException($this->translateMessage(
+                'promotions.validation.correction_reason_required',
+                [],
+                'Enter the reason for the Omnibus correction.'
+            ));
+        }
+
+        $reasonLength = function_exists('mb_strlen') ? mb_strlen($reason) : strlen($reason);
+        if ($reasonLength > self::MAX_CORRECTION_REASON_LENGTH) {
+            throw new \InvalidArgumentException($this->translateMessage(
+                'promotions.validation.correction_reason_too_long',
+                ['max' => self::MAX_CORRECTION_REASON_LENGTH],
+                'The Omnibus correction reason may contain at most {max} characters.'
+            ));
+        }
+
+        $actorSource = trim((string)($context['actor_source'] ?? ''));
+        $actorUserId = trim((string)($context['actor_user_id'] ?? ''));
+        if ($actorSource !== 'bigcommerce' || $actorUserId === '') {
+            throw new \InvalidArgumentException($this->translateMessage(
+                'promotions.validation.correction_bigcommerce_identity_required',
+                [],
+                'Open the app from the BigCommerce control panel before using an Omnibus correction.'
+            ));
+        }
+
+        return [
+            'change_type' => self::CHANGE_TYPE_ACTIVE_DISCOUNT_CORRECTION,
+            'reason' => $reason,
+            'actor_source' => $actorSource,
+            'actor_user_id' => $actorUserId,
+            'actor_email' => trim((string)($context['actor_email'] ?? '')) ?: null,
+            'actor_is_owner' => !empty($context['actor_is_owner']) ? 1 : 0,
+            'old_discount_percent' => $oldDiscount,
+            'new_discount_percent' => $newDiscount,
+            'lifecycle_reference_at' => $this->resolvePromotionOmnibusReferenceAt($existingPromotion)->format('Y-m-d H:i:s'),
+            'old_terms' => $this->encodePromotionRevisionTerms($existingPromotion),
+            'new_terms' => $this->encodePromotionRevisionTerms($newData),
+        ];
+    }
+
+    private function savePromotionUpdateWithCorrectionRevision(
+        $promotionId,
+        array $data,
+        array $revision
+    ) {
+        $transactionStarted = $this->db->beginTransaction();
+
+        try {
+            if ($this->isOmnibusEnabled()) {
+                $this->lockExistingPromotionProductOmnibusReferences(
+                    (int)$promotionId,
+                    $revision['lifecycle_reference_at']
+                );
+            }
+            $result = $this->promotionModel->update($promotionId, $data);
+            $this->db->query(
+                "INSERT INTO promotion_revisions
+                 (store_hash, promotion_id, change_type, reason, actor_source, actor_user_id, actor_email, actor_is_owner, old_discount_percent, new_discount_percent, old_terms, new_terms, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())",
+                [
+                    $this->storeHash,
+                    (int)$promotionId,
+                    $revision['change_type'],
+                    $revision['reason'],
+                    $revision['actor_source'],
+                    $revision['actor_user_id'],
+                    $revision['actor_email'],
+                    $revision['actor_is_owner'],
+                    $revision['old_discount_percent'],
+                    $revision['new_discount_percent'],
+                    $revision['old_terms'],
+                    $revision['new_terms'],
+                ]
+            );
+
+            if ($transactionStarted) {
+                $this->db->commit();
+            }
+
+            return $result;
+        } catch (\Throwable $e) {
+            if ($transactionStarted) {
+                $this->db->rollback();
+            }
+
+            throw $e;
+        }
+    }
+
+    private function lockExistingPromotionProductOmnibusReferences(
+        int $promotionId,
+        string $fallbackReferenceAt
+    ): void {
+        $historyVariantSql = $this->priceHistoryHasVariantId()
+            ? 'AND ph.variant_id <=> pp.variant_id'
+            : 'AND pp.variant_id IS NULL';
+        $this->db->query(
+            "UPDATE promotion_products pp
+             LEFT JOIN products_cache pc
+                ON pc.store_hash COLLATE utf8mb4_unicode_ci = pp.store_hash COLLATE utf8mb4_unicode_ci
+               AND pc.product_id = pp.product_id
+               AND pc.variant_id <=> pp.variant_id
+             SET pp.omnibus_reference_at = COALESCE(
+                    pp.omnibus_reference_at,
+                    (
+                        SELECT MIN(ph.recorded_at)
+                        FROM product_price_history ph
+                        WHERE ph.store_hash COLLATE utf8mb4_unicode_ci = pp.store_hash COLLATE utf8mb4_unicode_ci
+                          AND ph.product_id = pp.product_id
+                          {$historyVariantSql}
+                          AND ROUND(ph.price, 4) = ROUND(
+                              CASE
+                                  WHEN pc.sale_price IS NOT NULL AND pc.sale_price > 0 THEN pc.sale_price
+                                  ELSE pc.price
+                              END,
+                              4
+                          )
+                          AND ph.recorded_at >= ?
+                    ),
+                    ?
+                 ),
+                 pp.first_applied_at = COALESCE(pp.first_applied_at, ?)
+             WHERE pp.store_hash = ?
+               AND pp.promotion_id = ?
+               AND pp.omnibus_reference_at IS NULL",
+            [
+                $fallbackReferenceAt,
+                $fallbackReferenceAt,
+                $fallbackReferenceAt,
+                $this->storeHash,
+                $promotionId,
+            ]
+        );
+    }
+
+    private function priceHistoryHasVariantId(): bool {
+        if ($this->priceHistoryHasVariantId !== null) {
+            return $this->priceHistoryHasVariantId;
+        }
+
+        try {
+            $column = $this->db->fetchOne("SHOW COLUMNS FROM product_price_history LIKE 'variant_id'");
+            $this->priceHistoryHasVariantId = $column !== false && $column !== null;
+        } catch (\Throwable $e) {
+            $this->priceHistoryHasVariantId = false;
+        }
+
+        return $this->priceHistoryHasVariantId;
+    }
+
+    private function encodePromotionRevisionTerms(array $promotion): string {
+        $terms = [];
+        foreach (['discount_percent', 'start_date', 'end_date', 'priority', 'filters'] as $field) {
+            if (array_key_exists($field, $promotion)) {
+                $terms[$field] = $promotion[$field];
+            }
+        }
+
+        return json_encode($terms, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}';
     }
 
     private function hasPromotionOmnibusTermsChanged(array $existingPromotion, array $newData): bool {

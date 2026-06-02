@@ -122,9 +122,30 @@ try {
             `original_price` DECIMAL(20, 4) NOT NULL,
             `promo_price` DECIMAL(20, 4) NOT NULL,
             `custom_field_id` INT UNSIGNED NULL,
+            `first_applied_at` DATETIME NULL,
+            `omnibus_reference_at` DATETIME NULL,
             `synced_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             UNIQUE KEY `store_product_variant` (`store_hash`, `product_id`, `variant_id`),
             INDEX `idx_promotion_id` (`promotion_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+
+        // Audit trag za kontrolisane korekcije aktivnih promocija
+        "CREATE TABLE IF NOT EXISTS `promotion_revisions` (
+            `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            `store_hash` VARCHAR(255) NOT NULL,
+            `promotion_id` INT NOT NULL,
+            `change_type` VARCHAR(50) NOT NULL,
+            `reason` TEXT NOT NULL,
+            `actor_source` VARCHAR(50) NOT NULL,
+            `actor_user_id` VARCHAR(255) NULL,
+            `actor_email` VARCHAR(255) NULL,
+            `actor_is_owner` TINYINT(1) NOT NULL DEFAULT 0,
+            `old_discount_percent` DECIMAL(5, 2) NOT NULL,
+            `new_discount_percent` DECIMAL(5, 2) NOT NULL,
+            `old_terms` LONGTEXT NULL,
+            `new_terms` LONGTEXT NULL,
+            `created_at` DATETIME NOT NULL,
+            INDEX `idx_store_promotion_created` (`store_hash`, `promotion_id`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
         // Tabela za logovanje sinhronizacije

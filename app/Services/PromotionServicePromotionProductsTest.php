@@ -10,9 +10,9 @@ class PromotionServicePromotionProductsTest extends TestCase {
 
             public function fetchAll($sql, $params = []) {
                 return [
-                    ['id' => 12, 'product_id' => 3145, 'variant_id' => null],
-                    ['id' => 11, 'product_id' => 3145, 'variant_id' => null],
-                    ['id' => 10, 'product_id' => 3145, 'variant_id' => null],
+                    ['id' => 12, 'promotion_id' => 43, 'product_id' => 3145, 'variant_id' => null],
+                    ['id' => 11, 'promotion_id' => 43, 'product_id' => 3145, 'variant_id' => null],
+                    ['id' => 10, 'promotion_id' => 43, 'product_id' => 3145, 'variant_id' => null],
                 ];
             }
 
@@ -34,6 +34,7 @@ class PromotionServicePromotionProductsTest extends TestCase {
 
         $this->assertCount(2, $db->queries);
         $this->assertStringStartsWith('UPDATE promotion_products', $db->queries[0]['sql']);
+        $this->assertStringNotContainsString('omnibus_reference_at = NOW()', $db->queries[0]['sql']);
         $this->assertSame([43, 30464, 'i5zrevrrdl', 12], $db->queries[0]['params']);
         $this->assertStringStartsWith('DELETE FROM promotion_products', $db->queries[1]['sql']);
         $this->assertSame(['i5zrevrrdl', 11, 10], $db->queries[1]['params']);
@@ -73,7 +74,38 @@ class PromotionServicePromotionProductsTest extends TestCase {
 
         $this->assertCount(1, $db->queries);
         $this->assertStringStartsWith('INSERT INTO promotion_products', $db->queries[0]['sql']);
+        $this->assertStringContainsString('first_applied_at, omnibus_reference_at', $db->queries[0]['sql']);
         $this->assertSame(['i5zrevrrdl', 43, 3145, null, 30464], $db->queries[0]['params']);
+    }
+
+    public function testBatchSavePromotionProductsResetsLifecycleWhenWinningPromotionChanges(): void {
+        $db = new class {
+            public $queries = [];
+
+            public function fetchAll($sql, $params = []) {
+                return [
+                    ['id' => 12, 'promotion_id' => 42, 'product_id' => 3145, 'variant_id' => null],
+                ];
+            }
+
+            public function query($sql, $params = []) {
+                $this->queries[] = [
+                    'sql' => preg_replace('/\s+/', ' ', trim($sql)),
+                    'params' => $params,
+                ];
+            }
+        };
+
+        $service = $this->createService($db);
+        $this->invokeBatchSavePromotionProducts($service, [[
+            'promotion_id' => 43,
+            'product_id' => 3145,
+            'variant_id' => null,
+            'custom_field_id' => 30464,
+        ]]);
+
+        $this->assertCount(1, $db->queries);
+        $this->assertStringContainsString('first_applied_at = NOW(), omnibus_reference_at = NOW()', $db->queries[0]['sql']);
     }
 
     public function testCleanupIsRequiredWhenUpdatedPromotionIsNoLongerActiveAndStillHasProducts(): void {

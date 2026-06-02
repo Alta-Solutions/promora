@@ -153,8 +153,11 @@ class PromotionController {
             }
 
             $data = $this->getFormData();
+            $updateContext = $this->getPromotionUpdateContext();
+            $omnibusChangeType = $updateContext['change_type'];
+            $omnibusCorrectionReason = $updateContext['correction_reason'];
             try {
-                $this->promotionService->updatePromotion($id, $data);
+                $this->promotionService->updatePromotion($id, $data, $updateContext);
 
                 header('Location: ?route=promotions&success=updated');
                 exit;
@@ -174,6 +177,9 @@ class PromotionController {
         if (!isset($promotion)) {
             $promotion = $this->promotionModel->findById($id);
         }
+        $omnibusChangeType = $omnibusChangeType ?? 'standard';
+        $omnibusCorrectionReason = $omnibusCorrectionReason ?? '';
+        $canUseActivePromotionCorrection = $this->canUseActivePromotionCorrection();
         $categories = $this->api->getCategories();
         $brands = $this->api->getBrands();
         
@@ -218,6 +224,7 @@ class PromotionController {
                     'filters' => $filters,
                     'discount_percent' => $discountPercent,
                     'start_date' => $_POST['start_date'] ?? null,
+                    'change_type' => $this->getPreviewOmnibusChangeType(),
                 ]
             );
             echo json_encode(['success' => true, 'data' => $preview]);
@@ -323,6 +330,30 @@ class PromotionController {
             'description' => $_POST['description'] ?? '',
             'target_category_id' => $_POST['target_category_id'] ?? null
         ];
+    }
+
+    private function getPromotionUpdateContext(): array {
+        return [
+            'change_type' => $_POST['omnibus_change_type'] ?? 'standard',
+            'correction_reason' => trim((string)($_POST['omnibus_correction_reason'] ?? '')),
+            'actor_source' => $_SESSION['auth_source'] ?? (isset($_SESSION['username']) ? 'local_admin' : 'unknown'),
+            'actor_user_id' => $_SESSION['user_id'] ?? null,
+            'actor_email' => $_SESSION['user_email'] ?? ($_SESSION['username'] ?? null),
+            'actor_is_owner' => !empty($_SESSION['is_owner']),
+        ];
+    }
+
+    private function canUseActivePromotionCorrection(): bool {
+        return ($_SESSION['auth_source'] ?? null) === 'bigcommerce'
+            && trim((string)($_SESSION['user_id'] ?? '')) !== '';
+    }
+
+    private function getPreviewOmnibusChangeType(): string {
+        $changeType = (string)($_POST['omnibus_change_type'] ?? 'standard');
+
+        return $changeType === 'active_discount_correction' && $this->canUseActivePromotionCorrection()
+            ? $changeType
+            : 'standard';
     }
 
     private function buildDuplicatePromotionDraft(array $promotion): array {

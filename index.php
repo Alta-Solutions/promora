@@ -68,7 +68,7 @@ $controllerMap = [
     ],
     'logs' => [
         'class' => \App\Controllers\LogsController::class,
-        'actions' => ['index', 'webhooks'],
+        'actions' => ['index', 'webhooks', 'corrections'],
     ],
     'cache' => [
         'class' => \App\Controllers\CacheController::class,

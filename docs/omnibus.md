@@ -116,6 +116,31 @@ revalidation when their `promotion_products.synced_at` is newer than the last
 Omnibus terms update. They can still be synced so metadata/custom fields are
 refreshed.
 
+### Audited Active Promotion Correction
+
+The edit form supports an explicit `active_discount_correction` mode for fixing
+an incorrectly entered discount percentage without interpreting the correction
+as a new campaign. It is intentionally narrow:
+
+- the promotion must already be active and remain active
+- the discount percentage must actually change
+- the start date must remain unchanged
+- a reason is required
+- the actor must come from the verified BigCommerce load session
+- the correction is written to `promotion_revisions`
+
+The bypass applies only to products and variants that already have an active
+`promotion_products` row for the same promotion. Newly matching products still
+use the real application time and normal 30-day validation.
+
+New `promotion_products` rows lock `omnibus_reference_at`. Retries and audited
+corrections preserve it. When another promotion takes ownership, the locked
+reference is reset. Legacy rows without this field value continue using the
+existing history-observation fallback. Immediately before an audited correction,
+legacy rows for that promotion materialize the earliest matching current promo
+price observation after the lifecycle reference, with the lifecycle date as a
+fallback.
+
 Backend promotion validation must not read BigCommerce storefront metadata as an
 authority. `lowest_price_30d` custom fields and `promora.lowest_price_30d`
 metafields are output artifacts for the storefront. Promotion application uses

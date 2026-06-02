@@ -59,6 +59,22 @@
 .status-success { color: #10b981; font-weight: 600; }
 .status-error { color: #ef4444; font-weight: 600; }
 
+.discount-change {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 4px;
+    background: #eff6ff;
+    color: #1e40af;
+    font-family: monospace;
+    font-weight: 600;
+}
+
+.log-meta {
+    margin-top: 3px;
+    color: #9ca3af;
+    font-size: 0.75rem;
+}
+
 .log-tabs {
     display: flex;
     border-bottom: 1px solid #e5e7eb;

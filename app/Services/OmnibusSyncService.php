@@ -16,6 +16,8 @@ class OmnibusSyncService {
     private $priceLogger;
     private $productsCacheHasType;
     private $promotionsHasOmnibusTermsUpdatedAt;
+    private $promotionProductsHasOmnibusReferenceAt;
+    private $lockedPromotionReferenceKeys = [];
 
     private const BATCH_SIZE = 50;
 
@@ -303,7 +305,10 @@ class OmnibusSyncService {
                     $variantId,
                     $promotionReferenceMap
                 );
-                if ($promotionReferenceAt === null) {
+                if (
+                    $promotionReferenceAt === null
+                    || $this->hasLockedPromotionReferenceForRow($productId, $variantId)
+                ) {
                     continue;
                 }
 
@@ -365,6 +370,7 @@ class OmnibusSyncService {
     }
 
     private function fetchActivePromotionReferenceMap(array $productIds): array {
+        $this->lockedPromotionReferenceKeys = [];
         $productIds = array_values(array_unique(array_filter(array_map('intval', $productIds))));
         if (empty($productIds)) {
             return [];
@@ -373,11 +379,15 @@ class OmnibusSyncService {
         $termsUpdatedAtSelect = $this->promotionsHasOmnibusTermsUpdatedAt()
             ? 'p.omnibus_terms_updated_at'
             : 'NULL';
+        $itemReferenceAtSelect = $this->promotionProductsHasOmnibusReferenceAt()
+            ? 'pp.omnibus_reference_at'
+            : 'NULL';
         $placeholders = str_repeat('?,', count($productIds) - 1) . '?';
         $now = date('Y-m-d H:i:s');
         $rows = $this->db->fetchAll(
             "SELECT pp.product_id,
                     pp.variant_id,
+                    {$itemReferenceAtSelect} AS omnibus_reference_at,
                     p.start_date,
                     p.created_at,
                     {$termsUpdatedAtSelect} AS omnibus_terms_updated_at
@@ -409,7 +419,10 @@ class OmnibusSyncService {
                 continue;
             }
 
-            $map[$key] = $this->resolvePromotionReferenceAt($row);
+            $map[$key] = $this->resolveActivePromotionReferenceAt($row);
+            if ($this->normalizeOptionalReferenceAt($row['omnibus_reference_at'] ?? null) !== null) {
+                $this->lockedPromotionReferenceKeys[$key] = true;
+            }
         }
 
         return $map;
@@ -437,14 +450,19 @@ class OmnibusSyncService {
         $currentPriceObservedAt = null
     ): ?\DateTimeImmutable {
         $exactKey = $this->buildPromotionReferenceKey($productId, $variantId);
-        if (isset($priceActivationMap[$exactKey])) {
+        $hasLockedPromotionReference = $this->hasLockedPromotionReferenceForRow($productId, $variantId);
+        if (
+            !$hasLockedPromotionReference
+            && isset($priceActivationMap[$exactKey])
+        ) {
             return $priceActivationMap[$exactKey];
         }
 
         $promotionReferenceAt = $this->getPromotionReferenceForRow($productId, $variantId, $promotionReferenceMap);
         $observedAt = $this->normalizeOptionalReferenceAt($currentPriceObservedAt);
         if (
-            $promotionReferenceAt !== null
+            !$hasLockedPromotionReference
+            && $promotionReferenceAt !== null
             && $observedAt !== null
             && $observedAt > $promotionReferenceAt
         ) {
@@ -475,6 +493,27 @@ class OmnibusSyncService {
         }
 
         return $latest ?? new \DateTimeImmutable('now');
+    }
+
+    private function resolveActivePromotionReferenceAt(array $promotionProduct): \DateTimeImmutable {
+        $promotionReferenceAt = $this->resolvePromotionReferenceAt($promotionProduct);
+        $itemReferenceAt = $this->normalizeOptionalReferenceAt($promotionProduct['omnibus_reference_at'] ?? null);
+
+        if ($itemReferenceAt !== null && $itemReferenceAt > $promotionReferenceAt) {
+            return $itemReferenceAt;
+        }
+
+        return $promotionReferenceAt;
+    }
+
+    private function hasLockedPromotionReferenceForRow(int $productId, ?int $variantId): bool {
+        $exactKey = $this->buildPromotionReferenceKey($productId, $variantId);
+        if (isset($this->lockedPromotionReferenceKeys[$exactKey])) {
+            return true;
+        }
+
+        $parentKey = $this->buildPromotionReferenceKey($productId, null);
+        return isset($this->lockedPromotionReferenceKeys[$parentKey]);
     }
 
     private function normalizeOptionalReferenceAt($dateTime): ?\DateTimeImmutable {
@@ -625,5 +664,20 @@ class OmnibusSyncService {
         }
 
         return $this->promotionsHasOmnibusTermsUpdatedAt;
+    }
+
+    private function promotionProductsHasOmnibusReferenceAt(): bool {
+        if ($this->promotionProductsHasOmnibusReferenceAt !== null) {
+            return $this->promotionProductsHasOmnibusReferenceAt;
+        }
+
+        try {
+            $column = $this->db->fetchOne("SHOW COLUMNS FROM promotion_products LIKE 'omnibus_reference_at'");
+            $this->promotionProductsHasOmnibusReferenceAt = $column !== false && $column !== null;
+        } catch (\Throwable $e) {
+            $this->promotionProductsHasOmnibusReferenceAt = false;
+        }
+
+        return $this->promotionProductsHasOmnibusReferenceAt;
     }
 }
