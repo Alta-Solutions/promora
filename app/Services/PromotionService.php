@@ -469,7 +469,8 @@ public function __construct(Database $db = null) {
         $debugLog[] = "Custom field updates (Multi-cURL): {$fieldSuccess} success";
         
         // 🚀 IZMENA: Zameniti petlju za individualne INSERT-e jednim BATCH INSERT-om
-        $this->batchSavePromotionProducts($appliedPromotions);
+        $promotionAppliedAt = $this->getDatabaseTimestamp();
+        $this->batchSavePromotionProducts($appliedPromotions, $promotionAppliedAt);
         $debugLog[] = "Database records saved/updated in batch.";
         
         // Cleanup expired products (sada će koristiti batch metode)
@@ -478,7 +479,7 @@ public function __construct(Database $db = null) {
         $debugLog[] = "Cleaned {$cleanedCount} expired products";
         
         // 🚀 OPTIMIZACIJA: Direktno ažuriranje lokalnog keša (bez API poziva)
-        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions);
+        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions, $promotionAppliedAt);
         $this->cacheService->updatePriceCacheDirectly($cachePriceUpdates);
 
         if (($cleanedCount + $expiredCleanedCount) > 0) {
@@ -828,15 +829,15 @@ public function __construct(Database $db = null) {
         ];
     }
     
-    private function batchSavePromotionProducts($promotions) {
+    private function batchSavePromotionProducts($promotions, ?string $lifecycleAt = null) {
         if (empty($promotions)) {
             return;
         }
 
-        $this->batchSavePromotionProductsNullSafe($promotions);
+        $this->batchSavePromotionProductsNullSafe($promotions, $lifecycleAt);
     }
 
-    private function batchSavePromotionProductsNullSafe(array $promotions): void {
+    private function batchSavePromotionProductsNullSafe(array $promotions, ?string $lifecycleAt = null): void {
         $promotions = $this->normalizePromotionProductRows($promotions);
         if (empty($promotions)) {
             return;
@@ -868,19 +869,35 @@ public function __construct(Database $db = null) {
                     }
 
                     $promotionChanged = (int)($primaryRow['promotion_id'] ?? 0) !== $promo['promotion_id'];
-                    $lifecycleResetSql = $promotionChanged
-                        ? ', first_applied_at = NOW(), omnibus_reference_at = NOW()'
-                        : '';
+                    $lifecycleResetSql = '';
+                    $bindings = [
+                        $promo['promotion_id'],
+                        $promo['custom_field_id'],
+                    ];
+                    if ($promotionChanged) {
+                        if ($lifecycleAt !== null) {
+                            $lifecycleResetSql = ', first_applied_at = ?, omnibus_reference_at = ?';
+                            $bindings[] = $lifecycleAt;
+                            $bindings[] = $lifecycleAt;
+                        } else {
+                            $lifecycleResetSql = ', first_applied_at = NOW(), omnibus_reference_at = NOW()';
+                        }
+                    }
+
+                    if ($lifecycleAt !== null) {
+                        $syncedAtSql = '?';
+                        $bindings[] = $lifecycleAt;
+                    } else {
+                        $syncedAtSql = 'NOW()';
+                    }
+
+                    $bindings[] = $this->storeHash;
+                    $bindings[] = (int)$primaryRow['id'];
                     $this->db->query(
                         "UPDATE promotion_products
-                         SET promotion_id = ?, custom_field_id = ?{$lifecycleResetSql}, synced_at = NOW()
+                         SET promotion_id = ?, custom_field_id = ?{$lifecycleResetSql}, synced_at = {$syncedAtSql}
                          WHERE store_hash = ? AND id = ?",
-                        [
-                            $promo['promotion_id'],
-                            $promo['custom_field_id'],
-                            $this->storeHash,
-                            (int)$primaryRow['id'],
-                        ]
+                        $bindings
                     );
                     continue;
                 }
@@ -896,7 +913,7 @@ public function __construct(Database $db = null) {
                 );
             }
 
-            $this->insertPromotionProductRows($rowsToInsert);
+            $this->insertPromotionProductRows($rowsToInsert, $lifecycleAt);
         }
     }
 
@@ -952,7 +969,7 @@ public function __construct(Database $db = null) {
         );
     }
 
-    private function insertPromotionProductRows(array $promotions): void {
+    private function insertPromotionProductRows(array $promotions, ?string $lifecycleAt = null): void {
         if (empty($promotions)) {
             return;
         }
@@ -961,6 +978,21 @@ public function __construct(Database $db = null) {
         $bindings = [];
 
         foreach ($promotions as $promo) {
+            if ($lifecycleAt !== null) {
+                $values[] = '(?, ?, ?, ?, ?, ?, ?, ?)';
+                $bindings = array_merge($bindings, [
+                    $this->storeHash,
+                    $promo['promotion_id'],
+                    $promo['product_id'],
+                    $promo['variant_id'],
+                    $promo['custom_field_id'],
+                    $lifecycleAt,
+                    $lifecycleAt,
+                    $lifecycleAt,
+                ]);
+                continue;
+            }
+
             $values[] = '(?, ?, ?, ?, ?, NOW(), NOW(), NOW())';
             $bindings = array_merge($bindings, [
                 $this->storeHash,
@@ -991,6 +1023,19 @@ public function __construct(Database $db = null) {
              VALUES (?, ?, ?, ?, ?, ?, ?)",
             [$this->storeHash, $promotionId, $type, $synced, $errors, round($duration, 2), $message]
         );
+    }
+
+    private function getDatabaseTimestamp(): string {
+        try {
+            $row = $this->db->fetchOne("SELECT NOW() AS current_time");
+            if (!empty($row['current_time'])) {
+                return (new \DateTimeImmutable((string)$row['current_time']))->format('Y-m-d H:i:s');
+            }
+        } catch (\Throwable $e) {
+            // Fallback keeps non-DB tests and degraded environments operational.
+        }
+
+        return date('Y-m-d H:i:s');
     }
 
     public function syncSinglePromotion($promotionId) {
@@ -1132,9 +1177,10 @@ public function __construct(Database $db = null) {
         }
         unset($promo);
 
-        $this->batchSavePromotionProducts($appliedPromotions);
+        $promotionAppliedAt = $this->getDatabaseTimestamp();
+        $this->batchSavePromotionProducts($appliedPromotions, $promotionAppliedAt);
 
-        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions);
+        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions, $promotionAppliedAt);
         $this->cacheService->updatePriceCacheDirectly($cachePriceUpdates);
 
         return [
@@ -2483,6 +2529,7 @@ public function __construct(Database $db = null) {
         );
 
         // 3. Save to DB
+        $promotionAppliedAt = $this->getDatabaseTimestamp();
         $this->batchSavePromotionProducts([[
             'promotion_id' => $promotion['id'],
             'product_id' => $product['product_id'],
@@ -2491,12 +2538,13 @@ public function __construct(Database $db = null) {
             'original_price' => $originalPrice,
             'promo_price' => $promoPrice,
             'custom_field_id' => $customFieldId
-        ]]);
+        ]], $promotionAppliedAt);
 
         $this->cacheService->updatePriceCacheDirectly([[
             'product_id' => $product['product_id'],
             'variant_id' => $product['variant_id'] ?? null,
-            'sale_price' => $promoPrice
+            'sale_price' => $promoPrice,
+            'recorded_at' => $promotionAppliedAt
         ]]);
     }
 
@@ -2661,15 +2709,21 @@ public function __construct(Database $db = null) {
         return $productIds;
     }
 
-    private function buildPromotionCachePriceUpdates(array $promotions): array {
+    private function buildPromotionCachePriceUpdates(array $promotions, ?string $recordedAt = null): array {
         $updates = [];
 
         foreach ($promotions as $promo) {
-            $updates[] = [
+            $update = [
                 'product_id' => $promo['product_id'],
                 'variant_id' => $promo['variant_id'] ?? null,
                 'sale_price' => $promo['promo_price']
             ];
+
+            if ($recordedAt !== null) {
+                $update['recorded_at'] = $recordedAt;
+            }
+
+            $updates[] = $update;
         }
 
         return $updates;

@@ -78,6 +78,39 @@ class PromotionServicePromotionProductsTest extends TestCase {
         $this->assertSame(['i5zrevrrdl', 43, 3145, null, 30464], $db->queries[0]['params']);
     }
 
+    public function testBatchSavePromotionProductsUsesSharedLifecycleTimestampForInsert(): void {
+        $db = new class {
+            public $queries = [];
+
+            public function fetchAll($sql, $params = []) {
+                return [];
+            }
+
+            public function query($sql, $params = []) {
+                $this->queries[] = [
+                    'sql' => preg_replace('/\s+/', ' ', trim($sql)),
+                    'params' => $params,
+                ];
+            }
+        };
+
+        $service = $this->createService($db);
+        $this->invokeBatchSavePromotionProducts($service, [[
+            'promotion_id' => 43,
+            'product_id' => 3145,
+            'variant_id' => null,
+            'custom_field_id' => 30464,
+        ]], '2026-06-03 00:02:31');
+
+        $this->assertCount(1, $db->queries);
+        $this->assertStringContainsString('VALUES (?, ?, ?, ?, ?, ?, ?, ?)', $db->queries[0]['sql']);
+        $this->assertStringNotContainsString('NOW()', $db->queries[0]['sql']);
+        $this->assertSame(
+            ['i5zrevrrdl', 43, 3145, null, 30464, '2026-06-03 00:02:31', '2026-06-03 00:02:31', '2026-06-03 00:02:31'],
+            $db->queries[0]['params']
+        );
+    }
+
     public function testBatchSavePromotionProductsResetsLifecycleWhenWinningPromotionChanges(): void {
         $db = new class {
             public $queries = [];
@@ -106,6 +139,73 @@ class PromotionServicePromotionProductsTest extends TestCase {
 
         $this->assertCount(1, $db->queries);
         $this->assertStringContainsString('first_applied_at = NOW(), omnibus_reference_at = NOW()', $db->queries[0]['sql']);
+    }
+
+    public function testBatchSavePromotionProductsUsesSharedLifecycleTimestampWhenWinningPromotionChanges(): void {
+        $db = new class {
+            public $queries = [];
+
+            public function fetchAll($sql, $params = []) {
+                return [
+                    ['id' => 12, 'promotion_id' => 42, 'product_id' => 3145, 'variant_id' => null],
+                ];
+            }
+
+            public function query($sql, $params = []) {
+                $this->queries[] = [
+                    'sql' => preg_replace('/\s+/', ' ', trim($sql)),
+                    'params' => $params,
+                ];
+            }
+        };
+
+        $service = $this->createService($db);
+        $this->invokeBatchSavePromotionProducts($service, [[
+            'promotion_id' => 43,
+            'product_id' => 3145,
+            'variant_id' => null,
+            'custom_field_id' => 30464,
+        ]], '2026-06-03 00:02:31');
+
+        $this->assertCount(1, $db->queries);
+        $this->assertStringContainsString('first_applied_at = ?, omnibus_reference_at = ?', $db->queries[0]['sql']);
+        $this->assertStringContainsString('synced_at = ?', $db->queries[0]['sql']);
+        $this->assertStringNotContainsString('NOW()', $db->queries[0]['sql']);
+        $this->assertSame(
+            [43, 30464, '2026-06-03 00:02:31', '2026-06-03 00:02:31', '2026-06-03 00:02:31', 'i5zrevrrdl', 12],
+            $db->queries[0]['params']
+        );
+    }
+
+    public function testBatchSavePromotionProductsKeepsLifecycleOnSamePromotionRefreshWithSharedTimestamp(): void {
+        $db = new class {
+            public $queries = [];
+
+            public function fetchAll($sql, $params = []) {
+                return [
+                    ['id' => 12, 'promotion_id' => 43, 'product_id' => 3145, 'variant_id' => null],
+                ];
+            }
+
+            public function query($sql, $params = []) {
+                $this->queries[] = [
+                    'sql' => preg_replace('/\s+/', ' ', trim($sql)),
+                    'params' => $params,
+                ];
+            }
+        };
+
+        $service = $this->createService($db);
+        $this->invokeBatchSavePromotionProducts($service, [[
+            'promotion_id' => 43,
+            'product_id' => 3145,
+            'variant_id' => null,
+            'custom_field_id' => 30464,
+        ]], '2026-06-03 00:02:31');
+
+        $this->assertStringNotContainsString('first_applied_at =', $db->queries[0]['sql']);
+        $this->assertStringNotContainsString('omnibus_reference_at =', $db->queries[0]['sql']);
+        $this->assertSame([43, 30464, '2026-06-03 00:02:31', 'i5zrevrrdl', 12], $db->queries[0]['params']);
     }
 
     public function testCleanupIsRequiredWhenUpdatedPromotionIsNoLongerActiveAndStillHasProducts(): void {
@@ -178,10 +278,10 @@ class PromotionServicePromotionProductsTest extends TestCase {
         return $service;
     }
 
-    private function invokeBatchSavePromotionProducts(PromotionService $service, array $promotions): void {
+    private function invokeBatchSavePromotionProducts(PromotionService $service, array $promotions, ?string $lifecycleAt = null): void {
         $method = new ReflectionMethod($service, 'batchSavePromotionProducts');
         $method->setAccessible(true);
-        $method->invoke($service, $promotions);
+        $method->invoke($service, $promotions, $lifecycleAt);
     }
 
     private function invokeFilterPromotionsWithSuccessfulPriceUpdates(
