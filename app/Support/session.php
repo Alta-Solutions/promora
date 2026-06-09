@@ -1,6 +1,31 @@
 <?php
 
+function appSessionEnvBoolean(string $name): ?bool {
+    $value = $_ENV[$name] ?? getenv($name);
+
+    if ($value === false || $value === null || $value === '') {
+        return null;
+    }
+
+    $normalized = strtolower(trim((string) $value));
+
+    if (in_array($normalized, ['1', 'true', 'yes', 'on'], true)) {
+        return true;
+    }
+
+    if (in_array($normalized, ['0', 'false', 'no', 'off'], true)) {
+        return false;
+    }
+
+    return null;
+}
+
 function appSessionIsSecureRequest(): bool {
+    $secureOverride = appSessionEnvBoolean('SESSION_COOKIE_SECURE');
+    if ($secureOverride !== null) {
+        return $secureOverride;
+    }
+
     if (!empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off') {
         return true;
     }
@@ -17,9 +42,7 @@ function appSessionIsSecureRequest(): bool {
         return true;
     }
 
-    return class_exists('Config', false)
-        && !empty(Config::$APP_URL)
-        && stripos((string) Config::$APP_URL, 'https://') === 0;
+    return false;
 }
 
 function appStartSession(): void {
