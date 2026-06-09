@@ -11,6 +11,7 @@ require_once ROOT_PATH . 'vendor/autoload.php';
 require_once ROOT_PATH . 'config.php';
 
 use App\Models\Database;
+use App\Support\BigCommerceStoreSchema;
 
 // Funkcija za prikaz poruka
 function message($text, $type = 'info') {
@@ -34,12 +35,15 @@ try {
             `access_token` TEXT NOT NULL,
             `context` VARCHAR(255) NOT NULL,
             `scope` TEXT,
+            `user_id` VARCHAR(255) NULL,
+            `user_email` VARCHAR(255) NULL,
             `is_active` TINYINT(1) NOT NULL DEFAULT 1,
             `installed_at` DATETIME NOT NULL,
             `last_accessed` DATETIME NULL,
             `enable_omnibus` TINYINT(1) NOT NULL DEFAULT 0,
             `currency` VARCHAR(10) NOT NULL DEFAULT 'USD',
-            `settings` JSON NULL
+            `settings` JSON NULL,
+            `updated_at` DATETIME NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
         // Tabela za keširanje proizvoda
@@ -304,6 +308,9 @@ try {
             message("  - Error creating table `{$tableName}`: " . $e->getMessage(), 'error');
         }
     }
+
+    BigCommerceStoreSchema::ensure($db);
+    message("  - Table `bigcommerce_stores` columns verified successfully.", 'success');
 
     message("\n--- Database setup complete! ---", 'info');
 

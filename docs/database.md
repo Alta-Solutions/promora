@@ -19,9 +19,12 @@ Key fields:
 - `store_hash`
 - `access_token`
 - `context`
+- `user_id`
+- `user_email`
 - `enable_omnibus`
 - `currency`
 - `settings`
+- `updated_at`
 
 ### `products_cache`
 
