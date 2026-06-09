@@ -37,6 +37,8 @@ When editing code, verify that every query touching store-owned data includes
 ## Important Services
 
 - `PromotionService`: creates, updates, previews, syncs, and cleans up promotions.
+- `PromotionArchiveService`: records searchable promotion/product history and
+  finalizes archives before cleanup removes current promotion ownership rows.
 - `ProductCacheService`: fetches products from BigCommerce and stores product,
   variant, image, custom field, price, and inventory data in local cache.
 - `QueueService`: creates and claims rows in `sync_jobs`.

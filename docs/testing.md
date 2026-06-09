@@ -19,12 +19,13 @@ vendor\bin\phpunit.bat app\Controllers\PromotionControllerSubmissionTokenTest.ph
 vendor\bin\phpunit.bat app\Services\PriceLoggerTest.php
 vendor\bin\phpunit.bat app\Services\OmnibusSyncServiceTest.php
 vendor\bin\phpunit.bat app\Services\PromotionServiceOmnibusValidationTest.php
+vendor\bin\phpunit.bat app\Services\PromotionArchiveServiceTest.php
 ```
 
 Run a grouped set:
 
 ```powershell
-vendor\bin\phpunit.bat app\Controllers\PromotionControllerSubmissionTokenTest.php app\Services\PriceLoggerTest.php app\Services\OmnibusSyncServiceTest.php app\Services\PromotionServiceOmnibusValidationTest.php
+vendor\bin\phpunit.bat app\Controllers\PromotionControllerSubmissionTokenTest.php app\Services\PriceLoggerTest.php app\Services\OmnibusSyncServiceTest.php app\Services\PromotionServiceOmnibusValidationTest.php app\Services\PromotionArchiveServiceTest.php
 ```
 
 Check staged or unstaged diff for whitespace issues:
