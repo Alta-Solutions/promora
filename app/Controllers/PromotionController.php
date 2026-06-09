@@ -35,9 +35,12 @@ class PromotionController {
     
     public function index() {
         $search = $this->getPromotionIndexSearch();
+        $statusFilter = $this->getPromotionIndexStatusFilter();
         $perPage = $this->getPromotionIndexPerPage();
         $page = max(1, (int)$this->getQueryParam('page', '1'));
-        $totalPromotions = $this->promotionModel->countAll(true, $search);
+        $totalPromotions = $this->promotionModel->countAll(true, $search, [
+            'status_filter' => $statusFilter,
+        ]);
         $totalPages = max(1, (int)ceil($totalPromotions / $perPage));
 
         if ($page > $totalPages) {
@@ -47,6 +50,7 @@ class PromotionController {
         $offset = ($page - 1) * $perPage;
         $promotions = $this->promotionModel->findAll(true, [
             'search' => $search,
+            'status_filter' => $statusFilter,
             'limit' => $perPage,
             'offset' => $offset,
         ]);
@@ -59,6 +63,7 @@ class PromotionController {
             'from' => $totalPromotions > 0 ? $offset + 1 : 0,
             'to' => min($offset + $perPage, $totalPromotions),
             'search' => $search,
+            'status_filter' => $statusFilter,
         ];
 
         include __DIR__ . '/../Views/layouts/header.php';
@@ -456,6 +461,14 @@ class PromotionController {
         return in_array($perPage, self::PROMOTION_INDEX_PER_PAGE_OPTIONS, true)
             ? $perPage
             : 25;
+    }
+
+    private function getPromotionIndexStatusFilter(): string {
+        $statusFilter = $this->getQueryParam('status', 'current');
+
+        return in_array($statusFilter, ['current', 'expired', 'all'], true)
+            ? $statusFilter
+            : 'current';
     }
 
     private function getQueryParam(string $key, string $default = ''): string {

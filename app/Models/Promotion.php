@@ -76,10 +76,11 @@ class Promotion {
     public function findAll($includeExpired = true, array $options = []) {
         $storeHash = $this->db->getStoreContext();
         $search = $this->normalizeSearch($options['search'] ?? '');
+        $statusFilter = $this->normalizeListStatusFilter($options['status_filter'] ?? null);
         $limit = isset($options['limit']) ? max(1, (int)$options['limit']) : null;
         $offset = isset($options['offset']) ? max(0, (int)$options['offset']) : 0;
         $whereParams = [];
-        $whereSql = $this->buildListWhereClause((bool)$includeExpired, $storeHash, $search, $whereParams);
+        $whereSql = $this->buildListWhereClause((bool)$includeExpired, $storeHash, $search, $statusFilter, $whereParams);
         
         $sql = "SELECT p.*, 
                 COUNT(DISTINCT pp.product_id) as product_count,
@@ -107,10 +108,11 @@ class Promotion {
         return $this->db->fetchAll($sql, array_merge([$storeHash, $storeHash], $whereParams));
     }
 
-    public function countAll($includeExpired = true, string $search = ''): int {
+    public function countAll($includeExpired = true, string $search = '', array $options = []): int {
         $storeHash = $this->db->getStoreContext();
+        $statusFilter = $this->normalizeListStatusFilter($options['status_filter'] ?? null);
         $whereParams = [];
-        $whereSql = $this->buildListWhereClause((bool)$includeExpired, $storeHash, $this->normalizeSearch($search), $whereParams);
+        $whereSql = $this->buildListWhereClause((bool)$includeExpired, $storeHash, $this->normalizeSearch($search), $statusFilter, $whereParams);
 
         $row = $this->db->fetchOne(
             "SELECT COUNT(*) AS cnt FROM promotions p WHERE {$whereSql}",
@@ -239,12 +241,18 @@ class Promotion {
         );
     }
 
-    private function buildListWhereClause(bool $includeExpired, ?string $storeHash, string $search, array &$params): string {
+    private function buildListWhereClause(bool $includeExpired, ?string $storeHash, string $search, ?string $statusFilter, array &$params): string {
         $where = ["p.store_hash = ?"];
         $params[] = $storeHash;
 
         if (!$includeExpired) {
             $where[] = "p.status != 'expired'";
+        }
+
+        if ($statusFilter === 'current') {
+            $where[] = "(p.status IN ('active', 'scheduled') AND p.end_date >= NOW())";
+        } elseif ($statusFilter === 'expired') {
+            $where[] = "(p.status = 'expired' OR p.end_date < NOW())";
         }
 
         if ($search !== '') {
@@ -274,5 +282,13 @@ class Promotion {
         return function_exists('mb_substr')
             ? mb_substr($search, 0, 120)
             : substr($search, 0, 120);
+    }
+
+    private function normalizeListStatusFilter($statusFilter): ?string {
+        $statusFilter = (string)$statusFilter;
+
+        return in_array($statusFilter, ['current', 'expired', 'all'], true)
+            ? $statusFilter
+            : null;
     }
 }

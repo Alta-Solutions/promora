@@ -1,6 +1,10 @@
 <?php
 $pagination = $pagination ?? [];
 $promotionSearch = (string)($pagination['search'] ?? '');
+$promotionStatusFilter = (string)($pagination['status_filter'] ?? 'current');
+if (!in_array($promotionStatusFilter, ['current', 'expired', 'all'], true)) {
+    $promotionStatusFilter = 'current';
+}
 $selectedPerPage = (int)($pagination['per_page'] ?? 25);
 $perPageOptions = $pagination['per_page_options'] ?? [10, 25, 50, 100];
 $currentPage = max(1, (int)($pagination['page'] ?? 1));
@@ -19,10 +23,11 @@ if (($paginationEndPage - $paginationStartPage) < 4) {
     }
 }
 
-$promotionListUrl = static function(array $overrides = []) use ($promotionSearch, $selectedPerPage): string {
+$promotionListUrl = static function(array $overrides = []) use ($promotionSearch, $promotionStatusFilter, $selectedPerPage): string {
     $params = [
         'route' => 'promotions',
         'q' => $promotionSearch,
+        'status' => $promotionStatusFilter,
         'per_page' => $selectedPerPage,
         'page' => 1,
     ];
@@ -32,7 +37,7 @@ $promotionListUrl = static function(array $overrides = []) use ($promotionSearch
     }
 
     foreach ($params as $key => $value) {
-        if ($value === null || $value === '' || ($key === 'page' && (int)$value <= 1)) {
+        if ($value === null || $value === '' || ($key === 'page' && (int)$value <= 1) || ($key === 'status' && $value === 'current')) {
             unset($params[$key]);
         }
     }
@@ -66,6 +71,21 @@ $promotionListUrl = static function(array $overrides = []) use ($promotionSearch
         >
     </div>
 
+    <div class="promotion-list-status">
+        <label for="promotion-status"><?= trans_e('promotions.status_filter_label') ?></label>
+        <select id="promotion-status" name="status" class="form-select" onchange="this.form.submit()">
+            <option value="current" <?= $promotionStatusFilter === 'current' ? 'selected' : '' ?>>
+                <?= trans_e('promotions.status_filter_current') ?>
+            </option>
+            <option value="expired" <?= $promotionStatusFilter === 'expired' ? 'selected' : '' ?>>
+                <?= trans_e('promotions.status_filter_expired') ?>
+            </option>
+            <option value="all" <?= $promotionStatusFilter === 'all' ? 'selected' : '' ?>>
+                <?= trans_e('promotions.status_filter_all') ?>
+            </option>
+        </select>
+    </div>
+
     <div class="promotion-list-page-size">
         <label for="promotion-per-page"><?= trans_e('promotions.per_page_label') ?></label>
         <select id="promotion-per-page" name="per_page" class="form-select" onchange="this.form.submit()">
@@ -79,9 +99,9 @@ $promotionListUrl = static function(array $overrides = []) use ($promotionSearch
 
     <div class="promotion-list-toolbar-actions">
         <button type="submit" class="btn btn-primary"><?= trans_e('promotions.search_button') ?></button>
-        <?php if ($promotionSearch !== ''): ?>
-            <a href="<?= htmlspecialchars($promotionListUrl(['q' => null]), ENT_QUOTES, 'UTF-8') ?>" class="btn btn-secondary">
-                <?= trans_e('promotions.clear_search') ?>
+        <?php if ($promotionSearch !== '' || $promotionStatusFilter !== 'current'): ?>
+            <a href="<?= htmlspecialchars($promotionListUrl(['q' => null, 'status' => 'current']), ENT_QUOTES, 'UTF-8') ?>" class="btn btn-secondary">
+                <?= trans_e('promotions.clear_filters') ?>
             </a>
         <?php endif; ?>
     </div>
@@ -94,7 +114,11 @@ $promotionListUrl = static function(array $overrides = []) use ($promotionSearch
             <?php if ($promotionSearch !== ''): ?>
                 <h3><?= trans_e('promotions.search_empty_title') ?></h3>
                 <p><?= trans_e('promotions.search_empty_text') ?></p>
-                <a href="<?= htmlspecialchars($promotionListUrl(['q' => null]), ENT_QUOTES, 'UTF-8') ?>" class="btn btn-secondary" style="margin-top: 20px;"><?= trans_e('promotions.clear_search') ?></a>
+                <a href="<?= htmlspecialchars($promotionListUrl(['q' => null, 'status' => 'current']), ENT_QUOTES, 'UTF-8') ?>" class="btn btn-secondary" style="margin-top: 20px;"><?= trans_e('promotions.clear_filters') ?></a>
+            <?php elseif ($promotionStatusFilter !== 'current'): ?>
+                <h3><?= trans_e('promotions.filtered_empty_title') ?></h3>
+                <p><?= trans_e('promotions.filtered_empty_text') ?></p>
+                <a href="<?= htmlspecialchars($promotionListUrl(['status' => 'current']), ENT_QUOTES, 'UTF-8') ?>" class="btn btn-secondary" style="margin-top: 20px;"><?= trans_e('promotions.show_current_promotions') ?></a>
             <?php else: ?>
                 <h3><?= trans_e('promotions.empty_title') ?></h3>
                 <p><?= trans_e('promotions.empty_text') ?></p>
