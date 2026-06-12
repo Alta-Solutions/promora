@@ -270,6 +270,50 @@ class QueueServiceTest extends TestCase {
         );
     }
 
+    public function testCreateWebhookEventJobCreatesPayloadJob(): void {
+        $db = new class {
+            public $queries = [];
+
+            public function fetchOne($sql, $params = []) {
+                if (strpos($sql, 'SHOW COLUMNS') !== false) {
+                    return ['Field' => 'payload'];
+                }
+
+                return false;
+            }
+
+            public function query($sql, $params = []) {
+                $this->queries[] = [
+                    'sql' => preg_replace('/\s+/', ' ', trim($sql)),
+                    'params' => $params,
+                ];
+            }
+
+            public function lastInsertId() {
+                return 1234;
+            }
+        };
+
+        $service = $this->createQueueService($db, 'store-a');
+        $result = $service->createWebhookEventJob(456);
+
+        $this->assertTrue($result['created']);
+        $this->assertSame(1234, $result['job_id']);
+        $this->assertSame(456, $result['event_id']);
+        $this->assertStringContainsString('webhook_event', $db->queries[0]['sql']);
+        $this->assertSame('store-a', $db->queries[0]['params'][0]);
+
+        $payload = json_decode($db->queries[0]['params'][1], true);
+        $this->assertSame(456, $payload['webhook_event_id']);
+    }
+
+    public function testExtractWebhookEventIdFromPayloadNormalizesId(): void {
+        $service = $this->createQueueService(new class {}, 'store-a');
+
+        $this->assertSame(456, $service->extractWebhookEventIdFromPayload('{"webhook_event_id":"456"}'));
+        $this->assertNull($service->extractWebhookEventIdFromPayload('{"webhook_event_id":"bad"}'));
+    }
+
     public function testNextPendingJobPrioritizesPromotionWorkBeforeOmnibusWork(): void {
         $db = new class {
             public $sql = null;
@@ -283,6 +327,7 @@ class QueueServiceTest extends TestCase {
         $service = $this->createQueueService($db, 'store-a');
         $service->getNextPendingJob();
 
+        $this->assertStringContainsString("WHEN 'webhook_event' THEN 5", $db->sql);
         $this->assertStringContainsString("WHEN 'sync_promotion' THEN 10", $db->sql);
         $this->assertStringContainsString("WHEN 'single_sync' THEN 10", $db->sql);
         $this->assertStringContainsString("WHEN 'cleanup_single' THEN 20", $db->sql);
@@ -307,6 +352,7 @@ class QueueServiceTest extends TestCase {
         $service->getActiveJob();
 
         $this->assertSame(['store-a'], $db->params);
+        $this->assertStringContainsString("WHEN 'webhook_event' THEN 5", $db->sql);
         $this->assertStringContainsString("WHEN 'sync_promotion' THEN 10", $db->sql);
         $this->assertStringContainsString("WHEN 'single_sync' THEN 10", $db->sql);
         $this->assertStringContainsString("WHEN 'omnibus_sync_products' THEN 30", $db->sql);

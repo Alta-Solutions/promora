@@ -200,6 +200,28 @@ class QueueService {
         }
     }
 
+    public function createWebhookEventJob(int $eventId): array {
+        $storeHash = $this->requireStoreHash('create webhook event job');
+        if ($eventId <= 0) {
+            throw new \InvalidArgumentException('Webhook event ID must be positive.');
+        }
+
+        $this->ensureSyncJobsPayloadColumn();
+        $payload = ['webhook_event_id' => $eventId];
+
+        $this->db->query(
+            "INSERT INTO sync_jobs (store_hash, job_type, payload, total_items, status, attempts, created_at)
+             VALUES (?, 'webhook_event', ?, 1, 'pending', 0, NOW())",
+            [$storeHash, json_encode($payload, JSON_UNESCAPED_SLASHES)]
+        );
+
+        return [
+            'created' => true,
+            'job_id' => (int)$this->db->lastInsertId(),
+            'event_id' => $eventId,
+        ];
+    }
+
     private function requireStoreHash(string $operation): string {
         $storeHash = trim((string)$this->storeHash);
 
@@ -220,6 +242,7 @@ class QueueService {
              AND (next_run_at IS NULL OR next_run_at <= NOW())
              ORDER BY
                 CASE job_type
+                    WHEN 'webhook_event' THEN 5
                     WHEN 'sync_promotion' THEN 10
                     WHEN 'single_sync' THEN 10
                     WHEN 'cleanup_single' THEN 20
@@ -265,6 +288,7 @@ class QueueService {
                     ELSE 3 
                 END,
                 CASE job_type
+                    WHEN 'webhook_event' THEN 5
                     WHEN 'sync_promotion' THEN 10
                     WHEN 'single_sync' THEN 10
                     WHEN 'cleanup_single' THEN 20
@@ -300,6 +324,18 @@ class QueueService {
     public function extractProductIdsFromPayload($payload): array {
         $payload = $this->decodePayload($payload);
         return $this->normalizeProductIds($payload['product_ids'] ?? []);
+    }
+
+    public function extractWebhookEventIdFromPayload($payload): ?int {
+        $payload = $this->decodePayload($payload);
+        $eventId = $payload['webhook_event_id'] ?? null;
+
+        if (!is_numeric($eventId)) {
+            return null;
+        }
+
+        $eventId = (int)$eventId;
+        return $eventId > 0 ? $eventId : null;
     }
 
     public function purgeOldJobs(int $completedRetentionDays = 14, int $failedRetentionDays = 90): array {

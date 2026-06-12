@@ -5,6 +5,7 @@ use App\Services\WebhookService;
 use App\Models\Database;
 use App\Services\BigCommerceAPI;
 use App\Services\ProductCacheService;
+use App\Services\QueueService;
 use App\Services\WebhookSuppressionService;
 
 // Definišemo konstantu da znamo da smo u test modu (za izbegavanje exit-a u servisu)
@@ -57,6 +58,39 @@ class WebhookServiceTest extends TestCase {
         $this->assertFalse($result, 'Webhook should return false for missing payload data');
     }
 
+    public function testAcceptWebhookQueuesEventAndReturnsAcceptedStatus() {
+        $queueMock = $this->getMockBuilder(QueueService::class)
+                          ->disableOriginalConstructor()
+                          ->onlyMethods(['createWebhookEventJob'])
+                          ->getMock();
+        $queueMock->expects($this->once())
+                  ->method('createWebhookEventJob')
+                  ->with(1)
+                  ->willReturn(['created' => true, 'job_id' => 10, 'event_id' => 1]);
+
+        $service = $this->getMockBuilder(WebhookService::class)
+                        ->setConstructorArgs([$this->dbMock, $this->apiMock])
+                        ->onlyMethods(['createQueueService'])
+                        ->getMock();
+        $service->method('createQueueService')->with('test_hash')->willReturn($queueMock);
+
+        $this->dbMock->method('fetchOne')
+                     ->willReturn(['access_token' => 'fake_token']);
+        $this->dbMock->expects($this->once())
+                     ->method('setStoreContext')
+                     ->with('test_hash');
+        $this->dbMock->method('lastInsertId')->willReturn(1);
+
+        $result = $service->acceptWebhook([
+            'scope' => 'store/product/updated',
+            'store_id' => 'test_hash',
+            'data' => ['id' => 123],
+        ], ['HTTP_X_CUSTOM_AUTH' => 'test_secret_key']);
+
+        $this->assertTrue($result);
+        $this->assertSame(202, $service->getLastStatusCode());
+    }
+
     public function testProcessWebhookHandlesProductUpdate() {
         // Koristimo Partial Mock za WebhookService da bismo presreli protected metode
         // Ovako testiramo samo logiku rutiranja, a ne samu sinhronizaciju (updateProductCache)
@@ -95,6 +129,49 @@ class WebhookServiceTest extends TestCase {
         $result = $service->processWebhook($payload, $headers);
         
         $this->assertTrue($result, 'Webhook should return true for successful processing');
+    }
+
+    public function testProcessQueuedWebhookEventProcessesStoredPayload() {
+        $payload = [
+            'scope' => 'store/product/updated',
+            'store_id' => 'test_hash',
+            'data' => ['id' => 123],
+        ];
+
+        $service = $this->getMockBuilder(WebhookService::class)
+                        ->setConstructorArgs([$this->dbMock, $this->apiMock])
+                        ->onlyMethods(['updateProductCache', 'createBigCommerceAPI', 'isSuppressedProductUpdate'])
+                        ->getMock();
+
+        $service->expects($this->once())
+                ->method('updateProductCache')
+                ->with(123);
+        $service->method('createBigCommerceAPI')->willReturn($this->apiMock);
+        $service->method('isSuppressedProductUpdate')->willReturn(false);
+
+        $this->dbMock->expects($this->exactly(2))
+                     ->method('fetchOne')
+                     ->willReturnOnConsecutiveCalls(
+                         [
+                             'id' => 1,
+                             'store_hash' => 'test_hash',
+                             'payload' => json_encode($payload),
+                             'processed' => 0,
+                         ],
+                         ['access_token' => 'fake_token']
+                     );
+        $this->dbMock->expects($this->once())
+                     ->method('setStoreContext')
+                     ->with('test_hash');
+        $this->dbMock->expects($this->once())
+                     ->method('query')
+                     ->with($this->stringContains('UPDATE webhook_events SET processed'));
+
+        $result = $service->processQueuedWebhookEvent(1);
+
+        $this->assertSame(1, $result['processed']);
+        $this->assertSame('store/product/updated', $result['scope']);
+        $this->assertSame(123, $result['product_id']);
     }
 
     public function testProcessWebhookHandlesInventoryUpdate() {

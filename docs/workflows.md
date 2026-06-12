@@ -96,9 +96,17 @@ See `docs/omnibus.md` before changing this flow.
 ## Webhooks
 
 `WebhookService` handles BigCommerce product and inventory webhooks. Product
-updates refresh local cache and re-evaluate promotions for that product. The
-suppression table prevents app-originated API writes from immediately triggering
-recursive processing.
+webhook requests are acknowledged quickly after validation, persisted to
+`webhook_events`, and queued as `webhook_event` jobs. The worker then refreshes
+local cache and re-evaluates promotions for the product. The suppression table
+prevents app-originated API writes from immediately triggering recursive
+processing.
+
+`bin/webhook_monitor.php` is the CLI health monitor for registered BigCommerce
+webhooks. It checks active stores, reconciles the expected product webhook
+scopes, recreates missing hooks, and reactivates inactive hooks only after the
+receiver health check passes. Use `--dry-run` to inspect changes without calling
+BigCommerce write endpoints.
 
 ## Queue Worker
 
