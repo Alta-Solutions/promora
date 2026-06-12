@@ -66,6 +66,18 @@ Cleanup jobs restore prices/custom fields for products no longer covered by a
 promotion. Cleanup can be global (`cleanup`) or promotion-specific
 (`cleanup_single`).
 
+Before a finished promotion is cleaned up, `PromotionArchiveService` creates an
+idempotent archive header in `promotion_archives` and links product interval
+history in `promotion_product_history`. Successful promotion applications open
+or refresh product history intervals; cleanup, product reconciliation, and
+promotion replacement close those intervals before rows are removed from
+`promotion_products`.
+
+The archive is searchable from Logs > Promotion Archive. Backfill for promotions
+that expired before this feature is best-effort: promotion definitions are
+archived, but product rows are only available if they still exist locally or were
+recorded after this feature was installed.
+
 ## Product Cache Sync
 
 Main service: `ProductCacheService`

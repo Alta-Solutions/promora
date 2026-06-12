@@ -177,6 +177,44 @@ class PromotionServicePromotionProductsTest extends TestCase {
         );
     }
 
+    public function testBatchSavePromotionProductsRecordsHistoryWhenWinningPromotionChanges(): void {
+        $db = new class {
+            public function fetchAll($sql, $params = []) {
+                return [
+                    ['id' => 12, 'promotion_id' => 42, 'product_id' => 3145, 'variant_id' => null],
+                ];
+            }
+
+            public function query($sql, $params = []) {}
+        };
+        $archive = new class {
+            public $removed = [];
+
+            public function recordRemovedItems($promotionId, array $items, string $reason): void {
+                $this->removed[] = [
+                    'promotion_id' => $promotionId,
+                    'items' => $items,
+                    'reason' => $reason,
+                ];
+            }
+        };
+
+        $service = $this->createService($db);
+        $this->setPrivateProperty($service, 'archiveService', $archive);
+
+        $this->invokeBatchSavePromotionProducts($service, [[
+            'promotion_id' => 43,
+            'product_id' => 3145,
+            'variant_id' => null,
+            'custom_field_id' => 30464,
+        ]]);
+
+        $this->assertCount(1, $archive->removed);
+        $this->assertNull($archive->removed[0]['promotion_id']);
+        $this->assertSame('promotion_replaced', $archive->removed[0]['reason']);
+        $this->assertSame(42, $archive->removed[0]['items'][0]['promotion_id']);
+    }
+
     public function testBatchSavePromotionProductsKeepsLifecycleOnSamePromotionRefreshWithSharedTimestamp(): void {
         $db = new class {
             public $queries = [];
