@@ -223,6 +223,7 @@ error_log("Access token obtained successfully for store: {$storeHash}");
 // Store credentials in database
 try {
     $db = \App\Models\Database::getInstance();
+    \App\Support\BigCommerceStoreSchema::ensure($db);
     
     $db->query(
         "INSERT INTO bigcommerce_stores (store_hash, access_token, scope, user_id, user_email, context, installed_at)
@@ -249,6 +250,7 @@ try {
     $_SESSION['store_hash'] = $storeHash;
     $_SESSION['access_token'] = $tokenData['access_token'];
     $_SESSION['authenticated'] = true;
+    $_SESSION['user_id'] = $tokenData['user']['id'] ?? null;
     $_SESSION['user_email'] = $tokenData['user']['email'] ?? null;
     
     // Redirect to app with success message
