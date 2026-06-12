@@ -128,7 +128,20 @@ do {
         $promotionService = new PromotionService();
         $batchSize = 50;
 
-        if ($job['job_type'] === 'cleanup') {
+        if ($job['job_type'] === 'webhook_event') {
+            $eventId = $queue->extractWebhookEventIdFromPayload($job['payload'] ?? null);
+            if (!$eventId) {
+                throw new \RuntimeException("Webhook event job #{$job['id']} has no valid webhook_event_id payload.");
+            }
+
+            logMsg("Processing Webhook Event #{$eventId}...");
+            $webhookService = new \App\Services\WebhookService($db);
+            $webhookResult = $webhookService->processQueuedWebhookEvent($eventId);
+
+            $processedCount = 1;
+            $successCount = empty($webhookResult['skipped']) ? 1 : 0;
+            logMsg("Webhook Event #{$eventId} processed. Scope: " . ($webhookResult['scope'] ?? 'n/a'));
+        } elseif ($job['job_type'] === 'cleanup') {
             logMsg("Processing Cleanup Job (Removing all promotions)...");
             $cleanupResult = $promotionService->cleanupAllProductsBatch();
             $cleanedCount = (int)($cleanupResult['processed'] ?? 0);

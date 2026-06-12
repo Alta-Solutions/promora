@@ -193,7 +193,12 @@ try {
             `scope` VARCHAR(255) NOT NULL,
             `destination` VARCHAR(255) NOT NULL,
             `is_active` TINYINT(1) NOT NULL DEFAULT 1,
-            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `last_checked_at` DATETIME NULL,
+            `last_reactivated_at` DATETIME NULL,
+            `reactivation_attempts` INT NOT NULL DEFAULT 0,
+            `last_error` TEXT NULL,
+            `updated_at` DATETIME NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
         // Tabela za događaje sa webhook-ova

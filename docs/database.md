@@ -110,6 +110,7 @@ Queue table consumed by `bin/worker.php`.
 
 Common `job_type` values:
 
+- `webhook_event`
 - `sync_promotion`
 - `single_sync`
 - `cleanup`
@@ -149,6 +150,13 @@ and `recorded_at`.
 
 Webhook registration, received event audit, and short-lived suppression markers
 used to avoid loops after app-originated BigCommerce writes.
+
+`webhooks` also tracks monitor state for BigCommerce-side deactivation:
+
+- `last_checked_at`
+- `last_reactivated_at`
+- `reactivation_attempts`
+- `last_error`
 
 ## Migration Caution
 
