@@ -29,7 +29,11 @@ class LogsController {
 
         // Dohvati poslednjih 100 webhook događaja
         $logs = $db->fetchAll(
-            "SELECT * FROM webhook_events WHERE store_hash = ? ORDER BY received_at DESC LIMIT 100",
+            "SELECT webhook_events.*, created_at AS received_at
+             FROM webhook_events
+             WHERE store_hash = ?
+             ORDER BY created_at DESC
+             LIMIT 100",
             [$storeHash]
         );
 
