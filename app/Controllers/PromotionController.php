@@ -332,8 +332,7 @@ class PromotionController {
             'priority' => $_POST['priority'] ?? 0,
             'filters' => $this->getSubmittedFilters(),
             'color' => $_POST['color'] ?? '#3b82f6',
-            'description' => $_POST['description'] ?? '',
-            'target_category_id' => $_POST['target_category_id'] ?? null
+            'description' => $_POST['description'] ?? ''
         ];
     }
 
