@@ -125,6 +125,8 @@ class LogsController {
             return;
         }
 
+        $archive['filters_text'] = $archiveService->buildArchiveFiltersText($archive['filters'] ?? []);
+
         $search = $this->normalizeSearch($this->getQueryParam('q'));
         $perPage = $this->getPerPage(50);
         $page = max(1, (int)$this->getQueryParam('page', '1'));

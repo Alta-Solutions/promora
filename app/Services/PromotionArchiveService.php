@@ -7,6 +7,7 @@ class PromotionArchiveService {
     private $db;
     private string $storeHash;
     private array $archiveIdsByPromotion = [];
+    private array $filterTermNameMaps = [];
 
     public function __construct($db = null, ?string $storeHash = null) {
         $this->db = $db ?? Database::getInstance();
@@ -187,7 +188,8 @@ class PromotionArchiveService {
         $archivedAt = $this->normalizeDate($archivedAt, $this->getDatabaseTimestamp());
         $filtersJson = $this->normalizeFiltersJson($promotion['filters'] ?? '{}');
         $filters = json_decode($filtersJson, true);
-        $filtersText = $this->buildFiltersText(is_array($filters) ? $filters : []);
+        $filters = is_array($filters) ? $filters : [];
+        $filtersText = $this->buildArchiveFiltersText($filters);
 
         $this->db->query(
             "INSERT INTO promotion_archives
@@ -314,12 +316,22 @@ class PromotionArchiveService {
         return !empty($row);
     }
 
-    public function buildFiltersText(array $filters): string {
-        $parts = $this->describeFilters($filters);
+    public function buildArchiveFiltersText($filters): string {
+        if (!is_array($filters)) {
+            $filters = json_decode($this->normalizeFiltersJson($filters), true);
+        }
+
+        $filters = is_array($filters) ? $filters : [];
+
+        return $this->buildFiltersText($filters, $this->loadFilterTermNameMaps($filters));
+    }
+
+    public function buildFiltersText(array $filters, array $termNameMaps = []): string {
+        $parts = $this->describeFilters($filters, '', $termNameMaps);
         return implode('; ', array_values(array_filter($parts, static fn($part) => $part !== '')));
     }
 
-    private function describeFilters(array $filters, string $prefix = ''): array {
+    private function describeFilters(array $filters, string $prefix = '', array $termNameMaps = []): array {
         $parts = [];
 
         foreach ($filters as $key => $value) {
@@ -339,14 +351,14 @@ class PromotionArchiveService {
             }
 
             if ($key === 'exclude' && is_array($value)) {
-                foreach ($this->describeFilters($value, 'Exclude ') as $part) {
+                foreach ($this->describeFilters($value, 'Exclude ', $termNameMaps) as $part) {
                     $parts[] = $part;
                 }
                 continue;
             }
 
             $label = $this->filterLabel((string)$key);
-            $valueText = $this->filterValueText($value);
+            $valueText = $this->filterValueText((string)$key, $value, $termNameMaps);
             if ($valueText === '') {
                 continue;
             }
@@ -365,7 +377,9 @@ class PromotionArchiveService {
         $labels = [
             'categories:in' => 'Categories',
             'brand_id' => 'Brands',
+            'brand_id:in' => 'Brands',
             'product_id' => 'Product ID',
+            'product_id:in' => 'Products',
             'sku' => 'SKU',
             'sku:in' => 'SKUs',
             'name:like' => 'Name contains',
@@ -379,22 +393,200 @@ class PromotionArchiveService {
         return $labels[$key] ?? $key;
     }
 
-    private function filterValueText($value): string {
+    private function filterValueText(string $key, $value, array $termNameMaps = []): string {
         if (is_bool($value)) {
             return $value ? 'yes' : 'no';
         }
 
+        $termNameMap = $this->termNameMapForFilterKey($key, $termNameMaps);
+        if (!empty($termNameMap)) {
+            return $this->mappedFilterValueText($value, $termNameMap);
+        }
+
         if (is_array($value)) {
-            $flat = [];
-            array_walk_recursive($value, static function ($item) use (&$flat): void {
-                if ($item !== null && $item !== '') {
-                    $flat[] = (string)$item;
-                }
-            });
+            $flat = $this->flattenFilterValues($value);
             return implode(', ', $flat);
         }
 
         return trim((string)$value);
+    }
+
+    private function loadFilterTermNameMaps(array $filters): array {
+        $neededKeys = $this->collectNamedFilterKeys($filters);
+
+        foreach ($neededKeys as $key => $_) {
+            if (array_key_exists($key, $this->filterTermNameMaps)) {
+                continue;
+            }
+
+            if ($key === 'categories:in') {
+                $this->filterTermNameMaps[$key] = $this->loadCategoryNameMap();
+            } elseif ($key === 'brand_id') {
+                $this->filterTermNameMaps[$key] = array_replace(
+                    $this->loadBrandNameMapFromCache(),
+                    $this->loadBrandNameMapFromApi()
+                );
+            } elseif ($key === 'product_id') {
+                $this->filterTermNameMaps[$key] = $this->loadProductNameMapFromCache();
+            }
+        }
+
+        return array_intersect_key($this->filterTermNameMaps, $neededKeys);
+    }
+
+    private function collectNamedFilterKeys(array $filters): array {
+        $keys = [];
+
+        foreach ($filters as $key => $value) {
+            if ($key === 'exclude' && is_array($value)) {
+                $keys += $this->collectNamedFilterKeys($value);
+                continue;
+            }
+
+            if ($key === 'categories:in') {
+                $keys['categories:in'] = true;
+            } elseif ($key === 'brand_id' || $key === 'brand_id:in') {
+                $keys['brand_id'] = true;
+            } elseif ($key === 'product_id' || $key === 'product_id:in') {
+                $keys['product_id'] = true;
+            }
+        }
+
+        return $keys;
+    }
+
+    private function termNameMapForFilterKey(string $key, array $termNameMaps): array {
+        if ($key === 'categories:in') {
+            return $termNameMaps['categories:in'] ?? [];
+        }
+
+        if ($key === 'brand_id' || $key === 'brand_id:in') {
+            return $termNameMaps['brand_id'] ?? [];
+        }
+
+        if ($key === 'product_id' || $key === 'product_id:in') {
+            return $termNameMaps['product_id'] ?? [];
+        }
+
+        return [];
+    }
+
+    private function mappedFilterValueText($value, array $termNameMap): string {
+        $values = $this->flattenFilterValues($value);
+        $labels = [];
+
+        foreach ($values as $rawValue) {
+            $lookupKey = $this->normalizeTermLookupKey($rawValue);
+            $labels[] = $termNameMap[$lookupKey] ?? $rawValue;
+        }
+
+        return implode(', ', array_values(array_unique($labels)));
+    }
+
+    private function flattenFilterValues($value): array {
+        if (!is_array($value)) {
+            $value = is_string($value) && strpos($value, ',') !== false
+                ? preg_split('/\s*,\s*/', $value, -1, PREG_SPLIT_NO_EMPTY)
+                : [$value];
+        }
+
+        $flat = [];
+        array_walk_recursive($value, static function ($item) use (&$flat): void {
+            if ($item !== null && $item !== '') {
+                $flat[] = trim((string)$item);
+            }
+        });
+
+        return array_values(array_filter($flat, static fn($item) => $item !== ''));
+    }
+
+    private function loadCategoryNameMap(): array {
+        try {
+            return $this->buildApiTermNameMap((new BigCommerceAPI($this->storeHash))->getCategories());
+        } catch (\Throwable $e) {
+            error_log('Promotion archive category name lookup failed: ' . $e->getMessage());
+            return [];
+        }
+    }
+
+    private function loadBrandNameMapFromApi(): array {
+        try {
+            return $this->buildApiTermNameMap((new BigCommerceAPI($this->storeHash))->getBrands());
+        } catch (\Throwable $e) {
+            error_log('Promotion archive brand name lookup failed: ' . $e->getMessage());
+            return [];
+        }
+    }
+
+    private function buildApiTermNameMap(array $items): array {
+        $map = [];
+
+        foreach ($items as $item) {
+            if (!is_array($item) || !isset($item['id']) || !isset($item['name'])) {
+                continue;
+            }
+
+            $name = trim((string)$item['name']);
+            if ($name === '') {
+                continue;
+            }
+
+            $map[$this->normalizeTermLookupKey($item['id'])] = $name;
+        }
+
+        return $map;
+    }
+
+    private function loadBrandNameMapFromCache(): array {
+        try {
+            $rows = $this->db->fetchAll(
+                "SELECT DISTINCT brand_id, brand_name
+                 FROM products_cache
+                 WHERE store_hash = ?
+                   AND brand_id IS NOT NULL
+                   AND brand_name IS NOT NULL
+                   AND brand_name != ''",
+                [$this->storeHash]
+            );
+        } catch (\Throwable $e) {
+            return [];
+        }
+
+        $map = [];
+        foreach ($rows as $row) {
+            $map[$this->normalizeTermLookupKey($row['brand_id'] ?? '')] = (string)$row['brand_name'];
+        }
+
+        return $map;
+    }
+
+    private function loadProductNameMapFromCache(): array {
+        try {
+            $rows = $this->db->fetchAll(
+                "SELECT DISTINCT product_id, name
+                 FROM products_cache
+                 WHERE store_hash = ?
+                   AND variant_id IS NULL
+                   AND name IS NOT NULL
+                   AND name != ''",
+                [$this->storeHash]
+            );
+        } catch (\Throwable $e) {
+            return [];
+        }
+
+        $map = [];
+        foreach ($rows as $row) {
+            $map[$this->normalizeTermLookupKey($row['product_id'] ?? '')] = (string)$row['name'];
+        }
+
+        return $map;
+    }
+
+    private function normalizeTermLookupKey($value): string {
+        $value = trim((string)$value);
+
+        return is_numeric($value) ? (string)(int)$value : $value;
     }
 
     private function fetchCurrentPromotionItems(int $promotionId): array {
