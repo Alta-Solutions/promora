@@ -113,6 +113,37 @@ class PromotionArchiveServiceTest extends TestCase {
         $this->assertSame(1, array_values($db->history)[0]['archive_id']);
     }
 
+    public function testBuildFiltersTextUsesNamesForIdBasedTerms(): void {
+        $db = new PromotionArchiveServiceFakeDb();
+        $service = new PromotionArchiveService($db, 'store_123');
+
+        $text = $service->buildFiltersText([
+            'categories:in' => ['10', '20', '30'],
+            'brand_id' => ['7', '8'],
+            'product_id:in' => ['101', '202'],
+            'exclude' => [
+                'brand_id' => ['9'],
+            ],
+        ], [
+            'categories:in' => [
+                '10' => 'Shoes',
+                '20' => 'Accessories',
+            ],
+            'brand_id' => [
+                '7' => 'Acme',
+                '9' => 'Legacy Brand',
+            ],
+            'product_id' => [
+                '101' => 'Winter Jacket',
+            ],
+        ]);
+
+        $this->assertSame(
+            'Categories: Shoes, Accessories, 30; Brands: Acme, 8; Products: Winter Jacket, 202; Exclude Brands: Legacy Brand',
+            $text
+        );
+    }
+
     public function testBackfillMarksOldArchivePartialWhenProductsAreGone(): void {
         $db = new PromotionArchiveServiceFakeDb();
         $db->promotions[9] = [
