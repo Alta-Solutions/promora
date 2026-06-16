@@ -17,6 +17,7 @@ class OmnibusLowestPriceRepairService {
 
     public function __construct($db = null, $pricingService = null, $priceLogger = null) {
         $this->db = $db ?? Database::getInstance();
+        PriceHistorySchemaService::ensureIgnoredColumns($this->db);
         $this->pricingService = $pricingService ?? new OmnibusPricingService($this->db);
         $this->priceLogger = $priceLogger ?? new PriceLogger($this->db);
     }
@@ -386,6 +387,7 @@ class OmnibusLowestPriceRepairService {
                AND product_id = ?
                {$variantSql}
                AND currency = ?
+               AND ignored_at IS NULL
                AND ROUND(price, 4) = ROUND(?, 4)
                AND recorded_at >= ?
                AND recorded_at < ?",

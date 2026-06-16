@@ -70,6 +70,10 @@ $controllerMap = [
         'class' => \App\Controllers\LogsController::class,
         'actions' => ['index', 'webhooks', 'corrections', 'promotions', 'promotionArchive'],
     ],
+    'corrections' => [
+        'class' => \App\Controllers\CorrectionController::class,
+        'actions' => ['index', 'preview', 'apply'],
+    ],
     'cache' => [
         'class' => \App\Controllers\CacheController::class,
         'actions' => ['fullSync', 'registerWebhooks', 'unregisterWebhooks', 'stats', 'quickSync', 'clearCache', 'debugWebhooks'],

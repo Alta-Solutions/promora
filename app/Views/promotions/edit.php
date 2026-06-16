@@ -38,7 +38,10 @@ $omnibusCorrectionReason = $omnibusCorrectionReason ?? '';
 
 <div class="promotion-create-page">
     <div class="promotion-page-heading">
-        <h2><?= trans_e('promotions.form.edit_title') ?></h2>
+        <h2>
+            <?= trans_e('promotions.form.edit_title') ?>
+            <span class="promotion-heading-id">ID: <?= (int)$promotion['id'] ?></span>
+        </h2>
         <div class="promotion-page-actions">
             <a href="?route=promotions&action=duplicate&id=<?= $promotion['id'] ?>" class="promotion-back-link"><?= trans_e('common.duplicate') ?></a>
             <a href="?route=promotions" class="promotion-back-link">← <?= trans_e('common.back') ?></a>

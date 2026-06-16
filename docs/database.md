@@ -84,6 +84,25 @@ Lifecycle fields:
   owning promotion. It is preserved across retries and audited corrections, and
   reset when another promotion takes ownership.
 
+### `promotion_product_exclusions`
+
+Store-scoped exclusion list used after an application correction. It prevents
+the same promotion filters from re-selecting a product or variant that was
+voided because it was incorrectly included.
+
+Key fields:
+
+- `store_hash`
+- `promotion_id`
+- `product_id`
+- `variant_id`
+- `correction_id`
+- `reason`
+- `created_at`
+
+The unique key is scoped to `store_hash`, `promotion_id`, `product_id`, and
+`variant_id`.
+
 ### `promotion_revisions`
 
 Audit log for controlled edits that preserve an active promotion lifecycle.
@@ -103,6 +122,37 @@ Key fields:
 - `old_terms`
 - `new_terms`
 - `created_at`
+
+### `promotion_application_corrections`
+
+Audit table for SKU-level void corrections where a product or variant was
+incorrectly included in an active promotion.
+
+Key fields:
+
+- `store_hash`
+- `promotion_id`
+- `product_id`
+- `variant_id`
+- `sku_snapshot`
+- `operation`
+- `status`
+- `reason`
+- `visibility_confirmed`
+- `actor_source`
+- `actor_user_id`
+- `actor_email`
+- `before_state`
+- `after_state`
+- `ignored_history_row_ids`
+- `replacement_promotion_id`
+- `error_message`
+- `created_at`
+- `applied_at`
+
+Rows are inserted before the high-risk write as `pending`, then marked
+`applied` only after the BigCommerce price/custom-field update succeeds. Failed
+writes are recorded without adding an exclusion or ignoring price-history rows.
 
 ### `promotion_archives`
 
@@ -186,9 +236,16 @@ Key fields:
 - `price`
 - `currency`
 - `recorded_at`
+- `ignored_at`
+- `ignored_reason`
+- `ignored_by_correction_id`
 
 The lookup index includes `store_hash`, `product_id`, `variant_id`, `currency`,
 and `recorded_at`.
+
+Omnibus queries must filter out ignored rows with `ignored_at IS NULL`.
+Application corrections mark rows ignored instead of deleting them so the
+original accidental sale price remains audit-visible.
 
 ### `webhooks`, `webhook_events`, `webhook_suppressions`
 

@@ -23,6 +23,7 @@ return array_replace_recursive(require __DIR__ . '/sr.php', [
         'time' => 'Vrijeme',
         'type' => 'Vrsta',
         'promotion_corrections' => 'Ispravci promocija',
+        'application_corrections' => 'Ispravci primjene promocija',
         'error' => 'Greška',
         'unknown_error' => 'Nepoznata greška',
         'loading' => 'Učitavanje...',

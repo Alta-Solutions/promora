@@ -13,7 +13,7 @@
             <span class="text"><?= trans_e('common.dashboard') ?></span>
         </a>
         
-        <a href="?route=promotions" class="sidebar-link <?= ($_GET['route'] ?? '') === 'promotions' ? 'active' : '' ?>">
+        <a href="?route=promotions" class="sidebar-link <?= in_array(($_GET['route'] ?? ''), ['promotions', 'corrections'], true) ? 'active' : '' ?>">
             <span class="icon">🏷️</span>
             <span class="text"><?= trans_e('common.promotions') ?></span>
         </a>
