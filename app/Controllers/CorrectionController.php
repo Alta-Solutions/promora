@@ -86,7 +86,7 @@ class CorrectionController {
 
         try {
             if ($productId === null || $promotionId === null) {
-                throw new \InvalidArgumentException('Correction target is missing.');
+                throw new \InvalidArgumentException(\trans('application_corrections.target_missing'));
             }
 
             $this->consumePreviewToken($storeHash, $token, $productId, $variantId, $promotionId);
@@ -103,7 +103,9 @@ class CorrectionController {
 
             $_SESSION['correction_flash'] = [
                 'type' => 'success',
-                'message' => 'Correction applied. ID: ' . (int)$result['correction_id'],
+                'message' => \trans('application_corrections.correction_applied', [
+                    'id' => (int)$result['correction_id'],
+                ]),
             ];
         } catch (\Throwable $e) {
             $_SESSION['correction_flash'] = [
@@ -137,7 +139,7 @@ class CorrectionController {
 
         $payload = $_SESSION[self::TOKEN_SESSION_KEY][$storeHash][$token] ?? null;
         if (!is_array($payload)) {
-            throw new \InvalidArgumentException('Correction preview expired. Run preview again.');
+            throw new \InvalidArgumentException(\trans('application_corrections.preview_expired'));
         }
 
         unset($_SESSION[self::TOKEN_SESSION_KEY][$storeHash][$token]);
@@ -147,7 +149,7 @@ class CorrectionController {
             || $this->normalizeNullableInt($payload['variant_id'] ?? null) !== $variantId
             || (int)$payload['promotion_id'] !== $promotionId
         ) {
-            throw new \InvalidArgumentException('Correction preview does not match the submitted target.');
+            throw new \InvalidArgumentException(\trans('application_corrections.preview_mismatch'));
         }
     }
 
@@ -177,7 +179,7 @@ class CorrectionController {
     private function requireStoreHash(): string {
         $storeHash = trim((string)$this->db->getStoreContext());
         if ($storeHash === '') {
-            throw new \RuntimeException('Store context is required.');
+            throw new \RuntimeException(\trans('application_corrections.store_context_required'));
         }
 
         return $storeHash;
