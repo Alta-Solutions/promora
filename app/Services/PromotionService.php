@@ -29,6 +29,7 @@ public function __construct(Database $db = null) {
         $this->promotionModel = new Promotion();
         $this->api = new BigCommerceAPI();
         $this->db = $db ?? Database::getInstance();
+        $this->ensurePromotionProductExclusionSchema();
         $this->customFieldService = new CustomFieldService($this->api, $this->db);
         
         $this->storeHash = $this->db->getStoreContext();
@@ -41,6 +42,49 @@ public function __construct(Database $db = null) {
         $this->cacheService = new ProductCacheService($this->db);
         $this->omnibusPricingService = new OmnibusPricingService($this->db);
         $this->archiveService = new PromotionArchiveService($this->db, $this->storeHash);
+    }
+
+    public function previewVoidPromotionProductAndReconcile(int $productId, ?int $variantId, int $promotionId): array {
+        $item = $this->fetchPromotionProductForCorrection($productId, $variantId, $promotionId);
+        if (!$item) {
+            return [
+                'status' => 'not_found',
+                'message' => 'Active promotion product row was not found.',
+                'replacement_promotion' => null,
+            ];
+        }
+
+        $replacement = $this->findReplacementPromotionCandidate($item, $promotionId);
+
+        return [
+            'status' => 'preview',
+            'current_promotion_id' => $promotionId,
+            'product_id' => $productId,
+            'variant_id' => $variantId,
+            'replacement_promotion' => $replacement,
+            'will_restore_price' => $replacement === null,
+        ];
+    }
+
+    public function voidPromotionProductAndReconcile(
+        int $productId,
+        ?int $variantId,
+        int $promotionId,
+        ?int $correctionId = null,
+        string $reason = 'voided_error'
+    ): array {
+        $item = $this->fetchPromotionProductForCorrection($productId, $variantId, $promotionId);
+        if (!$item) {
+            throw new \InvalidArgumentException('Active promotion product row was not found.');
+        }
+
+        $replacement = $this->findReplacementPromotionCandidate($item, $promotionId);
+
+        if ($replacement !== null) {
+            return $this->replaceVoidedPromotionItem($item, $replacement, $correctionId, $reason);
+        }
+
+        return $this->restoreVoidedPromotionItem($item, $correctionId, $reason);
     }
     
     /**
@@ -1428,6 +1472,151 @@ public function __construct(Database $db = null) {
         return $this->processProductsBatch($items);
     }
 
+    private function fetchPromotionProductForCorrection(int $productId, ?int $variantId, int $promotionId): ?array {
+        $items = $this->fetchPromotionProductsWithCachePrice(
+            "pp.store_hash = ?
+             AND pp.product_id = ?
+             AND pp.variant_id <=> ?
+             AND pp.promotion_id = ?",
+            [$this->storeHash, $productId, $variantId, $promotionId],
+            "LIMIT 1"
+        );
+
+        return $items[0] ?? null;
+    }
+
+    private function findReplacementPromotionCandidate(array $item, int $excludedPromotionId): ?array {
+        $activePromotions = $this->promotionModel->findActive();
+
+        return $this->calculateBestPromotionCandidate(
+            $item,
+            $activePromotions,
+            [$excludedPromotionId => true]
+        );
+    }
+
+    private function replaceVoidedPromotionItem(
+        array $item,
+        array $replacement,
+        ?int $correctionId,
+        string $reason
+    ): array {
+        [$productUpdates, $variantUpdates] = $this->buildPriceUpdateBatches([$replacement]);
+
+        $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
+        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
+        $priceResults = array_merge($productResults, $variantResults);
+        $applied = $this->filterPromotionsWithSuccessfulPriceUpdates([$replacement], $priceResults);
+
+        if (empty($applied)) {
+            throw new \RuntimeException('Replacement promotion price update failed.');
+        }
+
+        $replacement = array_values($applied)[0];
+        $existingFieldsMap = $this->buildExistingFieldsMap([$item]);
+        $knownFieldIds = $this->getKnownPromotionFieldIds([(int)$replacement['product_id']]);
+        $cfResults = $this->customFieldService->upsertCustomFields(
+            $this->buildUniquePromotionFieldUpdates([$replacement]),
+            $existingFieldsMap,
+            $knownFieldIds
+        );
+
+        foreach ($cfResults as $result) {
+            if (!empty($result['success']) && !empty($result['custom_field_id'])) {
+                $replacement['custom_field_id'] = (int)$result['custom_field_id'];
+                break;
+            }
+        }
+
+        $appliedAt = $this->getDatabaseTimestamp();
+        $replacement['applied_at'] = $appliedAt;
+        $replacement['last_seen_at'] = $appliedAt;
+
+        $this->recordRemovedPromotionItems((int)$item['promotion_id'], [$item], 'voided_error');
+        $this->insertPromotionProductExclusion(
+            (int)$item['promotion_id'],
+            (int)$item['product_id'],
+            $item['variant_id'] !== null ? (int)$item['variant_id'] : null,
+            $correctionId,
+            $reason
+        );
+        $this->db->query(
+            "UPDATE promotion_products
+             SET promotion_id = ?,
+                 custom_field_id = ?,
+                 first_applied_at = ?,
+                 omnibus_reference_at = ?,
+                 synced_at = ?
+             WHERE store_hash = ? AND id = ?",
+            [
+                (int)$replacement['promotion_id'],
+                $replacement['custom_field_id'] ?? null,
+                $appliedAt,
+                $appliedAt,
+                $appliedAt,
+                $this->storeHash,
+                (int)$item['id'],
+            ]
+        );
+        $this->recordAppliedPromotionItems(
+            $this->buildPromotionArchiveMetaFromAppliedItems([$replacement]),
+            [$replacement]
+        );
+        $this->cacheService->updatePriceCacheDirectly(
+            $this->buildPromotionCachePriceUpdates([$replacement], $appliedAt)
+        );
+
+        return [
+            'status' => 'replaced',
+            'replacement_promotion_id' => (int)$replacement['promotion_id'],
+            'replacement' => $replacement,
+            'omnibus_product_ids' => [(int)$item['product_id']],
+        ];
+    }
+
+    private function restoreVoidedPromotionItem(array $item, ?int $correctionId, string $reason): array {
+        [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates([$item]);
+
+        $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
+        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
+        $priceResults = array_merge($productResults, $variantResults);
+
+        $successfulKeys = $this->getSuccessfulPriceUpdateKeys($priceResults);
+        $key = $this->getPromotionItemKey((int)$item['product_id'], $item['variant_id'] !== null ? (int)$item['variant_id'] : null);
+        if (empty($successfulKeys[$key])) {
+            throw new \RuntimeException('Price restore update failed.');
+        }
+
+        $this->recordRemovedPromotionItems((int)$item['promotion_id'], [$item], 'voided_error');
+        $this->insertPromotionProductExclusion(
+            (int)$item['promotion_id'],
+            (int)$item['product_id'],
+            $item['variant_id'] !== null ? (int)$item['variant_id'] : null,
+            $correctionId,
+            $reason
+        );
+        $this->db->query(
+            "DELETE FROM promotion_products WHERE store_hash = ? AND id = ?",
+            [$this->storeHash, (int)$item['id']]
+        );
+
+        $productsToClearFields = $this->getProductsWithoutActivePromotionEntries([$item], [(int)$item['id']]);
+        if (!empty($productsToClearFields)) {
+            $this->customFieldService->batchRemovePromotionFields($productsToClearFields);
+        }
+
+        if (!empty($cacheUpdates)) {
+            $this->cacheService->updatePriceCacheDirectly($cacheUpdates);
+        }
+
+        return [
+            'status' => 'restored',
+            'replacement_promotion_id' => null,
+            'replacement' => null,
+            'omnibus_product_ids' => [(int)$item['product_id']],
+        ];
+    }
+
     public function validateDiscountPercent($discountPercent): float {
         $normalized = is_string($discountPercent)
             ? str_replace(',', '.', trim($discountPercent))
@@ -1546,10 +1735,19 @@ public function __construct(Database $db = null) {
         ] + $validation;
     }
 
-    private function calculateBestPromotionCandidate($product, $activePromotions) {
+    private function calculateBestPromotionCandidate($product, $activePromotions, array $temporaryExcludedPromotionIds = []) {
         $bestCandidate = null;
 
         foreach ($activePromotions as $promo) {
+            $promotionId = (int)($promo['id'] ?? $promo['promotion_id'] ?? 0);
+            if ($promotionId > 0 && isset($temporaryExcludedPromotionIds[$promotionId])) {
+                continue;
+            }
+
+            if ($promotionId > 0 && $this->isPromotionProductExcluded($promotionId, $product)) {
+                continue;
+            }
+
             $filters = json_decode($promo['filters'], true) ?: [];
             if (!$this->productMatchesFilters($product, $filters)) {
                 continue;
@@ -2209,6 +2407,7 @@ public function __construct(Database $db = null) {
                         WHERE ph.store_hash COLLATE utf8mb4_unicode_ci = pp.store_hash COLLATE utf8mb4_unicode_ci
                           AND ph.product_id = pp.product_id
                           {$historyVariantSql}
+                          AND ph.ignored_at IS NULL
                           AND ROUND(ph.price, 4) = ROUND(
                               CASE
                                   WHEN pc.sale_price IS NOT NULL AND pc.sale_price > 0 THEN pc.sale_price
@@ -2811,6 +3010,96 @@ public function __construct(Database $db = null) {
 
     private function getPromotionItemKey($productId, $variantId = null) {
         return $variantId ? "v_{$variantId}" : "p_{$productId}";
+    }
+
+    private function isPromotionProductExcluded(int $promotionId, array $product): bool {
+        if ($this->db === null || $this->storeHash === null) {
+            return false;
+        }
+
+        $productId = (int)($product['product_id'] ?? 0);
+        if ($promotionId <= 0 || $productId <= 0) {
+            return false;
+        }
+
+        $variantId = isset($product['variant_id']) && $product['variant_id'] !== null && $product['variant_id'] !== ''
+            ? (int)$product['variant_id']
+            : null;
+
+        try {
+            $row = $this->db->fetchOne(
+                "SELECT id
+                 FROM promotion_product_exclusions
+                 WHERE store_hash = ?
+                   AND promotion_id = ?
+                   AND product_id = ?
+                   AND variant_id <=> ?
+                 LIMIT 1",
+                [$this->storeHash, $promotionId, $productId, $variantId]
+            );
+        } catch (\Throwable $e) {
+            return false;
+        }
+
+        return !empty($row);
+    }
+
+    private function insertPromotionProductExclusion(
+        int $promotionId,
+        int $productId,
+        ?int $variantId,
+        ?int $correctionId,
+        string $reason
+    ): void {
+        $existing = $this->db->fetchOne(
+            "SELECT id
+             FROM promotion_product_exclusions
+             WHERE store_hash = ?
+               AND promotion_id = ?
+               AND product_id = ?
+               AND variant_id <=> ?
+             LIMIT 1",
+            [$this->storeHash, $promotionId, $productId, $variantId]
+        );
+
+        if ($existing) {
+            $this->db->query(
+                "UPDATE promotion_product_exclusions
+                 SET correction_id = COALESCE(correction_id, ?),
+                     reason = COALESCE(NULLIF(reason, ''), ?)
+                 WHERE store_hash = ? AND id = ?",
+                [$correctionId, $reason, $this->storeHash, (int)$existing['id']]
+            );
+            return;
+        }
+
+        $this->db->query(
+            "INSERT INTO promotion_product_exclusions
+                (store_hash, promotion_id, product_id, variant_id, correction_id, reason, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, NOW())",
+            [$this->storeHash, $promotionId, $productId, $variantId, $correctionId, $reason]
+        );
+    }
+
+    private function ensurePromotionProductExclusionSchema(): void {
+        try {
+            $this->db->query(
+                "CREATE TABLE IF NOT EXISTS promotion_product_exclusions (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    store_hash VARCHAR(255) NOT NULL,
+                    promotion_id INT NOT NULL,
+                    product_id INT UNSIGNED NOT NULL,
+                    variant_id INT UNSIGNED NULL,
+                    correction_id BIGINT UNSIGNED NULL,
+                    reason TEXT NULL,
+                    created_at DATETIME NOT NULL,
+                    UNIQUE KEY uniq_store_promotion_product_variant (store_hash, promotion_id, product_id, variant_id),
+                    INDEX idx_store_product_variant (store_hash, product_id, variant_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+            );
+        } catch (\Throwable $e) {
+            // Existing installs may be mid-upgrade; correction paths will surface hard failures if needed.
+        }
     }
 
     private function isCostPriceBlockingEnabledFromFilters($filters): bool {

@@ -51,9 +51,14 @@ $promotionListUrl = static function(array $overrides = []) use ($promotionSearch
         <h2 class="page-title"><?= trans_e('promotions.index_title') ?></h2>
         <p style="color: #6b7280; font-size: 0.9rem; margin-top: 4px;"><?= trans_e('promotions.index_subtitle') ?></p>
     </div>
-    <a href="?route=promotions&action=create" class="btn btn-primary">
-        + <?= trans_e('promotions.new_promotion') ?>
-    </a>
+    <div class="promotion-list-header-actions">
+        <a href="?route=corrections" class="btn btn-secondary">
+            <?= trans_e('common.application_corrections') ?>
+        </a>
+        <a href="?route=promotions&action=create" class="btn btn-primary">
+            + <?= trans_e('promotions.new_promotion') ?>
+        </a>
+    </div>
 </div>
 
 <form method="get" class="promotion-list-toolbar">
@@ -163,6 +168,7 @@ $promotionListUrl = static function(array $overrides = []) use ($promotionSearch
                                 <div class="color-indicator" style="background-color: <?= htmlspecialchars($promo['color']) ?>;"></div>
                                 <div class="promo-info">
                                     <span class="promo-name"><?= htmlspecialchars($promo['name']) ?></span>
+                                    <span class="promo-id">ID: <?= (int)$promo['id'] ?></span>
                                     <?php if (!empty($promo['description'])): ?>
                                         <span class="promo-desc"><?= htmlspecialchars($promo['description']) ?></span>
                                     <?php endif; ?>

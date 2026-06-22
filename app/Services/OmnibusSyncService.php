@@ -339,6 +339,7 @@ class OmnibusSyncService {
              FROM product_price_history
              WHERE store_hash = ?
                AND currency = ?
+               AND ignored_at IS NULL
                AND (" . implode(' OR ', $conditions) . ")
              GROUP BY product_id, variant_id",
             $params

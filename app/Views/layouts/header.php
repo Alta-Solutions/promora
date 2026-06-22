@@ -45,7 +45,7 @@
                 
                 <nav class="main-nav">
                     <a href="?route=dashboard" class="<?= ($_GET['route'] ?? 'dashboard') === 'dashboard' ? 'active' : '' ?>"><?= trans_e('common.dashboard') ?></a>
-                    <a href="?route=promotions" class="<?= ($_GET['route'] ?? '') === 'promotions' ? 'active' : '' ?>"><?= trans_e('common.promotions') ?></a>
+                    <a href="?route=promotions" class="<?= in_array(($_GET['route'] ?? ''), ['promotions', 'corrections'], true) ? 'active' : '' ?>"><?= trans_e('common.promotions') ?></a>
                     <a href="?route=logs" class="<?= ($_GET['route'] ?? '') === 'logs' ? 'active' : '' ?>"><?= trans_e('common.logs') ?></a>
                     <a href="?route=settings" class="<?= ($_GET['route'] ?? '') === 'settings' ? 'active' : '' ?>"><?= trans_e('common.settings') ?></a>
                 </nav>

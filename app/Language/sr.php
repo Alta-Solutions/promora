@@ -43,6 +43,7 @@ return [
         'sync_logs' => 'Sync Logs',
         'webhook_events' => 'Webhook Events',
         'promotion_corrections' => 'Ispravke promocija',
+        'application_corrections' => 'Ispravke primene promocija',
         'promotion_archive' => 'Arhiva promocija',
         'scope' => 'Scope',
         'resource_id' => 'Resource ID',

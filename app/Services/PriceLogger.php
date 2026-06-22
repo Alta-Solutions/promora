@@ -13,6 +13,7 @@ class PriceLogger {
 
     public function __construct(Database $db = null) {
         $this->db = $db ?? Database::getInstance();
+        PriceHistorySchemaService::ensureIgnoredColumns($this->db);
         $this->ensurePriceHistorySchema();
     }
 
@@ -25,6 +26,7 @@ class PriceLogger {
             $lastPriceRecord = $this->db->fetchOne(
                 "SELECT price FROM product_price_history 
                  WHERE store_hash = ? AND product_id = ? AND variant_id <=> ?
+                 AND ignored_at IS NULL
                  ORDER BY recorded_at DESC 
                  LIMIT 1",
                 [$storeHash, $productId, $variantId]
@@ -33,6 +35,7 @@ class PriceLogger {
             $lastPriceRecord = $this->db->fetchOne(
                 "SELECT price FROM product_price_history 
                  WHERE store_hash = ? AND product_id = ?
+                 AND ignored_at IS NULL
                  ORDER BY recorded_at DESC 
                  LIMIT 1",
                 [$storeHash, $productId]
@@ -109,9 +112,9 @@ class PriceLogger {
             INNER JOIN (
                 SELECT product_id, variant_id, MAX(recorded_at) as max_recorded_at
                 FROM product_price_history
-                WHERE store_hash = ? AND (" . implode(' OR ', $whereClauses) . ")
+                WHERE store_hash = ? AND ignored_at IS NULL AND (" . implode(' OR ', $whereClauses) . ")
                 GROUP BY product_id, variant_id
-            ) as last_records ON p.product_id = last_records.product_id AND p.variant_id <=> last_records.variant_id AND p.recorded_at = last_records.max_recorded_at AND p.store_hash = ?";
+            ) as last_records ON p.product_id = last_records.product_id AND p.variant_id <=> last_records.variant_id AND p.recorded_at = last_records.max_recorded_at AND p.store_hash = ? AND p.ignored_at IS NULL";
         $lastPricesResult = $this->db->fetchAll($sql, $bindings);
         $lastPricesMap = [];
         foreach ($lastPricesResult as $row) {
@@ -202,6 +205,7 @@ class PriceLogger {
                        AND product_id = ?
                        AND variant_id <=> ?
                        AND currency = ?
+                       AND ignored_at IS NULL
                        AND recorded_at <= ?
                      LIMIT 1",
                     [$storeHash, $productId, $variantId, $currency, $recordedAt]
@@ -213,6 +217,7 @@ class PriceLogger {
                      WHERE store_hash = ?
                        AND product_id = ?
                        AND currency = ?
+                       AND ignored_at IS NULL
                        AND recorded_at <= ?
                      LIMIT 1",
                     [$storeHash, $productId, $currency, $recordedAt]
@@ -323,12 +328,13 @@ class PriceLogger {
             INNER JOIN (
                 SELECT product_id, MAX(recorded_at) as max_recorded_at
                 FROM product_price_history
-                WHERE store_hash = ? AND product_id IN ($placeholders)
+                WHERE store_hash = ? AND ignored_at IS NULL AND product_id IN ($placeholders)
                 GROUP BY product_id
             ) as last_records
                 ON p.product_id = last_records.product_id
                AND p.recorded_at = last_records.max_recorded_at
                AND p.store_hash = ?
+               AND p.ignored_at IS NULL
         ";
         $lastPricesResult = $this->db->fetchAll($sql, $bindings);
         $lastPricesMap = [];
@@ -373,7 +379,7 @@ class PriceLogger {
             FROM (
                 SELECT product_id, price
                 FROM product_price_history
-                WHERE store_hash = ? AND product_id IN ($placeholders) AND recorded_at >= ?
+                WHERE store_hash = ? AND product_id IN ($placeholders) AND ignored_at IS NULL AND recorded_at >= ?
 
                 UNION ALL
 
@@ -382,11 +388,12 @@ class PriceLogger {
                 INNER JOIN (
                     SELECT product_id, MAX(recorded_at) as max_recorded_at
                     FROM product_price_history
-                    WHERE store_hash = ? AND product_id IN ($placeholders) AND recorded_at < ?
+                    WHERE store_hash = ? AND product_id IN ($placeholders) AND ignored_at IS NULL AND recorded_at < ?
                     GROUP BY product_id
                 ) as last_prices
                     ON ph.product_id = last_prices.product_id
                    AND ph.recorded_at = last_prices.max_recorded_at
+                   AND ph.ignored_at IS NULL
             ) as history
             GROUP BY history.product_id
         ";
@@ -417,7 +424,7 @@ class PriceLogger {
             LEFT JOIN (
                 SELECT product_id, variant_id, price
                 FROM product_price_history
-                WHERE store_hash = ? AND product_id IN ($placeholders) AND recorded_at >= ?
+                WHERE store_hash = ? AND product_id IN ($placeholders) AND ignored_at IS NULL AND recorded_at >= ?
 
                 UNION ALL
 
@@ -426,12 +433,13 @@ class PriceLogger {
                 INNER JOIN (
                     SELECT product_id, variant_id, MAX(recorded_at) as max_recorded_at
                     FROM product_price_history
-                    WHERE store_hash = ? AND product_id IN ($placeholders) AND recorded_at < ?
+                    WHERE store_hash = ? AND product_id IN ($placeholders) AND ignored_at IS NULL AND recorded_at < ?
                     GROUP BY product_id, variant_id
                 ) as last_prices
                     ON ph.product_id = last_prices.product_id
                    AND ph.variant_id <=> last_prices.variant_id
                    AND ph.recorded_at = last_prices.max_recorded_at
+                   AND ph.ignored_at IS NULL
             ) as history
                 ON history.product_id = families.product_id
                AND (
@@ -451,7 +459,7 @@ class PriceLogger {
             FROM (
                 SELECT product_id, price
                 FROM product_price_history
-                WHERE store_hash = ? AND product_id IN ($placeholders) AND variant_id IS NULL AND recorded_at >= ?
+                WHERE store_hash = ? AND product_id IN ($placeholders) AND variant_id IS NULL AND ignored_at IS NULL AND recorded_at >= ?
 
                 UNION ALL
 
@@ -460,12 +468,13 @@ class PriceLogger {
                 INNER JOIN (
                     SELECT product_id, MAX(recorded_at) as max_recorded_at
                     FROM product_price_history
-                    WHERE store_hash = ? AND product_id IN ($placeholders) AND variant_id IS NULL AND recorded_at < ?
+                    WHERE store_hash = ? AND product_id IN ($placeholders) AND variant_id IS NULL AND ignored_at IS NULL AND recorded_at < ?
                     GROUP BY product_id
                 ) as last_prices
                     ON ph.product_id = last_prices.product_id
                    AND ph.recorded_at = last_prices.max_recorded_at
                    AND ph.variant_id IS NULL
+                   AND ph.ignored_at IS NULL
             ) as history
             GROUP BY history.product_id
         ";

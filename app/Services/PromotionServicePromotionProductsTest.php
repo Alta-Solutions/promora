@@ -295,6 +295,26 @@ class PromotionServicePromotionProductsTest extends TestCase {
         $this->assertSame(['v_5648', 'p_308'], array_keys($filtered));
     }
 
+    public function testPromotionProductExclusionMatchesProductVariantAndStore(): void {
+        $db = new class {
+            public $params = null;
+
+            public function fetchOne($sql, $params = []) {
+                $this->params = $params;
+                return ['id' => 10];
+            }
+        };
+
+        $service = $this->createService($db);
+        $excluded = $this->invokeIsPromotionProductExcluded($service, 77, [
+            'product_id' => 1234,
+            'variant_id' => 5678,
+        ]);
+
+        $this->assertTrue($excluded);
+        $this->assertSame(['i5zrevrrdl', 77, 1234, 5678], $db->params);
+    }
+
     private function invokeShouldQueueCleanupAfterPromotionUpdate(
         PromotionService $service,
         string $status,
@@ -331,6 +351,13 @@ class PromotionServicePromotionProductsTest extends TestCase {
         $method->setAccessible(true);
 
         return $method->invoke($service, $promotions, $priceResults);
+    }
+
+    private function invokeIsPromotionProductExcluded(PromotionService $service, int $promotionId, array $product): bool {
+        $method = new ReflectionMethod($service, 'isPromotionProductExcluded');
+        $method->setAccessible(true);
+
+        return $method->invoke($service, $promotionId, $product);
     }
 
     private function setPrivateProperty(object $object, string $property, $value): void {

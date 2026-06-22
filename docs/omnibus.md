@@ -160,6 +160,27 @@ promo price after the lifecycle reference, not a later retry-created price row.
 If that history row has not been written yet, the product cache observation time
 may be used as a fallback when it is after the lifecycle reference.
 
+### Application Correction By SKU
+
+`?route=corrections` handles the narrower case where a SKU was incorrectly
+included in an active promotion and received an unapproved discount. The tool
+does not delete price history. It marks the wrong `product_price_history` rows
+with `ignored_at`, `ignored_reason`, and `ignored_by_correction_id`, then
+reconciles the product into the best remaining active promotion or restores the
+regular price.
+
+All Omnibus readers must ignore price-history rows where `ignored_at IS NOT
+NULL`. This includes lowest-price calculations, promotion validation, targeted
+Omnibus sync, and repair flows. Future promotions for the same SKU should be
+validated against the corrected history, not against the voided accidental sale
+price.
+
+Application corrections require a reason and explicit business confirmation
+that hiding the accidental sale price from Omnibus storefront metadata is
+approved for the selected store. The audit trail remains in
+`promotion_application_corrections`; only the price-history row eligibility for
+Omnibus calculation changes.
+
 ### Practical Compliance Guide
 
 Use three different price concepts deliberately:

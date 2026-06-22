@@ -34,11 +34,17 @@ scope model and service work. Controllers normally derive the store from
 When editing code, verify that every query touching store-owned data includes
 `store_hash` either directly or via a model/service that applies it.
 
+For recommended reliability and safety improvements, see
+`docs/hardening.md`.
+
 ## Important Services
 
 - `PromotionService`: creates, updates, previews, syncs, and cleans up promotions.
 - `PromotionArchiveService`: records searchable promotion/product history and
   finalizes archives before cleanup removes current promotion ownership rows.
+- `PromotionApplicationCorrectionService`: previews and applies audited SKU-level
+  void corrections for products or variants incorrectly included in an active
+  promotion.
 - `ProductCacheService`: fetches products from BigCommerce and stores product,
   variant, image, custom field, price, and inventory data in local cache.
 - `QueueService`: creates and claims rows in `sync_jobs`.
@@ -58,6 +64,11 @@ When editing code, verify that every query touching store-owned data includes
 
 Promotion create/edit views are large PHP templates with inline JavaScript for
 filters and preview behavior. Shared styling lives mainly in `public/css/promotions.css`.
+
+Application corrections use the standalone `?route=corrections` workflow, but
+the entry point belongs to the Promotions section because applying a correction
+changes promotion ownership and product pricing state. Log pages remain
+read-only diagnostics and audit views.
 
 Keep changes small in these files. For submit flows, prefer server-side safety
 plus client-side locking. Do not rely only on JavaScript for write safety.
