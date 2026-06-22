@@ -161,9 +161,10 @@ do {
             }
 
             $db->query(
-                "UPDATE promotions SET status = 'expired' WHERE id = ? AND status = 'active' AND end_date < NOW()",
-                [$job['promotion_id']]
+                "UPDATE promotions SET status = 'expired' WHERE store_hash = ? AND id = ? AND status = 'active' AND end_date < NOW()",
+                [$job['store_hash'], $job['promotion_id']]
             );
+            $promotionService->markPromotionArchiveCleanupCompleted((int)$job['promotion_id']);
         } elseif ($job['job_type'] === 'omnibus_sync_products') {
             $productIds = $queue->extractProductIdsFromPayload($job['payload'] ?? null);
             logMsg("Processing Targeted Omnibus Sync Job for store {$job['store_hash']}... Products: " . count($productIds));

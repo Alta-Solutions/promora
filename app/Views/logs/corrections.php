@@ -12,6 +12,7 @@
     <a href="?route=logs" class="log-tab"><?= trans_e('common.sync_logs') ?></a>
     <a href="?route=logs&action=webhooks" class="log-tab"><?= trans_e('common.webhook_events') ?></a>
     <a href="?route=logs&action=corrections" class="log-tab active"><?= trans_e('common.promotion_corrections') ?></a>
+    <a href="?route=logs&action=promotions" class="log-tab"><?= trans_e('common.promotion_archive') ?></a>
 </div>
 
 <?php if (empty($logs)): ?>

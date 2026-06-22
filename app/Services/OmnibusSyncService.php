@@ -116,7 +116,7 @@ class OmnibusSyncService {
 
         $promotionReferenceMap = $this->fetchActivePromotionReferenceMap($productIds);
         $priceActivationMap = $this->fetchCurrentPriceActivationMap($productsById, $promotionReferenceMap, $currency);
-        $this->seedInitialPriceHistory($productsById, $currency, $priceActivationMap);
+        $this->seedInitialPriceHistory($productsById, $currency, $priceActivationMap, $promotionReferenceMap);
 
         $updates = [];
 
@@ -547,7 +547,8 @@ class OmnibusSyncService {
     private function seedInitialPriceHistory(
         array $productsById,
         string $currency,
-        array $priceActivationMap = []
+        array $priceActivationMap = [],
+        array $promotionReferenceMap = []
     ): void {
         $candidates = [];
 
@@ -563,9 +564,12 @@ class OmnibusSyncService {
                     : null;
                 $activationAt = $priceActivationMap[$this->buildPromotionReferenceKey((int)$productId, $variantId)]
                     ?? null;
+                $lockedPromotionReferenceAt = $this->hasLockedPromotionReferenceForRow((int)$productId, $variantId)
+                    ? $this->getPromotionReferenceForRow((int)$productId, $variantId, $promotionReferenceMap)
+                    : null;
                 $seedRecordedAt = $this->resolveInitialHistoryRecordedAt(
                     $row['cached_at'] ?? null,
-                    $activationAt
+                    $activationAt ?? $lockedPromotionReferenceAt
                 );
 
                 $candidates[] = [

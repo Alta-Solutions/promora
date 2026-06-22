@@ -13,6 +13,7 @@ class PromotionService {
     private $cacheService;
     private $storeHash;
     private $omnibusPricingService;
+    private $archiveService = null;
     private $storeConfigCache = null;
     private $priceHistoryHasVariantId;
     private const API_PRODUCT_LIMIT = 250;
@@ -39,6 +40,7 @@ public function __construct(Database $db = null) {
         // ISPRAVKA: Prosleđujemo DB instancu, a ne storeHash, da bi se delila konekcija.
         $this->cacheService = new ProductCacheService($this->db);
         $this->omnibusPricingService = new OmnibusPricingService($this->db);
+        $this->archiveService = new PromotionArchiveService($this->db, $this->storeHash);
     }
     
     /**
@@ -107,6 +109,8 @@ public function __construct(Database $db = null) {
             $appliedProducts = $this->countPromotionProducts($promotionId);
             if ($this->shouldQueueCleanupAfterPromotionUpdate($status, $appliedProducts)) {
                 $this->queuePromotionCleanup($promotionId, $appliedProducts);
+            } elseif ($status === 'expired') {
+                $this->finalizePromotionArchive((int)$promotionId, 'promotion_update');
             }
         }
 
@@ -114,11 +118,21 @@ public function __construct(Database $db = null) {
     }
 
     public function deletePromotion($promotionId) {
+        $promotion = $this->promotionModel->findById($promotionId);
+        if (!$promotion) {
+            return false;
+        }
+
         $totalItems = $this->countPromotionProducts($promotionId);
 
         if ($totalItems > 0) {
+            $this->finalizePromotionArchive((int)$promotionId, 'manual_delete');
             $this->queuePromotionCleanup($promotionId, $totalItems);
             return $this->promotionModel->update($promotionId, ['status' => 'expired']);
+        }
+
+        if ($this->shouldArchivePromotionBeforeDelete($promotion, $totalItems)) {
+            $this->finalizePromotionArchive((int)$promotionId, 'manual_delete');
         }
 
         return $this->promotionModel->delete($promotionId);
@@ -469,7 +483,8 @@ public function __construct(Database $db = null) {
         $debugLog[] = "Custom field updates (Multi-cURL): {$fieldSuccess} success";
         
         // 🚀 IZMENA: Zameniti petlju za individualne INSERT-e jednim BATCH INSERT-om
-        $this->batchSavePromotionProducts($appliedPromotions);
+        $promotionAppliedAt = $this->getDatabaseTimestamp();
+        $this->batchSavePromotionProducts($appliedPromotions, $promotionAppliedAt);
         $debugLog[] = "Database records saved/updated in batch.";
         
         // Cleanup expired products (sada će koristiti batch metode)
@@ -478,7 +493,7 @@ public function __construct(Database $db = null) {
         $debugLog[] = "Cleaned {$cleanedCount} expired products";
         
         // 🚀 OPTIMIZACIJA: Direktno ažuriranje lokalnog keša (bez API poziva)
-        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions);
+        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions, $promotionAppliedAt);
         $this->cacheService->updatePriceCacheDirectly($cachePriceUpdates);
 
         if (($cleanedCount + $expiredCleanedCount) > 0) {
@@ -641,6 +656,7 @@ public function __construct(Database $db = null) {
             );
             
             if (!empty($items)) {
+                $this->finalizePromotionArchive((int)$promo['id'], 'expired_cleanup');
                 $allItemsToClean = array_merge($allItemsToClean, $items);
 
                 // Batch uklanjanje sale_price (postojeće)
@@ -659,10 +675,12 @@ public function __construct(Database $db = null) {
                 }
 
                 // Brisanje iz DB za ovu promociju
+                $this->recordRemovedPromotionItems((int)$promo['id'], $items, 'expired_cleanup');
                 $this->db->query(
                     "DELETE FROM promotion_products WHERE promotion_id = ? AND store_hash = ?",
                     [$promo['id'], $this->storeHash]
                 );
+                $this->markPromotionArchiveCleanupCompleted((int)$promo['id']);
             }
         }
         
@@ -691,6 +709,10 @@ public function __construct(Database $db = null) {
         if (empty($allProducts)) {
             return ['processed' => 0, 'omnibus_product_ids' => []];
         }
+
+        foreach ($this->extractPromotionIds($allProducts) as $promotionId) {
+            $this->finalizePromotionArchive($promotionId, 'global_cleanup');
+        }
         
         [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($allProducts);
 
@@ -712,7 +734,11 @@ public function __construct(Database $db = null) {
         
         // Delete all (postojeće)
         if ($cleanedCount > 0) {
+            $this->recordRemovedPromotionItems(null, $allProducts, 'global_cleanup');
             $this->db->query("DELETE FROM promotion_products WHERE store_hash = ?", [$this->storeHash]);
+            foreach ($this->extractPromotionIds($allProducts) as $promotionId) {
+                $this->markPromotionArchiveCleanupCompleted($promotionId);
+            }
         }
         
         return [
@@ -760,6 +786,7 @@ public function __construct(Database $db = null) {
         // 🚀 IZMENA: Brisanje iz baze jednim BATCH SQL upitom
         $dbIdsToDelete = array_column($toClean, 'id');
         $placeholders = str_repeat('?,', count($dbIdsToDelete) - 1) . '?';
+        $this->recordRemovedPromotionItems(null, $toClean, 'no_longer_applicable');
         $this->db->query(
             "DELETE FROM promotion_products WHERE store_hash = ? AND id IN ($placeholders)",
             array_merge([$this->storeHash], $dbIdsToDelete)
@@ -779,6 +806,8 @@ public function __construct(Database $db = null) {
      * Koristi se kada promocija istekne, a korisnik klikne "Sync".
      */
     public function cleanupSinglePromotionBatch($promotionId, $limit = 50) {
+        $this->finalizePromotionArchive((int)$promotionId, 'expired_cleanup');
+
         // 1. Dohvati proizvode i varijante vezane za ovu promociju, uključujući njihov PK
         $items = $this->fetchPromotionProductsWithCachePrice(
             "pp.promotion_id = ? AND pp.store_hash = ?",
@@ -808,6 +837,7 @@ public function __construct(Database $db = null) {
         // 5. Obriši iz lokalne baze koristeći primarne ključeve
         $dbIdsToDelete = array_column($items, 'id');
         $placeholders = str_repeat('?,', count($dbIdsToDelete) - 1) . '?';
+        $this->recordRemovedPromotionItems((int)$promotionId, $items, 'promotion_cleanup');
         $this->db->query(
             "DELETE FROM promotion_products WHERE store_hash = ? AND id IN ($placeholders)",
             array_merge([$this->storeHash], $dbIdsToDelete)
@@ -828,15 +858,15 @@ public function __construct(Database $db = null) {
         ];
     }
     
-    private function batchSavePromotionProducts($promotions) {
+    private function batchSavePromotionProducts($promotions, ?string $lifecycleAt = null) {
         if (empty($promotions)) {
             return;
         }
 
-        $this->batchSavePromotionProductsNullSafe($promotions);
+        $this->batchSavePromotionProductsNullSafe($promotions, $lifecycleAt);
     }
 
-    private function batchSavePromotionProductsNullSafe(array $promotions): void {
+    private function batchSavePromotionProductsNullSafe(array $promotions, ?string $lifecycleAt = null): void {
         $promotions = $this->normalizePromotionProductRows($promotions);
         if (empty($promotions)) {
             return;
@@ -868,19 +898,37 @@ public function __construct(Database $db = null) {
                     }
 
                     $promotionChanged = (int)($primaryRow['promotion_id'] ?? 0) !== $promo['promotion_id'];
-                    $lifecycleResetSql = $promotionChanged
-                        ? ', first_applied_at = NOW(), omnibus_reference_at = NOW()'
-                        : '';
+                    $lifecycleResetSql = '';
+                    $bindings = [
+                        $promo['promotion_id'],
+                        $promo['custom_field_id'],
+                    ];
+                    if ($promotionChanged) {
+                        $this->recordReplacedPromotionItems([$primaryRow]);
+
+                        if ($lifecycleAt !== null) {
+                            $lifecycleResetSql = ', first_applied_at = ?, omnibus_reference_at = ?';
+                            $bindings[] = $lifecycleAt;
+                            $bindings[] = $lifecycleAt;
+                        } else {
+                            $lifecycleResetSql = ', first_applied_at = NOW(), omnibus_reference_at = NOW()';
+                        }
+                    }
+
+                    if ($lifecycleAt !== null) {
+                        $syncedAtSql = '?';
+                        $bindings[] = $lifecycleAt;
+                    } else {
+                        $syncedAtSql = 'NOW()';
+                    }
+
+                    $bindings[] = $this->storeHash;
+                    $bindings[] = (int)$primaryRow['id'];
                     $this->db->query(
                         "UPDATE promotion_products
-                         SET promotion_id = ?, custom_field_id = ?{$lifecycleResetSql}, synced_at = NOW()
+                         SET promotion_id = ?, custom_field_id = ?{$lifecycleResetSql}, synced_at = {$syncedAtSql}
                          WHERE store_hash = ? AND id = ?",
-                        [
-                            $promo['promotion_id'],
-                            $promo['custom_field_id'],
-                            $this->storeHash,
-                            (int)$primaryRow['id'],
-                        ]
+                        $bindings
                     );
                     continue;
                 }
@@ -896,7 +944,7 @@ public function __construct(Database $db = null) {
                 );
             }
 
-            $this->insertPromotionProductRows($rowsToInsert);
+            $this->insertPromotionProductRows($rowsToInsert, $lifecycleAt);
         }
     }
 
@@ -952,7 +1000,7 @@ public function __construct(Database $db = null) {
         );
     }
 
-    private function insertPromotionProductRows(array $promotions): void {
+    private function insertPromotionProductRows(array $promotions, ?string $lifecycleAt = null): void {
         if (empty($promotions)) {
             return;
         }
@@ -961,6 +1009,21 @@ public function __construct(Database $db = null) {
         $bindings = [];
 
         foreach ($promotions as $promo) {
+            if ($lifecycleAt !== null) {
+                $values[] = '(?, ?, ?, ?, ?, ?, ?, ?)';
+                $bindings = array_merge($bindings, [
+                    $this->storeHash,
+                    $promo['promotion_id'],
+                    $promo['product_id'],
+                    $promo['variant_id'],
+                    $promo['custom_field_id'],
+                    $lifecycleAt,
+                    $lifecycleAt,
+                    $lifecycleAt,
+                ]);
+                continue;
+            }
+
             $values[] = '(?, ?, ?, ?, ?, NOW(), NOW(), NOW())';
             $bindings = array_merge($bindings, [
                 $this->storeHash,
@@ -991,6 +1054,19 @@ public function __construct(Database $db = null) {
              VALUES (?, ?, ?, ?, ?, ?, ?)",
             [$this->storeHash, $promotionId, $type, $synced, $errors, round($duration, 2), $message]
         );
+    }
+
+    private function getDatabaseTimestamp(): string {
+        try {
+            $row = $this->db->fetchOne("SELECT NOW() AS current_time");
+            if (!empty($row['current_time'])) {
+                return (new \DateTimeImmutable((string)$row['current_time']))->format('Y-m-d H:i:s');
+            }
+        } catch (\Throwable $e) {
+            // Fallback keeps non-DB tests and degraded environments operational.
+        }
+
+        return date('Y-m-d H:i:s');
     }
 
     public function syncSinglePromotion($promotionId) {
@@ -1068,6 +1144,7 @@ public function __construct(Database $db = null) {
                     'variant_id'     => $item['variant_id'] ?? null,
                     'product_name'   => $item['name'],
                     'original_price' => $originalPrice,
+                    'discount_percent' => $discount,
                     'promo_price'    => $promoPrice,
                     'promotion_name' => $promotion['name'],
                     'custom_field_value' => $promotion['custom_field_value'] ?? $promotion['name']
@@ -1132,9 +1209,17 @@ public function __construct(Database $db = null) {
         }
         unset($promo);
 
-        $this->batchSavePromotionProducts($appliedPromotions);
+        $promotionAppliedAt = $this->getDatabaseTimestamp();
+        foreach ($appliedPromotions as &$promo) {
+            $promo['applied_at'] = $promotionAppliedAt;
+            $promo['last_seen_at'] = $promotionAppliedAt;
+        }
+        unset($promo);
 
-        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions);
+        $this->batchSavePromotionProducts($appliedPromotions, $promotionAppliedAt);
+        $this->recordAppliedPromotionItems($this->buildPromotionArchiveMetaFromAppliedItems($appliedPromotions), $appliedPromotions);
+
+        $cachePriceUpdates = $this->buildPromotionCachePriceUpdates($appliedPromotions, $promotionAppliedAt);
         $this->cacheService->updatePriceCacheDirectly($cachePriceUpdates);
 
         return [
@@ -1272,6 +1357,7 @@ public function __construct(Database $db = null) {
 
         if (!empty($dbIdsToDelete)) {
             $placeholders = str_repeat('?,', count($dbIdsToDelete) - 1) . '?';
+            $this->recordRemovedPromotionItems(null, $items, 'no_longer_applicable');
             $this->db->query(
                 "DELETE FROM promotion_products WHERE store_hash = ? AND id IN ($placeholders)",
                 array_merge([$this->storeHash], $dbIdsToDelete)
@@ -2483,20 +2569,27 @@ public function __construct(Database $db = null) {
         );
 
         // 3. Save to DB
-        $this->batchSavePromotionProducts([[
+        $promotionAppliedAt = $this->getDatabaseTimestamp();
+        $appliedPromotion = [[
             'promotion_id' => $promotion['id'],
             'product_id' => $product['product_id'],
             'variant_id' => $product['variant_id'] ?? null,
             'product_name' => $product['name'],
             'original_price' => $originalPrice,
+            'discount_percent' => $discount,
             'promo_price' => $promoPrice,
-            'custom_field_id' => $customFieldId
-        ]]);
+            'custom_field_id' => $customFieldId,
+            'applied_at' => $promotionAppliedAt,
+            'last_seen_at' => $promotionAppliedAt
+        ]];
+        $this->batchSavePromotionProducts($appliedPromotion, $promotionAppliedAt);
+        $this->recordAppliedPromotionItems($promotion, $appliedPromotion);
 
         $this->cacheService->updatePriceCacheDirectly([[
             'product_id' => $product['product_id'],
             'variant_id' => $product['variant_id'] ?? null,
-            'sale_price' => $promoPrice
+            'sale_price' => $promoPrice,
+            'recorded_at' => $promotionAppliedAt
         ]]);
     }
 
@@ -2504,18 +2597,25 @@ public function __construct(Database $db = null) {
      * Uklanja promociju sa proizvoda.
      */
     private function removePromotionFromProduct($product) {
+        $existingPromotionItems = $this->fetchPromotionProductsWithCachePrice(
+            "pp.product_id = ? AND pp.variant_id <=> ? AND pp.store_hash = ?",
+            [$product['product_id'], $product['variant_id'] ?? null, $this->storeHash]
+        );
+
         if (!empty($product['variant_id'])) {
             $this->api->batchUpdateVariants([[
                 'product_id' => $product['product_id'],
                 'id' => $product['variant_id'],
                 'sale_price' => null
             ]]);
+            $this->recordRemovedPromotionItems(null, $existingPromotionItems, 'product_resync');
             $this->db->query(
                 "DELETE FROM promotion_products WHERE product_id = ? AND variant_id = ? AND store_hash = ?",
                 [$product['product_id'], $product['variant_id'], $this->storeHash]
             );
         } else {
             $this->api->updateProductSalePrice($product['product_id'], null);
+            $this->recordRemovedPromotionItems(null, $existingPromotionItems, 'product_resync');
             $this->db->query(
                 "DELETE FROM promotion_products WHERE product_id = ? AND variant_id IS NULL AND store_hash = ?",
                 [$product['product_id'], $this->storeHash]
@@ -2661,15 +2761,21 @@ public function __construct(Database $db = null) {
         return $productIds;
     }
 
-    private function buildPromotionCachePriceUpdates(array $promotions): array {
+    private function buildPromotionCachePriceUpdates(array $promotions, ?string $recordedAt = null): array {
         $updates = [];
 
         foreach ($promotions as $promo) {
-            $updates[] = [
+            $update = [
                 'product_id' => $promo['product_id'],
                 'variant_id' => $promo['variant_id'] ?? null,
                 'sale_price' => $promo['promo_price']
             ];
+
+            if ($recordedAt !== null) {
+                $update['recorded_at'] = $recordedAt;
+            }
+
+            $updates[] = $update;
         }
 
         return $updates;
@@ -2865,5 +2971,109 @@ public function __construct(Database $db = null) {
         }
 
         return $productsToClear;
+    }
+
+    private function recordAppliedPromotionItems(array $promotion, array $items): void {
+        if (!$this->hasArchiveServiceMethod('recordAppliedItems')) {
+            return;
+        }
+
+        $this->archiveService->recordAppliedItems($promotion, $items);
+    }
+
+    private function buildPromotionArchiveMetaFromAppliedItems(array $items): array {
+        $first = reset($items);
+        if (!is_array($first)) {
+            return [];
+        }
+
+        return [
+            'id' => $first['promotion_id'] ?? ($first['id'] ?? null),
+            'promotion_id' => $first['promotion_id'] ?? ($first['id'] ?? null),
+            'name' => $first['promotion_name'] ?? '',
+            'discount_percent' => $first['discount_percent'] ?? null,
+        ];
+    }
+
+    private function recordRemovedPromotionItems(?int $promotionId, array $items, string $reason): void {
+        if (!$this->hasArchiveServiceMethod('recordRemovedItems')) {
+            return;
+        }
+
+        $this->archiveService->recordRemovedItems($promotionId, $items, $reason);
+    }
+
+    private function recordReplacedPromotionItems(array $items): void {
+        if (empty($items)) {
+            return;
+        }
+
+        $ids = array_values(array_filter(array_map('intval', array_column($items, 'id')), static function (int $id): bool {
+            return $id > 0;
+        }));
+
+        if (!empty($ids)) {
+            $placeholders = str_repeat('?,', count($ids) - 1) . '?';
+            $detailedItems = $this->fetchPromotionProductsWithCachePrice(
+                "pp.store_hash = ? AND pp.id IN ($placeholders)",
+                array_merge([$this->storeHash], $ids)
+            );
+
+            if (!empty($detailedItems)) {
+                $items = $detailedItems;
+            }
+        }
+
+        $this->recordRemovedPromotionItems(null, $items, 'promotion_replaced');
+    }
+
+    private function extractPromotionIds(array $items): array {
+        $promotionIds = [];
+
+        foreach ($items as $item) {
+            $promotionId = (int)($item['promotion_id'] ?? 0);
+            if ($promotionId > 0) {
+                $promotionIds[$promotionId] = true;
+            }
+        }
+
+        return array_keys($promotionIds);
+    }
+
+    private function finalizePromotionArchive(int $promotionId, string $reason): void {
+        if (!$this->hasArchiveServiceMethod('finalizeArchive')) {
+            return;
+        }
+
+        $this->archiveService->finalizeArchive($promotionId, $reason);
+    }
+
+    public function markPromotionArchiveCleanupCompleted(int $promotionId): void {
+        if (!$this->hasArchiveServiceMethod('markCleanupCompleted')) {
+            return;
+        }
+
+        $this->archiveService->markCleanupCompleted($promotionId);
+    }
+
+    private function shouldArchivePromotionBeforeDelete(array $promotion, int $appliedProducts): bool {
+        if ($appliedProducts > 0) {
+            return true;
+        }
+
+        $status = (string)($promotion['status'] ?? '');
+        if ($status === 'active' || $status === 'expired') {
+            return true;
+        }
+
+        if ($this->hasArchiveServiceMethod('hasHistoricalProducts')) {
+            return $this->archiveService->hasHistoricalProducts((int)($promotion['id'] ?? 0));
+        }
+
+        return false;
+    }
+
+    private function hasArchiveServiceMethod(string $method): bool {
+        return is_object($this->archiveService) && method_exists($this->archiveService, $method);
     }
 }

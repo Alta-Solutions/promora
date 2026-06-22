@@ -334,22 +334,39 @@ class ProductCacheService {
             : [];
 
         // IZMENA: Ažuriranje se sada radi na osnovu product_id i variant_id
-        $sql = "UPDATE products_cache SET sale_price = ?, cached_at = NOW()
-                WHERE product_id = ? AND variant_id <=> ? AND store_hash = ?";
-        
         foreach ($updates as $update) {
             // Ako je sale_price null, u bazu upisujemo NULL (ili 0 zavisno od strukture, ovde NULL)
             // Ali pazi: products_cache tabela treba da dozvoli NULL za sale_price.
             // Ako API update šalje 0 za brisanje, ovde možemo staviti 0 ili NULL.
             $salePrice = $update['sale_price'] ?? null;
             if ($salePrice === 0 || $salePrice === 0.0) $salePrice = null;
+            $observedAt = $this->normalizeObservedAt($update['recorded_at'] ?? ($update['observed_at'] ?? null));
 
-            $this->db->query($sql, [
-                $salePrice,           // Nova akcijska cena (ili null)
-                $update['product_id'],
-                $update['variant_id'] ?? null, // Koristimo <=> pa je null bezbedno
-                $this->storeHash
-            ]);
+            if ($observedAt !== null) {
+                $this->db->query(
+                    "UPDATE products_cache SET sale_price = ?, cached_at = ?
+                     WHERE product_id = ? AND variant_id <=> ? AND store_hash = ?",
+                    [
+                        $salePrice,
+                        $observedAt,
+                        $update['product_id'],
+                        $update['variant_id'] ?? null,
+                        $this->storeHash
+                    ]
+                );
+                continue;
+            }
+
+            $this->db->query(
+                "UPDATE products_cache SET sale_price = ?, cached_at = NOW()
+                 WHERE product_id = ? AND variant_id <=> ? AND store_hash = ?",
+                [
+                    $salePrice,           // Nova akcijska cena (ili null)
+                    $update['product_id'],
+                    $update['variant_id'] ?? null, // Koristimo <=> pa je null bezbedno
+                    $this->storeHash
+                ]
+            );
         }
 
         if (!$storeConfig || !$storeConfig['enable_omnibus']) {
@@ -369,12 +386,19 @@ class ProductCacheService {
                 continue;
             }
 
-            $pricesToLog[] = [
+            $logRow = [
                 'product_id' => (int)$update['product_id'],
                 'variant_id' => $this->normalizeVariantId($update['variant_id'] ?? null),
                 'price' => $effectivePrice,
                 'currency' => $storeConfig['currency'] ?? 'USD',
             ];
+
+            $observedAt = $this->normalizeObservedAt($update['recorded_at'] ?? ($update['observed_at'] ?? null));
+            if ($observedAt !== null) {
+                $logRow['recorded_at'] = $observedAt;
+            }
+
+            $pricesToLog[] = $logRow;
         }
 
         if (!empty($pricesToLog)) {
@@ -626,6 +650,22 @@ class ProductCacheService {
         }
 
         return $dateTime->sub(new \DateInterval('P30D'))->format('Y-m-d H:i:s');
+    }
+
+    private function normalizeObservedAt($observedAt): ?string {
+        if ($observedAt === null || $observedAt === '') {
+            return null;
+        }
+
+        if ($observedAt instanceof \DateTimeInterface) {
+            return $observedAt->format('Y-m-d H:i:s');
+        }
+
+        try {
+            return (new \DateTimeImmutable((string)$observedAt))->format('Y-m-d H:i:s');
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 
     private function getRegularPricesForCacheUpdates(array $updates): array {

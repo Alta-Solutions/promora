@@ -11,6 +11,7 @@ require_once ROOT_PATH . 'vendor/autoload.php';
 require_once ROOT_PATH . 'config.php';
 
 use App\Models\Database;
+use App\Support\BigCommerceStoreSchema;
 
 // Funkcija za prikaz poruka
 function message($text, $type = 'info') {
@@ -34,12 +35,15 @@ try {
             `access_token` TEXT NOT NULL,
             `context` VARCHAR(255) NOT NULL,
             `scope` TEXT,
+            `user_id` VARCHAR(255) NULL,
+            `user_email` VARCHAR(255) NULL,
             `is_active` TINYINT(1) NOT NULL DEFAULT 1,
             `installed_at` DATETIME NOT NULL,
             `last_accessed` DATETIME NULL,
             `enable_omnibus` TINYINT(1) NOT NULL DEFAULT 0,
             `currency` VARCHAR(10) NOT NULL DEFAULT 'USD',
-            `settings` JSON NULL
+            `settings` JSON NULL,
+            `updated_at` DATETIME NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
         // Tabela za keširanje proizvoda
@@ -148,6 +152,64 @@ try {
             INDEX `idx_store_promotion_created` (`store_hash`, `promotion_id`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
+        // Arhiva zavrsenih promocija
+        "CREATE TABLE IF NOT EXISTS `promotion_archives` (
+            `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            `store_hash` VARCHAR(255) NOT NULL,
+            `promotion_id` INT NOT NULL,
+            `name` VARCHAR(255) NOT NULL,
+            `custom_field_value` VARCHAR(255) NULL,
+            `discount_percent` DECIMAL(5, 2) NOT NULL,
+            `start_date` DATETIME NOT NULL,
+            `end_date` DATETIME NOT NULL,
+            `priority` INT NOT NULL DEFAULT 0,
+            `filters` JSON NOT NULL,
+            `filters_text` TEXT NULL,
+            `status_at_archive` VARCHAR(50) NOT NULL DEFAULT 'expired',
+            `color` VARCHAR(20) NULL,
+            `description` TEXT NULL,
+            `archive_reason` VARCHAR(50) NOT NULL DEFAULT 'expired_cleanup',
+            `archived_at` DATETIME NOT NULL,
+            `cleanup_completed_at` DATETIME NULL,
+            `product_count` INT NOT NULL DEFAULT 0,
+            `backfill_status` VARCHAR(50) NOT NULL DEFAULT 'complete',
+            `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY `uniq_store_promotion_archive` (`store_hash`, `promotion_id`),
+            INDEX `idx_store_archived_at` (`store_hash`, `archived_at`),
+            INDEX `idx_store_period` (`store_hash`, `start_date`, `end_date`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+
+        // Istorija proizvoda/varijanti koji su ikad bili na promociji
+        "CREATE TABLE IF NOT EXISTS `promotion_product_history` (
+            `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            `store_hash` VARCHAR(255) NOT NULL,
+            `promotion_id` INT NOT NULL,
+            `archive_id` BIGINT UNSIGNED NULL,
+            `product_id` INT UNSIGNED NOT NULL,
+            `variant_id` INT UNSIGNED NULL,
+            `cache_id` VARCHAR(255) NULL,
+            `product_name` VARCHAR(255) NULL,
+            `sku` VARCHAR(255) NULL,
+            `type` VARCHAR(20) NULL,
+            `original_price` DECIMAL(20, 4) NULL,
+            `promo_price` DECIMAL(20, 4) NULL,
+            `discount_percent` DECIMAL(5, 2) NULL,
+            `custom_field_id` INT UNSIGNED NULL,
+            `first_applied_at` DATETIME NULL,
+            `omnibus_reference_at` DATETIME NULL,
+            `applied_at` DATETIME NOT NULL,
+            `last_seen_at` DATETIME NOT NULL,
+            `removed_at` DATETIME NULL,
+            `removal_reason` VARCHAR(50) NULL,
+            `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX `idx_store_promotion_open` (`store_hash`, `promotion_id`, `removed_at`),
+            INDEX `idx_archive_id` (`archive_id`),
+            INDEX `idx_store_product_variant` (`store_hash`, `product_id`, `variant_id`),
+            INDEX `idx_store_sku` (`store_hash`, `sku`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+
         // Tabela za logovanje sinhronizacije
         "CREATE TABLE IF NOT EXISTS `sync_log` (
             `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -246,6 +308,9 @@ try {
             message("  - Error creating table `{$tableName}`: " . $e->getMessage(), 'error');
         }
     }
+
+    BigCommerceStoreSchema::ensure($db);
+    message("  - Table `bigcommerce_stores` columns verified successfully.", 'success');
 
     message("\n--- Database setup complete! ---", 'info');
 

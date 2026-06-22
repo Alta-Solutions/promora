@@ -94,6 +94,64 @@ class OmnibusSyncServiceTest extends TestCase {
         $this->assertSame('2026-05-02 15:02:38', $priceLogger->seeds[0]['recorded_at']);
     }
 
+    public function testInitialHistorySeedUsesLockedPromotionReferenceForWindowBoundary(): void {
+        $priceLogger = new class {
+            public $seeds = [];
+
+            public function seedInitialPriceHistoryBatch(string $storeHash, array $pricesToSeed): int {
+                $this->seeds = $pricesToSeed;
+                return count($pricesToSeed);
+            }
+        };
+
+        $service = $this->createService($priceLogger);
+        $this->setPrivateProperty($service, 'lockedPromotionReferenceKeys', ['12126:base' => true]);
+
+        $this->invokeSeedInitialPriceHistory($service, [
+            12126 => [[
+                'product_id' => 12126,
+                'variant_id' => null,
+                'type' => 'product',
+                'price' => '28.63',
+                'sale_price' => '22.90',
+                'cached_at' => '2026-06-04 15:27:20',
+            ]],
+        ], [], [
+            '12126:base' => new DateTimeImmutable('2026-06-03 00:02:34'),
+        ]);
+
+        $this->assertSame('2026-05-04 00:02:34', $priceLogger->seeds[0]['recorded_at']);
+        $this->assertSame(28.63, $priceLogger->seeds[0]['price']);
+    }
+
+    public function testInitialHistorySeedKeepsCachedObservationBoundaryWhenPromotionReferenceIsNotLocked(): void {
+        $priceLogger = new class {
+            public $seeds = [];
+
+            public function seedInitialPriceHistoryBatch(string $storeHash, array $pricesToSeed): int {
+                $this->seeds = $pricesToSeed;
+                return count($pricesToSeed);
+            }
+        };
+
+        $service = $this->createService($priceLogger);
+
+        $this->invokeSeedInitialPriceHistory($service, [
+            12126 => [[
+                'product_id' => 12126,
+                'variant_id' => null,
+                'type' => 'product',
+                'price' => '28.63',
+                'sale_price' => '22.90',
+                'cached_at' => '2026-06-04 15:27:20',
+            ]],
+        ], [], [
+            '12126:base' => new DateTimeImmutable('2026-06-03 00:02:34'),
+        ]);
+
+        $this->assertSame('2026-05-05 15:27:20', $priceLogger->seeds[0]['recorded_at']);
+    }
+
     public function testActivePromotionReferenceMapUsesPromotionLifecycleDate(): void {
         $service = $this->createService(new class {
             public function seedInitialPriceHistoryBatch(string $storeHash, array $pricesToSeed): int {
@@ -386,11 +444,12 @@ class OmnibusSyncServiceTest extends TestCase {
     private function invokeSeedInitialPriceHistory(
         OmnibusSyncService $service,
         array $productsById,
-        array $priceActivationMap = []
+        array $priceActivationMap = [],
+        array $promotionReferenceMap = []
     ): void {
         $method = new ReflectionMethod($service, 'seedInitialPriceHistory');
         $method->setAccessible(true);
-        $method->invoke($service, $productsById, 'EUR', $priceActivationMap);
+        $method->invoke($service, $productsById, 'EUR', $priceActivationMap, $promotionReferenceMap);
     }
 
     private function setPrivateProperty(object $object, string $property, $value): void {

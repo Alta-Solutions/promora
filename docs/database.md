@@ -19,9 +19,12 @@ Key fields:
 - `store_hash`
 - `access_token`
 - `context`
+- `user_id`
+- `user_email`
 - `enable_omnibus`
 - `currency`
 - `settings`
+- `updated_at`
 
 ### `products_cache`
 
@@ -100,6 +103,50 @@ Key fields:
 - `old_terms`
 - `new_terms`
 - `created_at`
+
+### `promotion_archives`
+
+Immutable header snapshot for promotions that have finished or are manually
+deleted after being active. It is tenant-scoped and keyed by `store_hash` plus
+`promotion_id`.
+
+Key fields:
+
+- `store_hash`
+- `promotion_id`
+- `name`
+- `discount_percent`
+- `start_date`
+- `end_date`
+- `filters`
+- `filters_text`
+- `archived_at`
+- `cleanup_completed_at`
+- `product_count`
+- `backfill_status`
+
+### `promotion_product_history`
+
+Searchable interval history for products and variants that were successfully
+covered by a promotion. Unlike `promotion_products`, rows are not deleted during
+cleanup; they are closed with `removed_at` and `removal_reason`.
+
+Key fields:
+
+- `store_hash`
+- `promotion_id`
+- `archive_id`
+- `product_id`
+- `variant_id`
+- `product_name`
+- `sku`
+- `original_price`
+- `promo_price`
+- `discount_percent`
+- `applied_at`
+- `last_seen_at`
+- `removed_at`
+- `removal_reason`
 
 ### `sync_jobs`
 

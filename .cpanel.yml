@@ -1,8 +1,8 @@
 ---
 deployment:
   tasks:
-    # Update this path if the cPanel document root differs.
-    - export DEPLOYPATH=/home/rwdigital/promora.rwdigital.io/
+    - export BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+    - case "$BRANCH" in development|feature/*) export DEPLOYPATH=/home/rwdigital/dev.promora.rwdigital.io/; export DEPLOY_ENV=dev ;; main) export DEPLOYPATH=/home/rwdigital/promora.rwdigital.io/; export DEPLOY_ENV=production ;; *) echo "Skipping deploy for unsupported branch $BRANCH"; exit 0 ;; esac
     - export PHPBIN=/usr/local/bin/ea-php82
     - if [ ! -x "$PHPBIN" ]; then export PHPBIN=/usr/bin/php; fi
     - if command -v composer >/dev/null 2>&1; then export COMPOSER_BIN="$(command -v composer)"; elif [ -x /opt/cpanel/composer/bin/composer ]; then export COMPOSER_BIN=/opt/cpanel/composer/bin/composer; else echo "Composer not found"; exit 1; fi
@@ -10,6 +10,7 @@ deployment:
     - /bin/mkdir -p "$DEPLOYPATH/logs" "$DEPLOYPATH/app/logs"
     - /bin/cp -a app bigcommerce-app bin public webhook "$DEPLOYPATH"
     - /bin/cp -a .htaccess composer.json composer.lock config.php favicon.ico index.php README.md "$DEPLOYPATH"
-    - test -f "$DEPLOYPATH/.env" || (echo "Missing production .env at $DEPLOYPATH/.env"; exit 1)
+    - if [ ! -f "$DEPLOYPATH/.env" ] && [ -f .env ]; then /bin/cp -a .env "$DEPLOYPATH/.env"; fi
+    - test -f "$DEPLOYPATH/.env" || (echo "Missing $DEPLOY_ENV .env at $DEPLOYPATH/.env"; exit 1)
     - cd "$DEPLOYPATH" && unset COMPOSER && "$PHPBIN" "$COMPOSER_BIN" install --no-dev --prefer-dist --optimize-autoloader --no-interaction
     - cd "$DEPLOYPATH" && "$PHPBIN" app/install/install.php

@@ -20,7 +20,7 @@ class PriceLogger {
      * Beleži promenu cene samo ako se nova cena razlikuje od poslednje zabeležene.
      * @deprecated Use logPricesBatch for better performance.
      */
-    public function logPriceChange(string $storeHash, int $productId, float $newPrice, string $currency, ?int $variantId = null): bool {
+    public function logPriceChange(string $storeHash, int $productId, float $newPrice, string $currency, ?int $variantId = null, $recordedAt = null): bool {
         if ($this->priceHistoryHasVariantId()) {
             $lastPriceRecord = $this->db->fetchOne(
                 "SELECT price FROM product_price_history 
@@ -42,17 +42,30 @@ class PriceLogger {
 
         // Ako ne postoji zapis, ili ako je cena različita, zabeleži je.
         if (!$lastPriceRecord || (float)$lastPriceRecord['price'] !== $newPrice) {
+            $normalizedRecordedAt = $this->normalizeRecordedAt($recordedAt);
+            $recordedAtSql = $normalizedRecordedAt !== null ? '?' : 'NOW()';
+
             if ($this->priceHistoryHasVariantId()) {
+                $params = [$storeHash, $productId, $variantId, $newPrice, $currency];
+                if ($normalizedRecordedAt !== null) {
+                    $params[] = $normalizedRecordedAt;
+                }
+
                 $this->db->query(
                     "INSERT INTO product_price_history (store_hash, product_id, variant_id, price, currency, recorded_at) 
-                     VALUES (?, ?, ?, ?, ?, NOW())",
-                    [$storeHash, $productId, $variantId, $newPrice, $currency]
+                     VALUES (?, ?, ?, ?, ?, {$recordedAtSql})",
+                    $params
                 );
             } else {
+                $params = [$storeHash, $productId, $newPrice, $currency];
+                if ($normalizedRecordedAt !== null) {
+                    $params[] = $normalizedRecordedAt;
+                }
+
                 $this->db->query(
                     "INSERT INTO product_price_history (store_hash, product_id, price, currency, recorded_at) 
-                     VALUES (?, ?, ?, ?, NOW())",
-                    [$storeHash, $productId, $newPrice, $currency]
+                     VALUES (?, ?, ?, ?, {$recordedAtSql})",
+                    $params
                 );
             }
             return true;
@@ -126,6 +139,13 @@ class PriceLogger {
             $lastPrice = $lastPricesMap[$mapKey] ?? null;
 
             if ($lastPrice === null || (float)$lastPrice !== $newPrice) {
+                $normalizedRecordedAt = $this->normalizeRecordedAt($item['recorded_at'] ?? null);
+                if ($normalizedRecordedAt !== null) {
+                    $insertValues[] = '(?, ?, ?, ?, ?, ?)';
+                    $insertParams = array_merge($insertParams, [$storeHash, $productId, $variantId, $newPrice, $item['currency'], $normalizedRecordedAt]);
+                    continue;
+                }
+
                 $insertValues[] = '(?, ?, ?, ?, ?, NOW())';
                 $insertParams = array_merge($insertParams, [$storeHash, $productId, $variantId, $newPrice, $item['currency']]);
             }
@@ -286,6 +306,7 @@ class PriceLogger {
             $latestPriceByProduct[$productId] = [
                 'price' => (float)$item['price'],
                 'currency' => $item['currency'],
+                'recorded_at' => $item['recorded_at'] ?? null,
             ];
         }
 
@@ -320,6 +341,13 @@ class PriceLogger {
         foreach ($latestPriceByProduct as $productId => $item) {
             $lastPrice = $lastPricesMap[$productId] ?? null;
             if ($lastPrice === null || $lastPrice !== (float)$item['price']) {
+                $normalizedRecordedAt = $this->normalizeRecordedAt($item['recorded_at'] ?? null);
+                if ($normalizedRecordedAt !== null) {
+                    $insertValues[] = '(?, ?, ?, ?, ?)';
+                    $insertParams = array_merge($insertParams, [$storeHash, $productId, $item['price'], $item['currency'], $normalizedRecordedAt]);
+                    continue;
+                }
+
                 $insertValues[] = '(?, ?, ?, ?, NOW())';
                 $insertParams = array_merge($insertParams, [$storeHash, $productId, $item['price'], $item['currency']]);
             }
@@ -488,6 +516,22 @@ class PriceLogger {
         }
 
         return $this->priceHistoryHasVariantId;
+    }
+
+    private function normalizeRecordedAt($recordedAt): ?string {
+        if ($recordedAt === null || $recordedAt === '') {
+            return null;
+        }
+
+        if ($recordedAt instanceof \DateTimeInterface) {
+            return $recordedAt->format('Y-m-d H:i:s');
+        }
+
+        try {
+            return (new \DateTimeImmutable((string)$recordedAt))->format('Y-m-d H:i:s');
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 
     private function ensurePriceHistorySchema(): void {
