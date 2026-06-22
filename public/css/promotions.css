@@ -26,7 +26,7 @@
 
 .promotion-list-toolbar {
     display: grid;
-    grid-template-columns: minmax(260px, 1fr) 150px auto;
+    grid-template-columns: minmax(240px, 1fr) minmax(180px, 220px) 150px auto;
     gap: 14px;
     align-items: end;
     margin-bottom: 16px;
@@ -47,6 +47,7 @@
 }
 
 .promotion-list-search,
+.promotion-list-status,
 .promotion-list-page-size {
     min-width: 0;
 }
