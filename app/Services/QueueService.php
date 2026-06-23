@@ -206,20 +206,45 @@ class QueueService {
             throw new \InvalidArgumentException('Webhook event ID must be positive.');
         }
 
-        $this->ensureSyncJobsPayloadColumn();
-        $payload = ['webhook_event_id' => $eventId];
+        $lockName = 'webhook_event:' . $storeHash;
+        $lockAcquired = $this->acquireLock($lockName, 5);
 
-        $this->db->query(
-            "INSERT INTO sync_jobs (store_hash, job_type, payload, total_items, status, attempts, created_at)
-             VALUES (?, 'webhook_event', ?, 1, 'pending', 0, NOW())",
-            [$storeHash, json_encode($payload, JSON_UNESCAPED_SLASHES)]
-        );
+        if (!$lockAcquired) {
+            $this->ensureSyncJobsPayloadColumn();
+            return $this->insertWebhookEventJob($storeHash, $eventId, 'lock_timeout_fallback');
+        }
 
-        return [
-            'created' => true,
-            'job_id' => (int)$this->db->lastInsertId(),
-            'event_id' => $eventId,
-        ];
+        try {
+            $this->ensureSyncJobsPayloadColumn();
+
+            $pendingJob = $this->findJobByTypeAndStatus('webhook_event', 'pending');
+            if ($pendingJob) {
+                $existingEventIds = $this->extractWebhookEventIdsFromPayload($pendingJob['payload'] ?? null);
+                if (!empty($existingEventIds)) {
+                    $mergedEventIds = $this->normalizeWebhookEventIds(array_merge($existingEventIds, [$eventId]));
+                    $payload = $this->buildWebhookEventPayload($mergedEventIds);
+
+                    $this->db->query(
+                        "UPDATE sync_jobs
+                         SET payload = ?, total_items = ?, updated_at = NOW()
+                         WHERE id = ?",
+                        [json_encode($payload, JSON_UNESCAPED_SLASHES), count($mergedEventIds), (int)$pendingJob['id']]
+                    );
+
+                    return [
+                        'created' => false,
+                        'job_id' => (int)$pendingJob['id'],
+                        'event_id' => $eventId,
+                        'event_ids' => $mergedEventIds,
+                        'reason' => 'merged',
+                    ];
+                }
+            }
+
+            return $this->insertWebhookEventJob($storeHash, $eventId, 'created');
+        } finally {
+            $this->releaseLock($lockName);
+        }
     }
 
     private function requireStoreHash(string $operation): string {
@@ -242,12 +267,12 @@ class QueueService {
              AND (next_run_at IS NULL OR next_run_at <= NOW())
              ORDER BY
                 CASE job_type
-                    WHEN 'webhook_event' THEN 5
                     WHEN 'sync_promotion' THEN 10
                     WHEN 'single_sync' THEN 10
                     WHEN 'cleanup_single' THEN 20
                     WHEN 'cleanup' THEN 20
-                    WHEN 'omnibus_sync_products' THEN 30
+                    WHEN 'omnibus_sync_products' THEN 25
+                    WHEN 'webhook_event' THEN 30
                     WHEN 'omnibus_sync' THEN 40
                     ELSE 50
                 END,
@@ -288,12 +313,12 @@ class QueueService {
                     ELSE 3 
                 END,
                 CASE job_type
-                    WHEN 'webhook_event' THEN 5
                     WHEN 'sync_promotion' THEN 10
                     WHEN 'single_sync' THEN 10
                     WHEN 'cleanup_single' THEN 20
                     WHEN 'cleanup' THEN 20
-                    WHEN 'omnibus_sync_products' THEN 30
+                    WHEN 'omnibus_sync_products' THEN 25
+                    WHEN 'webhook_event' THEN 30
                     WHEN 'omnibus_sync' THEN 40
                     ELSE 50
                 END,
@@ -327,15 +352,86 @@ class QueueService {
     }
 
     public function extractWebhookEventIdFromPayload($payload): ?int {
-        $payload = $this->decodePayload($payload);
-        $eventId = $payload['webhook_event_id'] ?? null;
+        $eventIds = $this->extractWebhookEventIdsFromPayload($payload);
+        return $eventIds[0] ?? null;
+    }
 
-        if (!is_numeric($eventId)) {
-            return null;
+    public function extractWebhookEventIdsFromPayload($payload): array {
+        $payload = $this->decodePayload($payload);
+        $eventIds = [];
+
+        if (isset($payload['webhook_event_ids']) && is_array($payload['webhook_event_ids'])) {
+            $eventIds = $payload['webhook_event_ids'];
         }
 
-        $eventId = (int)$eventId;
-        return $eventId > 0 ? $eventId : null;
+        if (isset($payload['webhook_event_id'])) {
+            $eventIds[] = $payload['webhook_event_id'];
+        }
+
+        return $this->normalizeWebhookEventIds($eventIds);
+    }
+
+    public function deferWebhookEventJob(int $jobId, string $storeHash, array $remainingEventIds, int $delaySeconds = 0): void {
+        $remainingEventIds = $this->normalizeWebhookEventIds($remainingEventIds);
+        if (empty($remainingEventIds)) {
+            return;
+        }
+
+        $delaySeconds = max(0, min(300, $delaySeconds));
+        $nextRunAtSql = $delaySeconds > 0
+            ? "DATE_ADD(NOW(), INTERVAL {$delaySeconds} SECOND)"
+            : "NULL";
+        $payload = $this->buildWebhookEventPayload($remainingEventIds);
+
+        $this->db->query(
+            "UPDATE sync_jobs
+             SET payload = ?,
+                 total_items = ?,
+                 processed_items = 0,
+                 status = 'pending',
+                 error_message = NULL,
+                 next_run_at = {$nextRunAtSql},
+                 updated_at = NOW()
+             WHERE id = ? AND store_hash = ?",
+            [
+                json_encode($payload, JSON_UNESCAPED_SLASHES),
+                count($remainingEventIds),
+                $jobId,
+                $storeHash,
+            ]
+        );
+    }
+
+    private function buildWebhookEventPayload(array $eventIds): array {
+        $eventIds = $this->normalizeWebhookEventIds($eventIds);
+        $firstEventId = $eventIds[0] ?? null;
+
+        $payload = [
+            'webhook_event_ids' => $eventIds,
+        ];
+
+        if ($firstEventId !== null) {
+            $payload['webhook_event_id'] = $firstEventId;
+        }
+
+        return $payload;
+    }
+
+    private function insertWebhookEventJob(string $storeHash, int $eventId, string $reason): array {
+        $payload = $this->buildWebhookEventPayload([$eventId]);
+        $this->db->query(
+            "INSERT INTO sync_jobs (store_hash, job_type, payload, total_items, status, attempts, created_at)
+             VALUES (?, 'webhook_event', ?, 1, 'pending', 0, NOW())",
+            [$storeHash, json_encode($payload, JSON_UNESCAPED_SLASHES)]
+        );
+
+        return [
+            'created' => true,
+            'job_id' => (int)$this->db->lastInsertId(),
+            'event_id' => $eventId,
+            'event_ids' => [$eventId],
+            'reason' => $reason,
+        ];
     }
 
     public function purgeOldJobs(int $completedRetentionDays = 14, int $failedRetentionDays = 90): array {
@@ -488,6 +584,24 @@ class QueueService {
         $productIds = array_keys($normalized);
         sort($productIds, SORT_NUMERIC);
         return $productIds;
+    }
+
+    private function normalizeWebhookEventIds(array $eventIds): array {
+        $normalized = [];
+        foreach ($eventIds as $eventId) {
+            if (!is_numeric($eventId)) {
+                continue;
+            }
+
+            $eventId = (int)$eventId;
+            if ($eventId > 0) {
+                $normalized[$eventId] = true;
+            }
+        }
+
+        $eventIds = array_keys($normalized);
+        sort($eventIds, SORT_NUMERIC);
+        return $eventIds;
     }
 
     private function buildTargetedOmnibusPayload(array $productIds, array $meta): array {

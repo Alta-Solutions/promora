@@ -103,6 +103,7 @@ return [
         'job_type_cleanup_single' => 'Čišćenje promocije',
         'job_type_omnibus_sync' => 'Omnibus sync',
         'job_type_omnibus_sync_products' => 'Targeted Omnibus sync',
+        'job_type_webhook_event' => 'Webhook događaji',
         'job_type_unknown' => 'Sync job',
         'attention_title' => 'Promocije koje traže pažnju',
         'attention_subtitle' => 'Stavke koje možda zahtevaju sync, proveru ili praćenje termina.',

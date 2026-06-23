@@ -145,8 +145,12 @@ See `docs/omnibus.md` before changing this flow.
 
 `WebhookService` handles BigCommerce product and inventory webhooks. Product
 webhook requests are acknowledged quickly after validation, persisted to
-`webhook_events`, and queued as `webhook_event` jobs. The worker then refreshes
-local cache and re-evaluates promotions for the product. The suppression table
+`webhook_events`, and queued as `webhook_event` jobs. Pending webhook event jobs
+for the same store are merged into batches, while each `webhook_events` row
+remains available for audit. The worker refreshes local cache and re-evaluates
+promotions for each event, but processes webhook batches in bounded passes so
+targeted `omnibus_sync_products` jobs are not blocked by a webhook backlog. The
+default batch limit is `WEBHOOK_EVENT_BATCH_LIMIT=25`. The suppression table
 prevents app-originated API writes from immediately triggering recursive
 processing.
 

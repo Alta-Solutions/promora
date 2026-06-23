@@ -98,6 +98,7 @@ function queueTargetedOmnibusSyncIfNeeded(Database $db, array $job, array $produ
 logMsg("--- Worker started ---");
 
 $maxExecutionTime = 55;
+$webhookEventBatchLimit = max(1, min(100, (int)(getenv('WEBHOOK_EVENT_BATCH_LIMIT') ?: 25)));
 $scriptStartTime = time();
 
 do {
@@ -118,6 +119,7 @@ do {
     $successCount = 0;
     $errorCount = 0;
     $omnibusProductIds = [];
+    $jobCompleted = true;
 
     try {
         logMsg("Processing Job #{$job['id']} (Type: {$job['job_type']}) for Store: {$job['store_hash']}");
@@ -129,18 +131,39 @@ do {
         $batchSize = 50;
 
         if ($job['job_type'] === 'webhook_event') {
-            $eventId = $queue->extractWebhookEventIdFromPayload($job['payload'] ?? null);
-            if (!$eventId) {
-                throw new \RuntimeException("Webhook event job #{$job['id']} has no valid webhook_event_id payload.");
+            $eventIds = $queue->extractWebhookEventIdsFromPayload($job['payload'] ?? null);
+            if (empty($eventIds)) {
+                throw new \RuntimeException("Webhook event job #{$job['id']} has no valid webhook event payload.");
             }
 
-            logMsg("Processing Webhook Event #{$eventId}...");
-            $webhookService = new \App\Services\WebhookService($db);
-            $webhookResult = $webhookService->processQueuedWebhookEvent($eventId);
+            $eventIdsToProcess = array_slice($eventIds, 0, $webhookEventBatchLimit);
+            $remainingEventIds = array_slice($eventIds, $webhookEventBatchLimit);
 
-            $processedCount = 1;
-            $successCount = empty($webhookResult['skipped']) ? 1 : 0;
-            logMsg("Webhook Event #{$eventId} processed. Scope: " . ($webhookResult['scope'] ?? 'n/a'));
+            logMsg(
+                "Processing Webhook Event batch... " .
+                count($eventIdsToProcess) . "/" . count($eventIds) . " event(s)."
+            );
+            $webhookService = new \App\Services\WebhookService($db);
+
+            foreach ($eventIdsToProcess as $eventId) {
+                logMsg("Processing Webhook Event #{$eventId}...");
+                $webhookResult = $webhookService->processQueuedWebhookEvent($eventId);
+
+                $processedCount++;
+                $successCount += empty($webhookResult['skipped']) ? 1 : 0;
+                $queue->updateProgress($job['id'], $processedCount);
+
+                logMsg("Webhook Event #{$eventId} processed. Scope: " . ($webhookResult['scope'] ?? 'n/a'));
+            }
+
+            if (!empty($remainingEventIds)) {
+                $queue->deferWebhookEventJob((int)$job['id'], (string)$job['store_hash'], $remainingEventIds);
+                $jobCompleted = false;
+                logMsg(
+                    "Webhook Event job #{$job['id']} yielded with " .
+                    count($remainingEventIds) . " event(s) remaining."
+                );
+            }
         } elseif ($job['job_type'] === 'cleanup') {
             logMsg("Processing Cleanup Job (Removing all promotions)...");
             $cleanupResult = $promotionService->cleanupAllProductsBatch();
@@ -289,28 +312,35 @@ do {
             }
         }
 
-        $finalProcessedCount = (int)($job['total_items'] ?? 0);
-        if ($finalProcessedCount > 0) {
-            $queue->updateProgress($job['id'], $finalProcessedCount);
+        if ($jobCompleted) {
+            $finalProcessedCount = (int)($job['total_items'] ?? 0);
+            if ($finalProcessedCount > 0) {
+                $queue->updateProgress($job['id'], $finalProcessedCount);
+            }
+
+            $queue->updateJobStatus($job['id'], 'completed');
         }
 
-        $queue->updateJobStatus($job['id'], 'completed');
-
-        if (in_array($job['job_type'], ['sync_promotion', 'single_sync', 'cleanup', 'cleanup_single'], true)) {
+        if ($jobCompleted && in_array($job['job_type'], ['sync_promotion', 'single_sync', 'cleanup', 'cleanup_single'], true)) {
             queueTargetedOmnibusSyncIfNeeded($db, $job, $omnibusProductIds);
         }
 
         $duration = microtime(true) - $jobStartTime;
+        $jobStatusMessage = $jobCompleted ? 'Completed' : 'Deferred';
         $promotionService->logSync(
             $job['promotion_id'],
             $successCount,
             $errorCount,
             $duration,
-            "Worker Job #{$job['id']} Completed (Type: {$job['job_type']})",
-            'worker'
+            "Worker Job #{$job['id']} {$jobStatusMessage} (Type: {$job['job_type']})",
+            $jobCompleted ? 'worker' : 'worker_deferred'
         );
 
-        logMsg("Job #{$job['id']} finished successfully! Processed: {$processedCount}");
+        logMsg(
+            $jobCompleted
+                ? "Job #{$job['id']} finished successfully! Processed: {$processedCount}"
+                : "Job #{$job['id']} deferred successfully! Processed this pass: {$processedCount}"
+        );
     } catch (\Exception $e) {
         logMsg("ERROR in Job #{$job['id']}: " . $e->getMessage());
 

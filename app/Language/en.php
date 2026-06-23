@@ -103,6 +103,7 @@ return [
         'job_type_cleanup_single' => 'Promotion cleanup',
         'job_type_omnibus_sync' => 'Omnibus sync',
         'job_type_omnibus_sync_products' => 'Targeted Omnibus sync',
+        'job_type_webhook_event' => 'Webhook events',
         'job_type_unknown' => 'Sync job',
         'attention_title' => 'Promotions needing attention',
         'attention_subtitle' => 'Items that may need sync, review, or scheduling follow-up.',

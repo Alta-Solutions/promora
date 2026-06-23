@@ -198,7 +198,8 @@ function getSyncJobTypeLabel(type) {
         cleanup: appT('dashboard.job_type_cleanup'),
         cleanup_single: appT('dashboard.job_type_cleanup_single'),
         omnibus_sync: appT('dashboard.job_type_omnibus_sync'),
-        omnibus_sync_products: appT('dashboard.job_type_omnibus_sync_products')
+        omnibus_sync_products: appT('dashboard.job_type_omnibus_sync_products'),
+        webhook_event: appT('dashboard.job_type_webhook_event')
     };
 
     return labels[type] || appT('dashboard.job_type_unknown');
