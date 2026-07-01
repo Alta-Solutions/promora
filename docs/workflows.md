@@ -133,6 +133,13 @@ Manual Omnibus sync creates an `omnibus_sync` job. The worker runs
 Targeted jobs use `omnibus_sync_products` and pass product IDs from the job
 payload to the same service method.
 
+Scheduled Omnibus sync uses `OmnibusSyncSchedulerService`. During the day it
+creates `omnibus_sync_products` only for dirty parent products: rows touched in
+`products_cache` today, products with today's `product_price_history` rows, and
+ignored price-history rows when the `ignored_at` column exists. Once per day,
+at `OMNIBUS_FULL_SYNC_HOUR` or the first scheduler run after it, the scheduler
+creates a full `omnibus_sync` job instead. The default full-sync hour is `2`.
+
 The service calculates product and variant reference prices, writes the canonical
 `promora.lowest_price_30d` BigCommerce metafields through
 `OmnibusMetafieldService`, and updates the legacy `lowest_price_30d` product

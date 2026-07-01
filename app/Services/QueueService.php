@@ -135,14 +135,14 @@ class QueueService {
         try {
             $this->ensureSyncJobsPayloadColumn();
 
-            $pendingFullJob = $this->findJobByTypeAndStatus('omnibus_sync', 'pending');
-            if ($pendingFullJob) {
+            $openFullJob = $this->findOpenJobByType('omnibus_sync');
+            if ($openFullJob) {
                 return [
                     'created' => false,
-                    'job_id' => (int)$pendingFullJob['id'],
+                    'job_id' => (int)$openFullJob['id'],
                     'reason' => 'covered_by_full_sync',
-                    'message' => 'Pending full Omnibus sync already covers these products.',
-                    'job' => $pendingFullJob,
+                    'message' => 'Open full Omnibus sync already covers these products.',
+                    'job' => $openFullJob,
                 ];
             }
 
@@ -609,12 +609,30 @@ class QueueService {
             'product_ids' => $this->normalizeProductIds($productIds),
         ];
 
-        foreach (['source', 'promotion_id', 'source_job_id', 'merged_from_job_id'] as $key) {
+        foreach ([
+            'source',
+            'promotion_id',
+            'source_job_id',
+            'merged_from_job_id',
+            'day_start',
+            'cache_dirty_count',
+            'history_dirty_count',
+            'ignored_history_dirty_count',
+            'total_dirty_count',
+        ] as $key) {
             if (!array_key_exists($key, $meta) || $meta[$key] === null || $meta[$key] === '') {
                 continue;
             }
 
-            $payload[$key] = in_array($key, ['promotion_id', 'source_job_id', 'merged_from_job_id'], true)
+            $payload[$key] = in_array($key, [
+                'promotion_id',
+                'source_job_id',
+                'merged_from_job_id',
+                'cache_dirty_count',
+                'history_dirty_count',
+                'ignored_history_dirty_count',
+                'total_dirty_count',
+            ], true)
                 ? (int)$meta[$key]
                 : (string)$meta[$key];
         }

@@ -102,6 +102,11 @@ class QueueServiceTest extends TestCase {
             'source' => 'promotion_sync',
             'promotion_id' => 113,
             'source_job_id' => 9775,
+            'day_start' => '2026-06-16 00:00:00',
+            'cache_dirty_count' => 2,
+            'history_dirty_count' => 1,
+            'ignored_history_dirty_count' => 0,
+            'total_dirty_count' => 2,
         ]);
 
         $this->assertTrue($result['created']);
@@ -117,6 +122,11 @@ class QueueServiceTest extends TestCase {
         $this->assertSame('promotion_sync', $payload['source']);
         $this->assertSame(113, $payload['promotion_id']);
         $this->assertSame(9775, $payload['source_job_id']);
+        $this->assertSame('2026-06-16 00:00:00', $payload['day_start']);
+        $this->assertSame(2, $payload['cache_dirty_count']);
+        $this->assertSame(1, $payload['history_dirty_count']);
+        $this->assertSame(0, $payload['ignored_history_dirty_count']);
+        $this->assertSame(2, $payload['total_dirty_count']);
     }
 
     public function testCreateTargetedOmnibusSyncJobMergesPendingJob(): void {
@@ -237,8 +247,8 @@ class QueueServiceTest extends TestCase {
                     return ['released' => 1];
                 }
 
-                if (($params[1] ?? null) === 'omnibus_sync' && ($params[2] ?? null) === 'pending') {
-                    return ['id' => 44];
+                if (($params[1] ?? null) === 'omnibus_sync') {
+                    return ['id' => 44, 'status' => 'pending'];
                 }
 
                 return false;
@@ -257,6 +267,49 @@ class QueueServiceTest extends TestCase {
 
         $this->assertFalse($result['created']);
         $this->assertSame(44, $result['job_id']);
+        $this->assertSame('covered_by_full_sync', $result['reason']);
+        $this->assertSame([], $db->queries);
+    }
+
+    public function testCreateTargetedOmnibusSyncJobSkipsWhenProcessingFullOmnibusExists(): void {
+        $db = new class {
+            public $queries = [];
+
+            public function fetchOne($sql, $params = []) {
+                $normalizedSql = preg_replace('/\s+/', ' ', trim($sql));
+
+                if (strpos($normalizedSql, 'GET_LOCK') !== false) {
+                    return ['acquired' => 1];
+                }
+
+                if (strpos($normalizedSql, 'SHOW COLUMNS') !== false) {
+                    return ['Field' => 'payload'];
+                }
+
+                if (strpos($normalizedSql, 'RELEASE_LOCK') !== false) {
+                    return ['released' => 1];
+                }
+
+                if (($params[1] ?? null) === 'omnibus_sync') {
+                    return ['id' => 45, 'status' => 'processing'];
+                }
+
+                return false;
+            }
+
+            public function query($sql, $params = []) {
+                $this->queries[] = [
+                    'sql' => preg_replace('/\s+/', ' ', trim($sql)),
+                    'params' => $params,
+                ];
+            }
+        };
+
+        $service = $this->createQueueService($db, 'store-a');
+        $result = $service->createTargetedOmnibusSyncJob([1, 2]);
+
+        $this->assertFalse($result['created']);
+        $this->assertSame(45, $result['job_id']);
         $this->assertSame('covered_by_full_sync', $result['reason']);
         $this->assertSame([], $db->queries);
     }

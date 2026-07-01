@@ -2,6 +2,7 @@
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/../config.php';
 
+use App\Services\OmnibusSyncSchedulerService;
 use App\Services\QueueService;
 use App\Models\Database;
 
@@ -15,33 +16,28 @@ logMsg("--- Scheduler started ---");
 $db = Database::getInstance();
 
 try {
-    // 1. Zakazivanje poslova za Omnibus Sync
-    logMsg("Scheduling 'omnibus_sync' jobs...");
-    $omnibusStores = $db->fetchAll(
-        "SELECT store_hash FROM bigcommerce_stores WHERE enable_omnibus = 1"
-    );
+    // 1. Zakazivanje Omnibus sync poslova: dnevni full sync ili incremental dirty sync
+    logMsg("Scheduling Omnibus sync jobs...");
+    $omnibusScheduler = new OmnibusSyncSchedulerService($db);
+    $omnibusResults = $omnibusScheduler->scheduleAllStores();
 
-    $omnibusJobsCreated = 0;
-    foreach ($omnibusStores as $store) {
-        $storeHash = $store['store_hash'];
-        $db->setStoreContext($storeHash);
-        $typeColumn = $db->fetchOne("SHOW COLUMNS FROM products_cache LIKE 'type'");
-        $baseProductClause = $typeColumn ? " AND type = 'product'" : '';
-        $totalItemsRow = $db->fetchOne(
-            "SELECT COUNT(DISTINCT product_id) AS total FROM products_cache WHERE store_hash = ?" . $baseProductClause,
-            [$storeHash]
-        );
-        $totalItems = (int)($totalItemsRow['total'] ?? 0);
+    $omnibusFullJobsCreated = 0;
+    $omnibusTargetedJobsCreated = 0;
+    foreach ($omnibusResults as $result) {
+        $mode = $result['mode'] ?? 'unknown';
+        $storeHash = $result['store_hash'] ?? 'unknown';
+        $reason = $result['reason'] ?? 'created';
+        $jobId = $result['job_id'] ?? 'n/a';
 
-        $queueService = new QueueService($storeHash); 
-        $result = $queueService->createOmnibusSyncJob($totalItems > 0 ? $totalItems : 1);
-        if (!empty($result['created'])) {
-            $omnibusJobsCreated++;
-        } else {
-            logMsg("-> Skipped omnibus_sync for {$storeHash}: " . ($result['message'] ?? 'already exists'));
+        if (!empty($result['created']) && $mode === 'full') {
+            $omnibusFullJobsCreated++;
+        } elseif (!empty($result['created']) && $mode === 'incremental') {
+            $omnibusTargetedJobsCreated++;
         }
+
+        logMsg("-> Omnibus {$mode} for {$storeHash}: {$reason}; job={$jobId}");
     }
-    logMsg("-> Created {$omnibusJobsCreated} 'omnibus_sync' jobs.");
+    logMsg("-> Created {$omnibusFullJobsCreated} full and {$omnibusTargetedJobsCreated} targeted Omnibus job(s).");
 
     // 2. Zakazivanje poslova za sinhronizaciju promocija (postojeća logika)
     logMsg("Scheduling 'sync_promotion' and 'cleanup' jobs...");

@@ -221,6 +221,10 @@ source metadata, for example:
 {"product_ids":[10625,11839],"source":"sync_promotion","promotion_id":113,"source_job_id":9775}
 ```
 
+Scheduler-created targeted Omnibus jobs use `source = scheduler_incremental`
+and may include `day_start`, `cache_dirty_count`, `history_dirty_count`,
+`ignored_history_dirty_count`, and `total_dirty_count`.
+
 ### `sync_log`
 
 Operational log for sync and worker results.
