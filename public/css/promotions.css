@@ -24,6 +24,14 @@
     margin: 0;
 }
 
+.promotion-list-header-actions {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
 .promotion-list-toolbar {
     display: grid;
     grid-template-columns: minmax(240px, 1fr) minmax(180px, 220px) 150px auto;
@@ -182,6 +190,13 @@
     font-weight: 600;
     color: var(--gray-900);
     font-size: 0.95rem;
+}
+
+.promo-id {
+    margin-top: 2px;
+    color: var(--gray-500);
+    font-size: 0.75rem;
+    line-height: 1.2;
 }
 
 .promo-desc {
@@ -1076,6 +1091,14 @@ body.promotion-product-picker-open {
     font-weight: 700;
 }
 
+.promotion-heading-id {
+    margin-left: 8px;
+    color: var(--gray-500);
+    font-size: 0.85rem;
+    font-weight: 500;
+    vertical-align: middle;
+}
+
 .promotion-back-link {
     display: inline-flex;
     align-items: center;
@@ -1740,6 +1763,17 @@ body.promotion-product-picker-open {
 }
 
 @media (max-width: 700px) {
+    .page-header {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .promotion-list-header-actions,
+    .promotion-list-header-actions .btn {
+        width: 100%;
+    }
+
     .promotion-page-heading,
     .promotion-preview-header,
     .promotion-form-actions {

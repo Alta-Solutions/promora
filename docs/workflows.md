@@ -35,6 +35,42 @@ the regular promotion sync. New filter matches still pass normal Omnibus
 validation. The last 100 audited corrections for the selected store are visible
 under `?route=logs&action=corrections`.
 
+## Promotion Application Correction
+
+Route: `?route=corrections`
+
+This is an operational Promotions tool, linked from the Promotions list, for
+voiding a product or variant that was incorrectly included in an active
+promotion. It is not a Logs action because applying it writes product pricing
+state.
+
+Main files:
+
+- `app/Controllers/CorrectionController.php`
+- `app/Services/PromotionApplicationCorrectionService.php`
+- `app/Services/PromotionService.php`
+- `app/Views/corrections/index.php`
+
+Flow:
+
+1. User opens Application Corrections from `?route=promotions`.
+2. User enters a SKU, and optionally a promotion ID.
+3. Preview validates the store-scoped SKU, current active `promotion_products`
+   row, affected price-history rows, and post-correction result.
+4. Apply requires CSRF, a one-time preview token, a reason, and explicit
+   confirmation that ignoring the wrong sale price for Omnibus is approved.
+5. `PromotionService::voidPromotionProductAndReconcile()` excludes the wrong
+   promotion for the product or variant, re-evaluates remaining active
+   promotions, and either applies the best replacement promotion or restores the
+   regular price.
+6. After a successful BigCommerce write, the correction audit is marked applied,
+   matching `product_price_history` rows are marked ignored, the exclusion is
+   stored, and a targeted `omnibus_sync_products` job is queued.
+
+Recent application corrections are shown on the same page for operator context.
+The Logs section intentionally does not link to this workflow; it remains for
+read-only sync, webhook, promotion correction, and archive diagnostics.
+
 ## Promotion Preview
 
 Route: `?route=promotions&action=preview`
@@ -108,9 +144,17 @@ See `docs/omnibus.md` before changing this flow.
 ## Webhooks
 
 `WebhookService` handles BigCommerce product and inventory webhooks. Product
-updates refresh local cache and re-evaluate promotions for that product. The
-suppression table prevents app-originated API writes from immediately triggering
-recursive processing.
+webhook requests are acknowledged quickly after validation, persisted to
+`webhook_events`, and queued as `webhook_event` jobs. The worker then refreshes
+local cache and re-evaluates promotions for the product. The suppression table
+prevents app-originated API writes from immediately triggering recursive
+processing.
+
+`bin/webhook_monitor.php` is the CLI health monitor for registered BigCommerce
+webhooks. It checks active stores, reconciles the expected product webhook
+scopes, recreates missing hooks, and reactivates inactive hooks only after the
+receiver health check passes. Use `--dry-run` to inspect changes without calling
+BigCommerce write endpoints.
 
 ## Queue Worker
 

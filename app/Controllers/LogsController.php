@@ -26,10 +26,15 @@ class LogsController {
     public function webhooks() {
         $db = Database::getInstance();
         $storeHash = $db->getStoreContext();
+        $timestampColumn = $this->getWebhookEventsTimestampColumn($db);
 
         // Dohvati poslednjih 100 webhook događaja
         $logs = $db->fetchAll(
-            "SELECT * FROM webhook_events WHERE store_hash = ? ORDER BY received_at DESC LIMIT 100",
+            "SELECT webhook_events.*, {$timestampColumn['select']} AS received_at
+             FROM webhook_events
+             WHERE store_hash = ?
+             ORDER BY {$timestampColumn['order']} DESC
+             LIMIT 100",
             [$storeHash]
         );
 
@@ -175,6 +180,37 @@ class LogsController {
         $value = $_GET[$key] ?? $default;
 
         return is_scalar($value) ? (string)$value : $default;
+    }
+
+    private function getWebhookEventsTimestampColumn(Database $db): array {
+        if ($this->tableHasColumn($db, 'webhook_events', 'created_at')) {
+            return [
+                'select' => 'created_at',
+                'order' => 'created_at',
+            ];
+        }
+
+        if ($this->tableHasColumn($db, 'webhook_events', 'received_at')) {
+            return [
+                'select' => 'received_at',
+                'order' => 'received_at',
+            ];
+        }
+
+        return [
+            'select' => 'NULL',
+            'order' => 'id',
+        ];
+    }
+
+    private function tableHasColumn(Database $db, string $tableName, string $columnName): bool {
+        if (!preg_match('/^[a-zA-Z0-9_]+$/', $tableName) || !preg_match('/^[a-zA-Z0-9_]+$/', $columnName)) {
+            return false;
+        }
+
+        $column = $db->fetchOne("SHOW COLUMNS FROM {$tableName} LIKE '{$columnName}'");
+
+        return !empty($column);
     }
 
     private function normalizeSearch(string $search): string {

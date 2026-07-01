@@ -11,6 +11,7 @@ class OmnibusPricingService {
 
     public function __construct(Database $db = null) {
         $this->db = $db ?? Database::getInstance();
+        PriceHistorySchemaService::ensureIgnoredColumns($this->db);
         $timezoneName = date_default_timezone_get() ?: 'UTC';
         $this->timeZone = new \DateTimeZone($timezoneName);
     }
@@ -201,6 +202,7 @@ class OmnibusPricingService {
              WHERE store_hash = ?
                AND product_id = ?
                AND {$variantSql}
+               AND ignored_at IS NULL
                AND recorded_at <= ?
              ORDER BY recorded_at ASC, id ASC",
             $params

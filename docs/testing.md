@@ -53,10 +53,13 @@ Do not run these unless the user explicitly approves the target environment:
 ```powershell
 php bin/worker.php
 php bin/test_omnibus.php
+php bin/webhook_monitor.php
 ```
 
 `bin/worker.php` processes real queue rows from the configured database.
 `bin/test_omnibus.php` can call BigCommerce when remote sync is enabled.
+`bin/webhook_monitor.php` can create or reactivate BigCommerce webhooks unless
+run with `--dry-run`.
 
 ## What To Test By Change Type
 

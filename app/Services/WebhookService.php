@@ -9,11 +9,66 @@ class WebhookService {
     private $lastStatusCode = 200;
     private $lastError = null;
     private $suppressionService;
+    private $webhookTrackingSchemaEnsured = false;
+
+    private const REQUIRED_SCOPES = [
+        'store/product/updated',
+        'store/product/created',
+        'store/product/deleted',
+        'store/product/inventory/updated',
+    ];
+    private const REACTIVATION_COOLDOWN_SECONDS = 1800;
+    private const REACTIVATION_WINDOW_SECONDS = 86400;
+    private const MAX_REACTIVATIONS_PER_WINDOW = 3;
 
     public function __construct($db = null, $api = null, $suppressionService = null) {
         $this->db = $db ?? Database::getInstance();
         $this->api = $api;
         $this->suppressionService = $suppressionService;
+    }
+
+    public function acceptWebhook($payloadData = null, $requestHeaders = null): bool {
+        $this->resetLastResult();
+
+        $headers = $requestHeaders ?? $_SERVER;
+        if (!$this->validateWebhookAuth($headers)) {
+            return false;
+        }
+
+        $payload = $payloadData ?? json_decode(file_get_contents('php://input'), true);
+        $metadata = $this->extractWebhookMetadata($payload);
+        if (!$metadata) {
+            return false;
+        }
+
+        $storeHash = $metadata['store_hash'];
+        $store = $this->db->fetchOne(
+            "SELECT access_token FROM bigcommerce_stores WHERE store_hash = ?",
+            [$storeHash]
+        );
+
+        if (!$store) {
+            $this->fail(404, "Webhook received for unregistered store: {$storeHash}");
+            return false;
+        }
+
+        $this->db->setStoreContext($storeHash);
+        $eventId = $this->createWebhookEvent($storeHash, $metadata['scope'], $metadata['product_id'], $payload);
+
+        if (!$eventId) {
+            $this->fail(500, "Webhook event could not be stored for store: {$storeHash}");
+            return false;
+        }
+
+        try {
+            $queue = $this->createQueueService($storeHash);
+            $queue->createWebhookEventJob($eventId);
+            $this->lastStatusCode = 202;
+            return true;
+        } catch (\Throwable $e) {
+            $this->fail(500, "Webhook event {$eventId} could not be queued: " . $e->getMessage());
+            return false;
+        }
     }
 
     public function registerWebhooks($storeHash) {
@@ -27,13 +82,8 @@ class WebhookService {
         }
 
         $this->api = new BigCommerceAPI($storeHash, $store['access_token']);
-        $webhookUrl = \Config::$APP_URL . '/webhook/receiver.php';
-        $webhooks = [
-            'store/product/updated',
-            'store/product/created',
-            'store/product/deleted',
-            'store/product/inventory/updated'
-        ];
+        $webhookUrl = $this->getWebhookDestination();
+        $webhooks = self::REQUIRED_SCOPES;
 
         $registered = [];
 
@@ -178,35 +228,214 @@ class WebhookService {
         return $response['body']['data'] ?? [];
     }
 
+    public function syncWebhookStatusesForStore(string $storeHash, bool $dryRun = false): array {
+        $storeHash = trim($storeHash);
+        if ($storeHash === '') {
+            throw new \InvalidArgumentException('Store hash is required for webhook status sync.');
+        }
+
+        $this->ensureWebhookTrackingSchema();
+
+        $store = $this->db->fetchOne(
+            "SELECT access_token FROM bigcommerce_stores WHERE store_hash = ? AND is_active = 1",
+            [$storeHash]
+        );
+
+        if (!$store) {
+            throw new \RuntimeException("Active store not found for hash: {$storeHash}");
+        }
+
+        $this->db->setStoreContext($storeHash);
+        $this->api = $this->createBigCommerceAPI($storeHash, $store['access_token']);
+
+        $destination = $this->getWebhookDestination();
+        $remoteHooks = $this->api->getWebhooks();
+        $remoteById = [];
+        $remoteByScopeDestination = [];
+
+        foreach ($remoteHooks as $hook) {
+            if (!isset($hook['id'])) {
+                continue;
+            }
+
+            $hookId = (int)$hook['id'];
+            $scope = (string)($hook['scope'] ?? '');
+            $hookDestination = (string)($hook['destination'] ?? '');
+
+            $remoteById[$hookId] = $hook;
+            $remoteByScopeDestination[$this->webhookLookupKey($scope, $hookDestination)] = $hook;
+        }
+
+        $localRows = $this->db->fetchAll(
+            "SELECT *
+             FROM webhooks
+             WHERE store_hash = ?
+             ORDER BY id DESC",
+            [$storeHash]
+        );
+        $localByScope = [];
+        foreach ($localRows as $row) {
+            $scope = (string)($row['scope'] ?? '');
+            if ($scope !== '' && !isset($localByScope[$scope])) {
+                $localByScope[$scope] = $row;
+            }
+        }
+
+        $receiverHealthy = null;
+        $result = [
+            'store_hash' => $storeHash,
+            'checked' => 0,
+            'created' => 0,
+            'reactivated' => 0,
+            'updated' => 0,
+            'skipped' => 0,
+            'errors' => 0,
+            'dry_run' => $dryRun,
+            'details' => [],
+        ];
+
+        foreach (self::REQUIRED_SCOPES as $scope) {
+            $result['checked']++;
+            $local = $localByScope[$scope] ?? null;
+            $remote = null;
+
+            if ($local && !empty($local['bc_webhook_id'])) {
+                $localWebhookId = (int)$local['bc_webhook_id'];
+                $remote = $remoteById[$localWebhookId] ?? null;
+            }
+
+            if (!$remote) {
+                $remote = $remoteByScopeDestination[$this->webhookLookupKey($scope, $destination)] ?? null;
+            }
+
+            try {
+                if (!$remote) {
+                    if ($dryRun) {
+                        $result['skipped']++;
+                        $result['details'][] = "{$scope}: missing on BigCommerce; dry-run create skipped";
+                        continue;
+                    }
+
+                    $created = $this->api->createWebhook($this->buildWebhookPayload($scope, $destination, true));
+                    $this->upsertLocalWebhookState(
+                        $storeHash,
+                        $scope,
+                        (int)$created['id'],
+                        (string)($created['destination'] ?? $destination),
+                        !empty($created['is_active']),
+                        null,
+                        false
+                    );
+                    $result['created']++;
+                    $result['details'][] = "{$scope}: created webhook #" . (int)$created['id'];
+                    continue;
+                }
+
+                $remoteId = (int)$remote['id'];
+                $remoteActive = !empty($remote['is_active']);
+                $remoteDestination = (string)($remote['destination'] ?? '');
+                $destinationChanged = $remoteDestination !== $destination;
+
+                $this->upsertLocalWebhookState(
+                    $storeHash,
+                    $scope,
+                    $remoteId,
+                    $remoteDestination !== '' ? $remoteDestination : $destination,
+                    $remoteActive,
+                    null,
+                    false
+                );
+
+                if ($remoteActive && !$destinationChanged) {
+                    $result['details'][] = "{$scope}: active";
+                    continue;
+                }
+
+                $updatePayload = [];
+                if ($destinationChanged) {
+                    $updatePayload['destination'] = $destination;
+                    $updatePayload['headers'] = $this->getWebhookHeaders();
+                }
+
+                if (!$remoteActive) {
+                    if ($receiverHealthy === null) {
+                        $receiverHealthy = $this->isWebhookReceiverHealthy();
+                    }
+
+                    if (!$receiverHealthy) {
+                        $result['skipped']++;
+                        $this->recordWebhookMonitorError($storeHash, $scope, 'Receiver health check failed.');
+                        $result['details'][] = "{$scope}: inactive; receiver health check failed";
+                        continue;
+                    }
+
+                    $skipReason = null;
+                    if (!$this->canReactivateWebhook($localByScope[$scope] ?? null, $skipReason)) {
+                        $result['skipped']++;
+                        $this->recordWebhookMonitorError($storeHash, $scope, $skipReason);
+                        $result['details'][] = "{$scope}: inactive; {$skipReason}";
+                        continue;
+                    }
+
+                    $updatePayload['is_active'] = true;
+                }
+
+                if (empty($updatePayload)) {
+                    continue;
+                }
+
+                if ($dryRun) {
+                    $result['skipped']++;
+                    $result['details'][] = "{$scope}: update skipped by dry-run";
+                    continue;
+                }
+
+                $updated = $this->api->updateWebhook($remoteId, $updatePayload);
+                $updatedActive = !empty($updated['is_active']);
+                $wasReactivated = !$remoteActive && $updatedActive;
+
+                $this->upsertLocalWebhookState(
+                    $storeHash,
+                    $scope,
+                    $remoteId,
+                    (string)($updated['destination'] ?? $destination),
+                    $updatedActive,
+                    null,
+                    $wasReactivated
+                );
+
+                if ($wasReactivated) {
+                    $result['reactivated']++;
+                    $result['details'][] = "{$scope}: reactivated webhook #{$remoteId}";
+                } else {
+                    $result['updated']++;
+                    $result['details'][] = "{$scope}: updated webhook #{$remoteId}";
+                }
+            } catch (\Throwable $e) {
+                $result['errors']++;
+                $this->recordWebhookMonitorError($storeHash, $scope, $e->getMessage());
+                $result['details'][] = "{$scope}: error: " . $e->getMessage();
+            }
+        }
+
+        return $result;
+    }
+
     public function processWebhook($payloadData = null, $requestHeaders = null) {
-        $this->lastStatusCode = 200;
-        $this->lastError = null;
+        $this->resetLastResult();
 
         $headers = $requestHeaders ?? $_SERVER;
-        $authHeader = $headers['X-Custom-Auth'] ?? $headers['HTTP_X_CUSTOM_AUTH'] ?? '';
-
-        if ($authHeader !== \Config::$SECRET_CRON_KEY) {
-            $this->fail(403, "Webhook validation failed: invalid X-Custom-Auth header.");
+        if (!$this->validateWebhookAuth($headers)) {
             return false;
         }
 
         $payload = $payloadData ?? json_decode(file_get_contents('php://input'), true);
-        if (!is_array($payload)) {
-            $this->fail(400, "Webhook payload is invalid JSON.");
+        $metadata = $this->extractWebhookMetadata($payload);
+        if (!$metadata) {
             return false;
         }
 
-        $scope = $payload['scope'] ?? null;
-        $storeHash = $this->extractStoreHash($payload);
-        $resource = $payload['data'] ?? [];
-        $productId = isset($resource['id']) ? (int)$resource['id'] : null;
-        $variantId = isset($resource['variant_id']) ? (int)$resource['variant_id'] : null;
-        $inventoryValue = $resource['inventory']['value'] ?? ($resource['inventory_level'] ?? null);
-
-        if (!$scope || !$storeHash || !$productId) {
-            $this->fail(400, "Webhook payload missing required scope, store hash, or product id.");
-            return false;
-        }
+        $storeHash = $metadata['store_hash'];
 
         $store = $this->db->fetchOne(
             "SELECT access_token FROM bigcommerce_stores WHERE store_hash = ?",
@@ -221,43 +450,76 @@ class WebhookService {
         $this->db->setStoreContext($storeHash);
         $this->api = $this->createBigCommerceAPI($storeHash, $store['access_token']);
 
-        $eventId = $this->createWebhookEvent($storeHash, $scope, $productId, $payload);
+        $eventId = $this->createWebhookEvent($storeHash, $metadata['scope'], $metadata['product_id'], $payload);
 
         try {
-            if ($this->isSuppressedProductUpdate($storeHash, $scope, $productId)) {
-                $this->updateProductCache($productId, false, true);
-                $this->markWebhookEventProcessed($eventId);
-                $this->lastStatusCode = 202;
-                return true;
-            }
-
-            switch ($scope) {
-                case 'store/product/updated':
-                case 'store/product/created':
-                    $this->updateProductCache($productId);
-                    break;
-
-                case 'store/product/deleted':
-                    $this->deleteProductFromCache($productId);
-                    break;
-
-                case 'store/product/inventory/updated':
-                    $this->updateProductInventory($productId, $inventoryValue, $variantId);
-                    break;
-
-                default:
-                    $this->markWebhookEventProcessed($eventId);
-                    $this->lastStatusCode = 202;
-                    return true;
-            }
-
-            $this->markWebhookEventProcessed($eventId);
+            $this->handleWebhookEvent($eventId, $metadata);
             return true;
         } catch (\Throwable $e) {
             $this->fail(500, "Error processing webhook: " . $e->getMessage());
             $this->markWebhookEventFailed($eventId, $e->getMessage());
             return false;
         }
+    }
+
+    public function processQueuedWebhookEvent(int $eventId): array {
+        $this->resetLastResult();
+
+        $event = $this->db->fetchOne(
+            "SELECT *
+             FROM webhook_events
+             WHERE id = ?",
+            [$eventId]
+        );
+
+        if (!$event) {
+            throw new \RuntimeException("Webhook event #{$eventId} not found.");
+        }
+
+        if (!empty($event['processed'])) {
+            return [
+                'processed' => 0,
+                'skipped' => true,
+                'message' => "Webhook event #{$eventId} has already been processed.",
+            ];
+        }
+
+        $payload = json_decode((string)$event['payload'], true);
+        $metadata = $this->extractWebhookMetadata($payload);
+
+        if (!$metadata) {
+            throw new \RuntimeException($this->lastError ?? "Webhook event #{$eventId} has invalid payload.");
+        }
+
+        if ((string)$event['store_hash'] !== $metadata['store_hash']) {
+            throw new \RuntimeException("Webhook event #{$eventId} store hash does not match payload.");
+        }
+
+        $store = $this->db->fetchOne(
+            "SELECT access_token FROM bigcommerce_stores WHERE store_hash = ?",
+            [$metadata['store_hash']]
+        );
+
+        if (!$store) {
+            throw new \RuntimeException("Webhook event #{$eventId} references an unregistered store.");
+        }
+
+        $this->db->setStoreContext($metadata['store_hash']);
+        $this->api = $this->createBigCommerceAPI($metadata['store_hash'], $store['access_token']);
+
+        try {
+            $this->handleWebhookEvent($eventId, $metadata);
+        } catch (\Throwable $e) {
+            $this->fail(500, "Error processing queued webhook event #{$eventId}: " . $e->getMessage());
+            $this->markWebhookEventFailed($eventId, $e->getMessage());
+            throw $e;
+        }
+
+        return [
+            'processed' => 1,
+            'scope' => $metadata['scope'],
+            'product_id' => $metadata['product_id'],
+        ];
     }
 
     public function getLastStatusCode(): int {
@@ -416,6 +678,40 @@ class WebhookService {
         return new PromotionService($this->db);
     }
 
+    protected function createQueueService(string $storeHash): QueueService {
+        return new QueueService($storeHash);
+    }
+
+    protected function isWebhookReceiverHealthy(): bool {
+        $healthUrl = $this->getWebhookDestination() . '?health=1';
+
+        if (!function_exists('curl_init')) {
+            error_log('Webhook health check skipped: cURL extension is not available.');
+            return false;
+        }
+
+        $ch = curl_init($healthUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 5,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 3,
+        ]);
+
+        $response = curl_exec($ch);
+        $error = curl_error($ch);
+        $statusCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($error) {
+            error_log("Webhook health check failed: {$error}");
+            return false;
+        }
+
+        return $statusCode >= 200 && $statusCode < 300 && trim((string)$response) !== '';
+    }
+
     protected function isSuppressedProductUpdate(string $storeHash, string $scope, int $productId): bool {
         if ($scope !== 'store/product/updated') {
             return false;
@@ -435,6 +731,256 @@ class WebhookService {
         }
 
         return $this->suppressionService;
+    }
+
+    private function resetLastResult(): void {
+        $this->lastStatusCode = 200;
+        $this->lastError = null;
+    }
+
+    private function validateWebhookAuth($headers): bool {
+        if (!is_array($headers)) {
+            $this->fail(403, "Webhook validation failed: missing request headers.");
+            return false;
+        }
+
+        $authHeader = $headers['X-Custom-Auth'] ?? $headers['HTTP_X_CUSTOM_AUTH'] ?? '';
+        if ($authHeader === '') {
+            foreach ($headers as $name => $value) {
+                if (strcasecmp((string)$name, 'X-Custom-Auth') === 0 || strcasecmp((string)$name, 'HTTP_X_CUSTOM_AUTH') === 0) {
+                    $authHeader = $value;
+                    break;
+                }
+            }
+        }
+
+        if ($authHeader !== \Config::$SECRET_CRON_KEY) {
+            $this->fail(403, "Webhook validation failed: invalid X-Custom-Auth header.");
+            return false;
+        }
+
+        return true;
+    }
+
+    private function extractWebhookMetadata($payload): ?array {
+        if (!is_array($payload)) {
+            $this->fail(400, "Webhook payload is invalid JSON.");
+            return null;
+        }
+
+        $scope = $payload['scope'] ?? null;
+        $storeHash = $this->extractStoreHash($payload);
+        $resource = $payload['data'] ?? [];
+        $productId = isset($resource['id']) ? (int)$resource['id'] : null;
+        $variantId = isset($resource['variant_id']) ? (int)$resource['variant_id'] : null;
+        $inventoryValue = $resource['inventory']['value'] ?? ($resource['inventory_level'] ?? null);
+
+        if (!$scope || !$storeHash || !$productId) {
+            $this->fail(400, "Webhook payload missing required scope, store hash, or product id.");
+            return null;
+        }
+
+        return [
+            'scope' => (string)$scope,
+            'store_hash' => (string)$storeHash,
+            'product_id' => (int)$productId,
+            'variant_id' => $variantId !== null ? (int)$variantId : null,
+            'inventory_value' => $inventoryValue,
+        ];
+    }
+
+    private function handleWebhookEvent(?int $eventId, array $metadata): void {
+        $scope = $metadata['scope'];
+        $storeHash = $metadata['store_hash'];
+        $productId = (int)$metadata['product_id'];
+        $variantId = $metadata['variant_id'];
+        $inventoryValue = $metadata['inventory_value'];
+
+        if ($this->isSuppressedProductUpdate($storeHash, $scope, $productId)) {
+            $this->updateProductCache($productId, false, true);
+            $this->markWebhookEventProcessed($eventId);
+            $this->lastStatusCode = 202;
+            return;
+        }
+
+        switch ($scope) {
+            case 'store/product/updated':
+            case 'store/product/created':
+                $this->updateProductCache($productId);
+                break;
+
+            case 'store/product/deleted':
+                $this->deleteProductFromCache($productId);
+                break;
+
+            case 'store/product/inventory/updated':
+                $this->updateProductInventory($productId, $inventoryValue, $variantId);
+                break;
+
+            default:
+                $this->lastStatusCode = 202;
+                break;
+        }
+
+        $this->markWebhookEventProcessed($eventId);
+    }
+
+    private function getWebhookDestination(): string {
+        return rtrim(\Config::$APP_URL, '/') . '/webhook/receiver.php';
+    }
+
+    private function getWebhookHeaders(): array {
+        return [
+            'X-Custom-Auth' => \Config::$SECRET_CRON_KEY,
+        ];
+    }
+
+    private function buildWebhookPayload(string $scope, string $destination, bool $active): array {
+        return [
+            'scope' => $scope,
+            'destination' => $destination,
+            'is_active' => $active,
+            'headers' => $this->getWebhookHeaders(),
+        ];
+    }
+
+    private function webhookLookupKey(string $scope, string $destination): string {
+        return $scope . '|' . rtrim($destination, '/');
+    }
+
+    private function canReactivateWebhook(?array $localWebhook, ?string &$reason): bool {
+        $reason = null;
+
+        if (!$localWebhook) {
+            return true;
+        }
+
+        $lastReactivatedAt = $localWebhook['last_reactivated_at'] ?? null;
+        if (!$lastReactivatedAt) {
+            return true;
+        }
+
+        $lastTimestamp = strtotime((string)$lastReactivatedAt);
+        if (!$lastTimestamp) {
+            return true;
+        }
+
+        $ageSeconds = time() - $lastTimestamp;
+        if ($ageSeconds < self::REACTIVATION_COOLDOWN_SECONDS) {
+            $reason = 'reactivation cooldown is still active';
+            return false;
+        }
+
+        $attempts = (int)($localWebhook['reactivation_attempts'] ?? 0);
+        if ($ageSeconds < self::REACTIVATION_WINDOW_SECONDS && $attempts >= self::MAX_REACTIVATIONS_PER_WINDOW) {
+            $reason = 'reactivation limit reached for the last 24 hours';
+            return false;
+        }
+
+        return true;
+    }
+
+    private function upsertLocalWebhookState(
+        string $storeHash,
+        string $scope,
+        int $bcWebhookId,
+        string $destination,
+        bool $active,
+        ?string $errorMessage = null,
+        bool $reactivated = false
+    ): void {
+        $existing = $this->db->fetchOne(
+            "SELECT id, last_reactivated_at, reactivation_attempts
+             FROM webhooks
+             WHERE store_hash = ? AND scope = ?
+             ORDER BY id DESC
+             LIMIT 1",
+            [$storeHash, $scope]
+        );
+
+        $lastReactivatedAt = null;
+        $reactivationAttempts = 0;
+
+        if ($existing) {
+            $lastReactivatedAt = $existing['last_reactivated_at'] ?? null;
+            $reactivationAttempts = (int)($existing['reactivation_attempts'] ?? 0);
+        }
+
+        if ($reactivated) {
+            $lastTimestamp = $lastReactivatedAt ? strtotime((string)$lastReactivatedAt) : null;
+            $reactivationAttempts = ($lastTimestamp && (time() - $lastTimestamp) < self::REACTIVATION_WINDOW_SECONDS)
+                ? $reactivationAttempts + 1
+                : 1;
+        }
+
+        if ($existing) {
+            $sql = "UPDATE webhooks
+                    SET bc_webhook_id = ?,
+                        destination = ?,
+                        is_active = ?,
+                        last_checked_at = NOW(),
+                        last_error = ?,
+                        updated_at = NOW()";
+            $params = [$bcWebhookId, $destination, $active ? 1 : 0, $errorMessage];
+
+            if ($reactivated) {
+                $sql .= ", last_reactivated_at = NOW(), reactivation_attempts = ?";
+                $params[] = $reactivationAttempts;
+            }
+
+            $sql .= " WHERE id = ?";
+            $params[] = (int)$existing['id'];
+
+            $this->db->query($sql, $params);
+            return;
+        }
+
+        $this->db->query(
+            "INSERT INTO webhooks
+             (store_hash, bc_webhook_id, scope, destination, is_active, last_checked_at, last_reactivated_at, reactivation_attempts, last_error, updated_at)
+             VALUES (?, ?, ?, ?, ?, NOW(), " . ($reactivated ? 'NOW()' : 'NULL') . ", ?, ?, NOW())",
+            [
+                $storeHash,
+                $bcWebhookId,
+                $scope,
+                $destination,
+                $active ? 1 : 0,
+                $reactivated ? 1 : 0,
+                $errorMessage,
+            ]
+        );
+    }
+
+    private function recordWebhookMonitorError(string $storeHash, string $scope, ?string $errorMessage): void {
+        $this->db->query(
+            "UPDATE webhooks
+             SET last_checked_at = NOW(), last_error = ?, updated_at = NOW()
+             WHERE store_hash = ? AND scope = ?",
+            [$errorMessage, $storeHash, $scope]
+        );
+    }
+
+    private function ensureWebhookTrackingSchema(): void {
+        if ($this->webhookTrackingSchemaEnsured) {
+            return;
+        }
+
+        $columns = [
+            'last_checked_at' => "ALTER TABLE webhooks ADD COLUMN last_checked_at DATETIME NULL AFTER created_at",
+            'last_reactivated_at' => "ALTER TABLE webhooks ADD COLUMN last_reactivated_at DATETIME NULL AFTER last_checked_at",
+            'reactivation_attempts' => "ALTER TABLE webhooks ADD COLUMN reactivation_attempts INT NOT NULL DEFAULT 0 AFTER last_reactivated_at",
+            'last_error' => "ALTER TABLE webhooks ADD COLUMN last_error TEXT NULL AFTER reactivation_attempts",
+            'updated_at' => "ALTER TABLE webhooks ADD COLUMN updated_at DATETIME NULL AFTER last_error",
+        ];
+
+        foreach ($columns as $column => $alterSql) {
+            $existingColumn = $this->db->fetchOne("SHOW COLUMNS FROM webhooks LIKE '{$column}'");
+            if (!$existingColumn) {
+                $this->db->query($alterSql);
+            }
+        }
+
+        $this->webhookTrackingSchemaEnsured = true;
     }
 
     private function extractStoreHash(array $payload): ?string {

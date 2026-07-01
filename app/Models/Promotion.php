@@ -18,8 +18,8 @@ class Promotion {
         
         $sql = "INSERT INTO promotions 
                 (store_hash, name, custom_field_value, discount_percent, start_date, end_date, priority, filters, 
-                 target_category_id, target_attribute, color, description, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                 color, description, status, created_at, omnibus_terms_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())";
         
         $status = strtotime($data['start_date']) > time() ? 'scheduled' : 'active';
         
@@ -32,8 +32,6 @@ class Promotion {
             $data['end_date'],
             $data['priority'] ?? 0,
             json_encode($data['filters'] ?? []),
-            $data['target_category_id'] ?? null,
-            $data['target_attribute'] ?? null,
             $data['color'] ?? '#3b82f6',
             $data['description'] ?? '',
             $status

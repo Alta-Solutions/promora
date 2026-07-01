@@ -152,6 +152,49 @@ try {
             INDEX `idx_store_promotion_created` (`store_hash`, `promotion_id`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
+        // Trajna izuzeca proizvoda/varijanti iz promocija nakon auditovanog ponistavanja greske
+        "CREATE TABLE IF NOT EXISTS `promotion_product_exclusions` (
+            `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            `store_hash` VARCHAR(255) NOT NULL,
+            `promotion_id` INT NOT NULL,
+            `product_id` INT UNSIGNED NOT NULL,
+            `variant_id` INT UNSIGNED NULL,
+            `correction_id` BIGINT UNSIGNED NULL,
+            `reason` TEXT NULL,
+            `created_at` DATETIME NOT NULL,
+            UNIQUE KEY `uniq_store_promotion_product_variant` (`store_hash`, `promotion_id`, `product_id`, `variant_id`),
+            INDEX `idx_store_product_variant` (`store_hash`, `product_id`, `variant_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+
+        // Audit trag za ponistavanje pogresne primjene promocije na proizvod/varijantu
+        "CREATE TABLE IF NOT EXISTS `promotion_application_corrections` (
+            `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            `store_hash` VARCHAR(255) NOT NULL,
+            `promotion_id` INT NOT NULL,
+            `product_id` INT UNSIGNED NOT NULL,
+            `variant_id` INT UNSIGNED NULL,
+            `sku_snapshot` VARCHAR(255) NULL,
+            `operation` VARCHAR(50) NOT NULL DEFAULT 'void_promotion_application',
+            `status` VARCHAR(50) NOT NULL DEFAULT 'pending',
+            `reason` TEXT NOT NULL,
+            `visibility_confirmed` TINYINT(1) NOT NULL DEFAULT 0,
+            `actor_source` VARCHAR(50) NOT NULL,
+            `actor_user_id` VARCHAR(255) NULL,
+            `actor_email` VARCHAR(255) NULL,
+            `actor_is_owner` TINYINT(1) NOT NULL DEFAULT 0,
+            `before_state` LONGTEXT NULL,
+            `after_state` LONGTEXT NULL,
+            `ignored_history_row_ids` LONGTEXT NULL,
+            `replacement_promotion_id` INT NULL,
+            `error_message` TEXT NULL,
+            `created_at` DATETIME NOT NULL,
+            `applied_at` DATETIME NULL,
+            `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX `idx_store_created` (`store_hash`, `created_at`),
+            INDEX `idx_store_product_variant` (`store_hash`, `product_id`, `variant_id`),
+            INDEX `idx_store_promotion` (`store_hash`, `promotion_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+
         // Arhiva zavrsenih promocija
         "CREATE TABLE IF NOT EXISTS `promotion_archives` (
             `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -251,7 +294,12 @@ try {
             `scope` VARCHAR(255) NOT NULL,
             `destination` VARCHAR(255) NOT NULL,
             `is_active` TINYINT(1) NOT NULL DEFAULT 1,
-            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `last_checked_at` DATETIME NULL,
+            `last_reactivated_at` DATETIME NULL,
+            `reactivation_attempts` INT NOT NULL DEFAULT 0,
+            `last_error` TEXT NULL,
+            `updated_at` DATETIME NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
 
         // Tabela za događaje sa webhook-ova
@@ -291,7 +339,11 @@ try {
             `price` DECIMAL(20, 4) NOT NULL,
             `currency` VARCHAR(10) NOT NULL,
             `recorded_at` DATETIME NOT NULL,
+            `ignored_at` DATETIME NULL,
+            `ignored_reason` TEXT NULL,
+            `ignored_by_correction_id` BIGINT UNSIGNED NULL,
             INDEX `idx_omnibus_lookup` (`store_hash`, `product_id`, `variant_id`, `currency`, `recorded_at`),
+            INDEX `idx_omnibus_not_ignored` (`store_hash`, `product_id`, `variant_id`, `currency`, `ignored_at`, `recorded_at`),
             UNIQUE KEY `store_product_variant_currency_time` (`store_hash`, `product_id`, `variant_id`, `currency`, `recorded_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
     ];

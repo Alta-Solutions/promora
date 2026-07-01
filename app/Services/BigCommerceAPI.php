@@ -680,6 +680,14 @@ class BigCommerceAPI {
     /**
      * Briše BigCommerce Webhook.
      */
+    public function updateWebhook(int $webhookId, array $data) {
+        $response = $this->request('PUT', "hooks/{$webhookId}", $data);
+        return $response['body']['data'] ?? $response;
+    }
+
+    /**
+     * Update BigCommerce Webhook.
+     */
     public function deleteWebhook(int $webhookId) {
         $response = $this->request('DELETE', "hooks/{$webhookId}");
         $status = (int)($response['status'] ?? 0);

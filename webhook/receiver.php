@@ -4,6 +4,13 @@
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/../config.php';
 
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && isset($_GET['health'])) {
+    header('Content-Type: text/plain; charset=utf-8');
+    http_response_code(200);
+    echo 'ok';
+    exit;
+}
+
 // Prvo čitamo sirovi payload da bismo ga imali za logovanje
 $rawPayload = file_get_contents('php://input');
 
@@ -44,11 +51,11 @@ try {
     // POBOLJŠANJE: Prosleđujemo rezultat getallheaders() ako postoji, jer je pouzdaniji za custom headere.
     $requestHeaders = function_exists('getallheaders') ? getallheaders() : $_SERVER;
 
-    $result = $webhookService->processWebhook($payload, $requestHeaders);
+    $result = $webhookService->acceptWebhook($payload, $requestHeaders);
     
     if ($result) {
         http_response_code(200);
-        echo json_encode(['status' => 'success']);
+        echo json_encode(['status' => 'queued']);
     } else {
         $statusCode = $webhookService->getLastStatusCode();
         http_response_code($statusCode > 0 ? $statusCode : 500);
