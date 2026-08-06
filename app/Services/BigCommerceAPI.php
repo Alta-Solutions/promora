@@ -360,79 +360,123 @@ class BigCommerceAPI {
         $results = [];
         
         foreach ($batches as $batch) {
-            try {
-                // Prepare batch payload for BigCommerce API
-                $payload = array_map(function($update) {
-                    $productId = $update['product_id'] ?? $update['id'] ?? null;
+            $results = array_merge($results, $this->executeProductUpdateBatch(array_values($batch)));
+        }
 
-                    return [
-                        'id' => (int)$productId,
-                        'sale_price' => $this->normalizeSalePriceForApi($update['sale_price'] ?? null)
-                    ];
-                }, $batch);
-                $requestedProductIds = [];
-                foreach ($payload as $item) {
-                    if (!empty($item['id'])) {
-                        $requestedProductIds[(int)$item['id']] = true;
-                    }
-                }
-                $resolvedProductIds = [];
-                
-                // Make batch request to BigCommerce
-                $response = $this->request('PUT', 'catalog/products', $payload);
-                
-                // Process response - BigCommerce batch response wraps everything in 'data'
-                if (isset($response['body']['data'])) {
-                    foreach ($response['body']['data'] as $updatedProduct) {
-                        if (!empty($updatedProduct['id'])) {
-                            $resolvedProductIds[(int)$updatedProduct['id']] = true;
-                        }
-                        $results[] = [
-                            'success' => true,
-                            'product_id' => $updatedProduct['id']
-                        ];
-                    }
-                }
-                
-                // Handle partial errors if present (errors field in the response body)
-                if (isset($response['body']['errors'])) {
-                     foreach ((array)$response['body']['errors'] as $error) {
-                        $error = is_array($error) ? $error : ['message' => (string)$error];
-                        $results[] = [
-                            'success' => false,
-                            'product_id' => $error['product_id'] ?? null,
-                            'error' => $error['message'] ?? 'Unknown batch error'
-                        ];
-                        if (!empty($error['product_id'])) {
-                            $resolvedProductIds[(int)$error['product_id']] = true;
-                        }
-                    }
-                }
+        return $results;
+    }
 
-                foreach (array_keys($requestedProductIds) as $productId) {
-                    if (isset($resolvedProductIds[$productId])) {
-                        continue;
-                    }
+    private function executeProductUpdateBatch(array $batch): array {
+        if (empty($batch)) {
+            return [];
+        }
 
+        try {
+            $payload = array_map(function($update) {
+                $productId = $update['product_id'] ?? $update['id'] ?? null;
+
+                return [
+                    'id' => (int)$productId,
+                    'sale_price' => $this->normalizeSalePriceForApi($update['sale_price'] ?? null)
+                ];
+            }, $batch);
+            $requestedProductIds = [];
+            foreach ($payload as $item) {
+                if (!empty($item['id'])) {
+                    $requestedProductIds[(int)$item['id']] = true;
+                }
+            }
+            $resolvedProductIds = [];
+
+            $response = $this->request('PUT', 'catalog/products', $payload);
+            $results = [];
+
+            if (isset($response['body']['data'])) {
+                foreach ($response['body']['data'] as $updatedProduct) {
+                    if (!empty($updatedProduct['id'])) {
+                        $resolvedProductIds[(int)$updatedProduct['id']] = true;
+                    }
                     $results[] = [
-                        'success' => false,
-                        'product_id' => $productId,
-                        'error' => 'Product was not returned in BigCommerce batch response'
-                    ];
-                }
-                
-            } catch (\Exception $e) {
-                // If batch fails, mark all products in batch as failed
-                foreach ($batch as $update) {
-                    $results[] = [
-                        'success' => false,
-                        'product_id' => $update['product_id'] ?? $update['id'] ?? null,
-                        'error' => $e->getMessage()
+                        'success' => true,
+                        'product_id' => $updatedProduct['id']
                     ];
                 }
             }
+
+            if (isset($response['body']['errors'])) {
+                 foreach ((array)$response['body']['errors'] as $error) {
+                    $error = is_array($error) ? $error : ['message' => (string)$error];
+                    $results[] = [
+                        'success' => false,
+                        'product_id' => $error['product_id'] ?? null,
+                        'error' => $error['message'] ?? 'Unknown batch error'
+                    ];
+                    if (!empty($error['product_id'])) {
+                        $resolvedProductIds[(int)$error['product_id']] = true;
+                    }
+                }
+            }
+
+            foreach (array_keys($requestedProductIds) as $productId) {
+                if (isset($resolvedProductIds[$productId])) {
+                    continue;
+                }
+
+                $results[] = [
+                    'success' => false,
+                    'product_id' => $productId,
+                    'error' => 'Product was not returned in BigCommerce batch response'
+                ];
+            }
+
+            return $results;
+        } catch (\Exception $e) {
+            return $this->retryProductUpdateBatchWithoutIndexedFailures($batch, $e);
         }
-        
+    }
+
+    private function retryProductUpdateBatchWithoutIndexedFailures(array $batch, \Exception $exception): array {
+        $indexedErrors = $this->extractBulkOperationIndexedErrors($exception->getMessage());
+        if (empty($indexedErrors)) {
+            return $this->buildFailedProductUpdateResults($batch, $exception->getMessage());
+        }
+
+        $failed = [];
+        $retryBatch = [];
+        $removed = false;
+
+        foreach (array_values($batch) as $index => $update) {
+            if (array_key_exists($index, $indexedErrors)) {
+                $failed[] = [
+                    'success' => false,
+                    'product_id' => $update['product_id'] ?? $update['id'] ?? null,
+                    'error' => $indexedErrors[$index],
+                ];
+                $removed = true;
+                continue;
+            }
+
+            $retryBatch[] = $update;
+        }
+
+        if (!$removed) {
+            return $this->buildFailedProductUpdateResults($batch, $exception->getMessage());
+        }
+
+        return array_merge($failed, $this->executeProductUpdateBatch($retryBatch));
+    }
+
+    private function buildFailedProductUpdateResults(array $batch, string $error): array {
+        $results = [];
+
+        foreach ($batch as $update) {
+            $results[] = [
+                'success' => false,
+                'product_id' => $update['product_id'] ?? $update['id'] ?? null,
+                'error' => $error
+            ];
+        }
+
         return $results;
     }
     
@@ -537,6 +581,45 @@ class BigCommerceAPI {
         }
         
         return $results;
+    }
+
+    private function extractBulkOperationIndexedErrors(string $message): array {
+        $body = null;
+        if (preg_match('/\bBody:\s*(\{.*\})\s*$/s', $message, $matches)) {
+            $body = json_decode($matches[1], true);
+        }
+
+        if (!is_array($body) || empty($body['errors']) || !is_array($body['errors'])) {
+            return [];
+        }
+
+        $errors = [];
+        foreach ($body['errors'] as $index => $error) {
+            if (!is_numeric($index)) {
+                continue;
+            }
+
+            $errors[(int)$index] = $this->stringifyBatchError($error);
+        }
+
+        return $errors;
+    }
+
+    private function stringifyBatchError($error): string {
+        if (is_string($error)) {
+            return $error;
+        }
+
+        if (is_array($error)) {
+            if (isset($error['message'])) {
+                return (string)$error['message'];
+            }
+
+            $encoded = json_encode($error);
+            return $encoded !== false ? $encoded : 'Unknown batch error';
+        }
+
+        return 'Unknown batch error';
     }
     
     /**
