@@ -417,6 +417,8 @@ class ProductCacheService {
 
         $sql .= $this->buildFilterQuery($filters, $params);
                 
+        $sql .= " ORDER BY pc.product_id ASC, COALESCE(pc.variant_id, 0) ASC, pc.id ASC";
+
         if ($limit !== null) {
             $sql .= " LIMIT " . (int)$limit . " OFFSET " . (int)$offset;
         }

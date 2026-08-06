@@ -370,6 +370,13 @@ class BigCommerceAPI {
                         'sale_price' => $this->normalizeSalePriceForApi($update['sale_price'] ?? null)
                     ];
                 }, $batch);
+                $requestedProductIds = [];
+                foreach ($payload as $item) {
+                    if (!empty($item['id'])) {
+                        $requestedProductIds[(int)$item['id']] = true;
+                    }
+                }
+                $resolvedProductIds = [];
                 
                 // Make batch request to BigCommerce
                 $response = $this->request('PUT', 'catalog/products', $payload);
@@ -377,6 +384,9 @@ class BigCommerceAPI {
                 // Process response - BigCommerce batch response wraps everything in 'data'
                 if (isset($response['body']['data'])) {
                     foreach ($response['body']['data'] as $updatedProduct) {
+                        if (!empty($updatedProduct['id'])) {
+                            $resolvedProductIds[(int)$updatedProduct['id']] = true;
+                        }
                         $results[] = [
                             'success' => true,
                             'product_id' => $updatedProduct['id']
@@ -386,13 +396,29 @@ class BigCommerceAPI {
                 
                 // Handle partial errors if present (errors field in the response body)
                 if (isset($response['body']['errors'])) {
-                     foreach ($response['body']['errors'] as $error) {
+                     foreach ((array)$response['body']['errors'] as $error) {
+                        $error = is_array($error) ? $error : ['message' => (string)$error];
                         $results[] = [
                             'success' => false,
                             'product_id' => $error['product_id'] ?? null,
                             'error' => $error['message'] ?? 'Unknown batch error'
                         ];
+                        if (!empty($error['product_id'])) {
+                            $resolvedProductIds[(int)$error['product_id']] = true;
+                        }
                     }
+                }
+
+                foreach (array_keys($requestedProductIds) as $productId) {
+                    if (isset($resolvedProductIds[$productId])) {
+                        continue;
+                    }
+
+                    $results[] = [
+                        'success' => false,
+                        'product_id' => $productId,
+                        'error' => 'Product was not returned in BigCommerce batch response'
+                    ];
                 }
                 
             } catch (\Exception $e) {
@@ -438,19 +464,23 @@ class BigCommerceAPI {
 
                     return $item;
                 }, $batch);
-
-                $response = $this->request('PUT', 'catalog/variants', $payload);
                 $requestedByVariantId = [];
                 foreach ($batch as $update) {
                     if (!empty($update['id'])) {
                         $requestedByVariantId[(int)$update['id']] = $update;
                     }
                 }
+                $resolvedVariantIds = [];
+
+                $response = $this->request('PUT', 'catalog/variants', $payload);
                 
                 // Process response
                 if (isset($response['body']['data'])) {
                     foreach ($response['body']['data'] as $updatedVariant) {
                         $variantId = isset($updatedVariant['id']) ? (int)$updatedVariant['id'] : null;
+                        if ($variantId !== null) {
+                            $resolvedVariantIds[$variantId] = true;
+                        }
                         $productId = $updatedVariant['product_id']
                             ?? ($variantId !== null && isset($requestedByVariantId[$variantId]['product_id'])
                                 ? $requestedByVariantId[$variantId]['product_id']
@@ -466,14 +496,31 @@ class BigCommerceAPI {
                 
                 // Handle partial errors if present
                 if (isset($response['body']['errors'])) {
-                     foreach ($response['body']['errors'] as $error) {
+                     foreach ((array)$response['body']['errors'] as $error) {
+                        $error = is_array($error) ? $error : ['message' => (string)$error];
                         $results[] = [
                             'success' => false,
                             'product_id' => $error['product_id'] ?? null,
                             'variant_id' => $error['id'] ?? null,
                             'error' => $error['message'] ?? 'Unknown batch error'
                         ];
+                        if (!empty($error['id'])) {
+                            $resolvedVariantIds[(int)$error['id']] = true;
+                        }
                     }
+                }
+
+                foreach ($requestedByVariantId as $variantId => $update) {
+                    if (isset($resolvedVariantIds[$variantId])) {
+                        continue;
+                    }
+
+                    $results[] = [
+                        'success' => false,
+                        'product_id' => $update['product_id'] ?? null,
+                        'variant_id' => $variantId,
+                        'error' => 'Variant was not returned in BigCommerce batch response'
+                    ];
                 }
                 
             } catch (\Exception $e) {

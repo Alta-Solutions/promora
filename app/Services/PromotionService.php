@@ -493,10 +493,25 @@ public function __construct(Database $db = null) {
         $variantPriceResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
         $priceResults = array_merge($productPriceResults, $variantPriceResults);
         $appliedPromotions = $this->filterPromotionsWithSuccessfulPriceUpdates($productPromotions, $priceResults);
+        $diagnostics = $this->buildPriceUpdateFailureDiagnostics($productPromotions, $priceResults, $products);
         $successCount = count($appliedPromotions);
         $errorCount = count($productPromotions) - $successCount;
         
         $debugLog[] = "Price updates: {$successCount} success, {$errorCount} errors";
+        foreach (array_slice($diagnostics, 0, 25) as $diagnostic) {
+            $label = !empty($diagnostic['sku'])
+                ? $diagnostic['sku']
+                : 'product_id=' . ($diagnostic['product_id'] ?? 'n/a');
+            $debugLog[] = sprintf(
+                'Price update failed for %s promo_price=%s: %s',
+                $label,
+                (string)($diagnostic['promo_price'] ?? 'n/a'),
+                (string)($diagnostic['error'] ?? 'Unknown error')
+            );
+        }
+        if (count($diagnostics) > 25) {
+            $debugLog[] = 'Price update diagnostics truncated; ' . (count($diagnostics) - 25) . ' more item(s).';
+        }
         
         // BATCH UPDATE: Custom fields (KORIŠĆENJE MULTI CURLA)
         $customFieldUpdates = $this->buildUniquePromotionFieldUpdates($appliedPromotions);
@@ -1210,6 +1225,7 @@ public function __construct(Database $db = null) {
         return [
             'processed' => $applyResults['processed'],
             'errors' => count($items) - $applyResults['processed'],
+            'diagnostics' => $applyResults['diagnostics'] ?? [],
             'cleaned' => $reconciledCount,
             'omnibus_product_ids' => $this->mergeProductIdLists(
                 $applyResults['omnibus_product_ids'] ?? [],
@@ -1229,9 +1245,16 @@ public function __construct(Database $db = null) {
         $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
         $priceResults = array_merge($productResults, $variantResults);
         $appliedPromotions = $this->filterPromotionsWithSuccessfulPriceUpdates($productPromotions, $priceResults);
+        $diagnostics = $this->buildPriceUpdateFailureDiagnostics($productPromotions, $priceResults, $sourceItems);
 
         if (empty($appliedPromotions)) {
-            return ['processed' => 0, 'errors' => count($productPromotions), 'applied' => [], 'omnibus_product_ids' => []];
+            return [
+                'processed' => 0,
+                'errors' => count($productPromotions),
+                'applied' => [],
+                'diagnostics' => $diagnostics,
+                'omnibus_product_ids' => []
+            ];
         }
 
         $existingFieldsMap = $this->buildExistingFieldsMap($sourceItems);
@@ -1270,6 +1293,7 @@ public function __construct(Database $db = null) {
             'processed' => count($appliedPromotions),
             'errors' => count($productPromotions) - count($appliedPromotions),
             'applied' => $appliedPromotions,
+            'diagnostics' => $diagnostics,
             'omnibus_product_ids' => $this->extractUniqueProductIds($appliedPromotions),
         ];
     }
@@ -2842,6 +2866,76 @@ public function __construct(Database $db = null) {
             $key = $this->getPromotionItemKey($promo['product_id'], $promo['variant_id'] ?? null);
             return isset($successfulKeys[$key]);
         });
+    }
+
+    private function buildPriceUpdateFailureDiagnostics(
+        array $promotions,
+        array $priceResults,
+        array $sourceItems = []
+    ): array {
+        $successfulKeys = $this->getSuccessfulPriceUpdateKeys($priceResults);
+        $failedByKey = [];
+
+        foreach ($priceResults as $result) {
+            if (!empty($result['success'])) {
+                continue;
+            }
+
+            $productId = $result['product_id'] ?? ($result['id'] ?? null);
+            $variantId = $result['variant_id'] ?? null;
+            if (($productId === null || $productId === '') && ($variantId === null || $variantId === '')) {
+                continue;
+            }
+
+            $key = $this->getPromotionItemKey(
+                (int)($productId ?: 0),
+                $variantId !== null && $variantId !== '' ? (int)$variantId : null
+            );
+            $failedByKey[$key] = (string)($result['error'] ?? 'Unknown price update error');
+        }
+
+        $sourceByKey = [];
+        foreach ($sourceItems as $item) {
+            $productId = (int)($item['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $variantId = isset($item['variant_id']) && $item['variant_id'] !== null && $item['variant_id'] !== ''
+                ? (int)$item['variant_id']
+                : null;
+            $sourceByKey[$this->getPromotionItemKey($productId, $variantId)] = $item;
+        }
+
+        $diagnostics = [];
+        foreach ($promotions as $promo) {
+            $productId = (int)($promo['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $variantId = isset($promo['variant_id']) && $promo['variant_id'] !== null && $promo['variant_id'] !== ''
+                ? (int)$promo['variant_id']
+                : null;
+            $key = $this->getPromotionItemKey($productId, $variantId);
+            if (isset($successfulKeys[$key])) {
+                continue;
+            }
+
+            $source = $sourceByKey[$key] ?? [];
+            $diagnostics[] = [
+                'type' => 'price_update_failed',
+                'promotion_id' => (int)($promo['promotion_id'] ?? 0),
+                'product_id' => $productId,
+                'variant_id' => $variantId,
+                'sku' => $source['sku'] ?? null,
+                'product_name' => $promo['product_name'] ?? ($source['name'] ?? null),
+                'promo_price' => $promo['promo_price'] ?? null,
+                'error' => $failedByKey[$key] ?? 'No successful price update response returned',
+            ];
+        }
+
+        return $diagnostics;
     }
 
     private function hasSuccessfulPriceUpdateForItem($productId, $variantId, array $priceResults): bool {

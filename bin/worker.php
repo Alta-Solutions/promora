@@ -63,6 +63,66 @@ function mergeWorkerProductIds(array ...$lists): array {
     return $productIds;
 }
 
+function mergeWorkerDiagnostics(array ...$lists): array {
+    $merged = [];
+    $seen = [];
+
+    foreach ($lists as $list) {
+        foreach ($list as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $key = implode(':', [
+                $item['type'] ?? 'diagnostic',
+                $item['promotion_id'] ?? '',
+                $item['product_id'] ?? '',
+                $item['variant_id'] ?? '',
+                $item['error'] ?? '',
+            ]);
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $merged[] = $item;
+        }
+    }
+
+    return $merged;
+}
+
+function formatWorkerDiagnostics(array $diagnostics, int $limit = 25): string {
+    if (empty($diagnostics)) {
+        return '';
+    }
+
+    $lines = [];
+    foreach (array_slice($diagnostics, 0, $limit) as $item) {
+        $label = !empty($item['sku'])
+            ? (string)$item['sku']
+            : 'product_id=' . (string)($item['product_id'] ?? 'n/a');
+        $variantId = $item['variant_id'] ?? null;
+        if ($variantId !== null && $variantId !== '') {
+            $label .= ' variant_id=' . (string)$variantId;
+        }
+
+        $promoPrice = array_key_exists('promo_price', $item) && $item['promo_price'] !== null
+            ? ' promo_price=' . (string)$item['promo_price']
+            : '';
+        $error = trim((string)($item['error'] ?? 'Unknown error'));
+
+        $lines[] = "- {$label}{$promoPrice}: {$error}";
+    }
+
+    $remaining = count($diagnostics) - count($lines);
+    if ($remaining > 0) {
+        $lines[] = "- ... {$remaining} more diagnostic item(s)";
+    }
+
+    return "Diagnostics:\n" . implode("\n", $lines);
+}
+
 function isOmnibusEnabledForStore(Database $db, string $storeHash): bool {
     $storeConfig = $db->fetchOne(
         "SELECT enable_omnibus FROM bigcommerce_stores WHERE store_hash = ?",
@@ -118,6 +178,7 @@ do {
     $successCount = 0;
     $errorCount = 0;
     $omnibusProductIds = [];
+    $diagnostics = [];
 
     try {
         logMsg("Processing Job #{$job['id']} (Type: {$job['job_type']}) for Store: {$job['store_hash']}");
@@ -163,6 +224,10 @@ do {
                 $omnibusProductIds = mergeWorkerProductIds(
                     $omnibusProductIds,
                     $results['omnibus_product_ids'] ?? []
+                );
+                $diagnostics = mergeWorkerDiagnostics(
+                    $diagnostics,
+                    $results['diagnostics'] ?? []
                 );
 
                 if ($results['processed'] === 0) {
@@ -267,6 +332,10 @@ do {
                     $omnibusProductIds,
                     $results['omnibus_product_ids'] ?? []
                 );
+                $diagnostics = mergeWorkerDiagnostics(
+                    $diagnostics,
+                    $results['diagnostics'] ?? []
+                );
 
                 $batchProcessed = $results['processed'] + $results['errors'];
                 if ($batchProcessed === 0) {
@@ -301,12 +370,18 @@ do {
         }
 
         $duration = microtime(true) - $jobStartTime;
+        $message = "Worker Job #{$job['id']} Completed (Type: {$job['job_type']})";
+        $diagnosticSummary = formatWorkerDiagnostics($diagnostics);
+        if ($diagnosticSummary !== '') {
+            $message .= "\n" . $diagnosticSummary;
+        }
+
         $promotionService->logSync(
             $job['promotion_id'],
             $successCount,
             $errorCount,
             $duration,
-            "Worker Job #{$job['id']} Completed (Type: {$job['job_type']})",
+            $message,
             'worker'
         );
 
