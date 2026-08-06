@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../config.php';
 
+use App\Support\LogRotator;
+
 function respond(int $statusCode, string $message): void {
     if (!headers_sent()) {
         http_response_code($statusCode);
@@ -83,6 +85,7 @@ if (!is_dir($logDir)) {
 }
 
 $logFilePath = $logDir . '/worker.log';
+LogRotator::rotateIfNeeded($logFilePath);
 $command = buildBackgroundCommand($phpPath, $workerPath, $logFilePath);
 
 if (!triggerInBackground($command)) {

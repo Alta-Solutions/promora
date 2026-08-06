@@ -2,6 +2,7 @@
 namespace App\Services;
 
 use App\Models\Database;
+use App\Support\LogRotator;
 use App\Support\StoreSettings;
 
 class CustomFieldService {
@@ -430,6 +431,6 @@ class CustomFieldService {
 
         $entry = date('Y-m-d H:i:s') . " - {$message} - " . json_encode($data) . "\n";
 
-        error_log($entry, 3, $logFile);
+        LogRotator::append($logFile, $entry);
     }
 }

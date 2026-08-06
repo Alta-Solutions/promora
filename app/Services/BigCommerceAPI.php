@@ -2,6 +2,7 @@
 namespace App\Services;
 
 use App\Models\Database;
+use App\Support\LogRotator;
 
 class BigCommerceAPI {
     private $baseUrl;
@@ -868,6 +869,6 @@ class BigCommerceAPI {
         $logString = "Request: {$method} {$endpoint} | Status: {$status}\n";
         $logString .= print_r($logEntry, true) . "\n----------------------------------------\n";
         
-        file_put_contents($logFile, $logString, FILE_APPEND);
+        LogRotator::append($logFile, $logString);
     }
 }

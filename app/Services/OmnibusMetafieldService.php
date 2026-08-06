@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Support\LogRotator;
+
 class OmnibusMetafieldService {
     private BigCommerceAPI $api;
 
@@ -335,7 +337,7 @@ class OmnibusMetafieldService {
         ];
 
         $line = json_encode($entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL;
-        @file_put_contents(__DIR__ . '/../logs/omnibus_metafields.log', $line, FILE_APPEND);
+        LogRotator::append(__DIR__ . '/../logs/omnibus_metafields.log', $line);
         error_log('Omnibus metafield write failed: ' . $line);
     }
 }

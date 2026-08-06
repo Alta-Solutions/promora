@@ -2,6 +2,7 @@
 namespace App\Services;
 
 use App\Models\Database;
+use App\Support\LogRotator;
 
 class ProductCacheService {
     private $db;
@@ -440,7 +441,7 @@ class ProductCacheService {
         $logString = "Query: {$query} \n";
         $logString .= print_r($logEntry, true) . "\n----------------------------------------\n";
         
-        file_put_contents($logFile, $logString, FILE_APPEND);
+        LogRotator::append($logFile, $logString);
     }
     
     public function getCacheStats() {
