@@ -230,9 +230,14 @@ class PromotionController {
                     'discount_percent' => $discountPercent,
                     'start_date' => $_POST['start_date'] ?? null,
                     'change_type' => $this->getPreviewOmnibusChangeType(),
+                    'cursor' => $_POST['cursor'] ?? null,
+                    'search' => $_POST['search'] ?? '',
                 ]
             );
             echo json_encode(['success' => true, 'data' => $preview]);
+        } catch (\InvalidArgumentException $e) {
+            http_response_code(400);
+            echo json_encode(['success' => false, 'error' => $e->getMessage()]);
         } catch (\Exception $e) {
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
         }

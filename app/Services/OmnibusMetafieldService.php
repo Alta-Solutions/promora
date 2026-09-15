@@ -19,6 +19,7 @@ class OmnibusMetafieldService {
         $aggregates = [];
         $requests = [];
         $requestMeta = [];
+        $existingMetafields = $this->fetchExistingMetafieldsForUpdates($updates);
 
         foreach ($updates as $update) {
             $productId = (int)($update['product_id'] ?? 0);
@@ -43,7 +44,9 @@ class OmnibusMetafieldService {
                         $value,
                         $aggregates,
                         $requests,
-                        $requestMeta
+                        $requestMeta,
+                        $existingMetafields['variant'][$productId][$variantId] ?? null,
+                        array_key_exists($variantId, $existingMetafields['variant'][$productId] ?? [])
                     );
                 }
                 continue;
@@ -57,7 +60,9 @@ class OmnibusMetafieldService {
                 $value,
                 $aggregates,
                 $requests,
-                $requestMeta
+                $requestMeta,
+                $existingMetafields['product'][$productId] ?? null,
+                array_key_exists($productId, $existingMetafields['product'])
             );
         }
 
@@ -77,9 +82,11 @@ class OmnibusMetafieldService {
         ?string $value,
         array &$aggregates,
         array &$requests,
-        array &$requestMeta
+        array &$requestMeta,
+        ?array $existing = null,
+        bool $existingPrefetched = false
     ): void {
-        $existing = $this->findProductMetafield($productId);
+        $existing = $existingPrefetched ? $existing : ($existing ?? $this->findProductMetafield($productId));
         $key = 'product:' . $productId;
 
         if ($value === null) {
@@ -124,9 +131,11 @@ class OmnibusMetafieldService {
         ?string $value,
         array &$aggregates,
         array &$requests,
-        array &$requestMeta
+        array &$requestMeta,
+        ?array $existing = null,
+        bool $existingPrefetched = false
     ): void {
-        $existing = $this->findVariantMetafield($productId, $variantId);
+        $existing = $existingPrefetched ? $existing : ($existing ?? $this->findVariantMetafield($productId, $variantId));
         $key = 'variant:' . $productId . ':' . $variantId;
 
         if ($value === null) {
@@ -175,6 +184,70 @@ class OmnibusMetafieldService {
         return $this->findOmnibusMetafield(
             $this->api->getVariantMetafields($productId, $variantId, self::NAMESPACE, self::KEY)
         );
+    }
+
+    private function fetchExistingMetafieldsForUpdates(array $updates): array {
+        $requests = [];
+        $meta = [];
+
+        foreach ($updates as $update) {
+            $productId = (int)($update['product_id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            if (!empty($update['has_variants'])) {
+                foreach ($this->normalizeIds($update['variant_ids'] ?? []) as $variantId) {
+                    $key = 'variant:' . $productId . ':' . $variantId;
+                    $requests[$key] = [
+                        'method' => 'GET',
+                        'endpoint' => "catalog/products/{$productId}/variants/{$variantId}/metafields?" . http_build_query([
+                            'namespace' => self::NAMESPACE,
+                            'key' => self::KEY,
+                        ]),
+                    ];
+                    $meta[$key] = ['product_id' => $productId, 'variant_id' => $variantId];
+                }
+                continue;
+            }
+
+            $key = 'product:' . $productId;
+            $requests[$key] = [
+                'method' => 'GET',
+                'endpoint' => "catalog/products/{$productId}/metafields?" . http_build_query([
+                    'namespace' => self::NAMESPACE,
+                    'key' => self::KEY,
+                ]),
+            ];
+            $meta[$key] = ['product_id' => $productId, 'variant_id' => null];
+        }
+
+        $existing = ['product' => [], 'variant' => []];
+        if (empty($requests)) {
+            return $existing;
+        }
+
+        foreach ($this->api->multiRequest($requests) as $key => $result) {
+            $requestMeta = $meta[$key] ?? null;
+            if ($requestMeta === null) {
+                continue;
+            }
+
+            if (!is_array($result['body'] ?? null) || !array_key_exists('data', $result['body'])) {
+                continue;
+            }
+
+            $metafield = $this->findOmnibusMetafield($result['body']['data'] ?? []);
+            $productId = (int)$requestMeta['product_id'];
+            $variantId = $requestMeta['variant_id'];
+            if ($variantId === null) {
+                $existing['product'][$productId] = $metafield;
+            } else {
+                $existing['variant'][$productId][(int)$variantId] = $metafield;
+            }
+        }
+
+        return $existing;
     }
 
     private function findOmnibusMetafield(array $metafields): ?array {

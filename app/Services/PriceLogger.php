@@ -172,9 +172,9 @@ class PriceLogger {
             return 0;
         }
 
-        $inserted = 0;
         $seen = [];
         $hasVariantId = $this->priceHistoryHasVariantId();
+        $normalizedRows = [];
 
         foreach ($pricesToSeed as $item) {
             $productId = (int)($item['product_id'] ?? 0);
@@ -197,6 +197,108 @@ class PriceLogger {
             }
             $seen[$key] = true;
 
+            $normalizedRows[] = [
+                'product_id' => $productId,
+                'variant_id' => $variantId,
+                'price' => $price,
+                'currency' => $currency,
+                'recorded_at' => $recordedAt,
+                'key' => $key,
+            ];
+        }
+
+        if (empty($normalizedRows)) {
+            return 0;
+        }
+
+        if (!$hasVariantId) {
+            foreach ($normalizedRows as &$row) {
+                $row['variant_id'] = null;
+                $row['key'] = $row['product_id'] . '_base_' . $row['currency'];
+            }
+            unset($row);
+        }
+
+        $existingKeys = [];
+        if (method_exists($this->db, 'fetchAll')) {
+            $conditions = [];
+            $params = [$storeHash];
+            foreach ($normalizedRows as $row) {
+                if ($hasVariantId) {
+                    $conditions[] = '(product_id = ? AND variant_id <=> ? AND currency = ? AND recorded_at <= ?)';
+                    $params[] = $row['product_id'];
+                    $params[] = $row['variant_id'];
+                    $params[] = $row['currency'];
+                    $params[] = $row['recorded_at'];
+                } else {
+                    $conditions[] = '(product_id = ? AND currency = ? AND recorded_at <= ?)';
+                    $params[] = $row['product_id'];
+                    $params[] = $row['currency'];
+                    $params[] = $row['recorded_at'];
+                }
+            }
+
+            $selectColumns = $hasVariantId ? 'product_id, variant_id, currency' : 'product_id, currency';
+            $rows = $this->db->fetchAll(
+                "SELECT {$selectColumns}
+                 FROM product_price_history
+                 WHERE store_hash = ?
+                   AND ignored_at IS NULL
+                   AND (" . implode(' OR ', $conditions) . ")",
+                $params
+            );
+
+            foreach ($rows as $row) {
+                $variantId = $hasVariantId && isset($row['variant_id']) && $row['variant_id'] !== null
+                    ? (int)$row['variant_id']
+                    : null;
+                $existingKeys[$row['product_id'] . '_' . ($variantId ?? 'base') . '_' . $row['currency']] = true;
+            }
+        } else {
+            return $this->seedInitialPriceHistoryBatchLegacy($storeHash, $normalizedRows, $hasVariantId);
+        }
+
+        $insertRows = array_values(array_filter($normalizedRows, static function (array $row) use ($existingKeys): bool {
+            return empty($existingKeys[$row['key']]);
+        }));
+
+        if (empty($insertRows)) {
+            return 0;
+        }
+
+        $placeholders = [];
+        $params = [];
+        foreach ($insertRows as $row) {
+            if ($hasVariantId) {
+                $placeholders[] = '(?, ?, ?, ?, ?, ?)';
+                $params = array_merge($params, [$storeHash, $row['product_id'], $row['variant_id'], $row['price'], $row['currency'], $row['recorded_at']]);
+            } else {
+                $placeholders[] = '(?, ?, ?, ?, ?)';
+                $params = array_merge($params, [$storeHash, $row['product_id'], $row['price'], $row['currency'], $row['recorded_at']]);
+            }
+        }
+
+        $columnSql = $hasVariantId
+            ? '(store_hash, product_id, variant_id, price, currency, recorded_at)'
+            : '(store_hash, product_id, price, currency, recorded_at)';
+        $this->db->beginTransaction();
+        try {
+            $this->db->query(
+                "INSERT IGNORE INTO product_price_history {$columnSql} VALUES " . implode(', ', $placeholders),
+                $params
+            );
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollback();
+            throw $e;
+        }
+
+        return count($insertRows);
+    }
+
+    private function seedInitialPriceHistoryBatchLegacy(string $storeHash, array $rows, bool $hasVariantId): int {
+        $inserted = 0;
+        foreach ($rows as $row) {
             if ($hasVariantId) {
                 $existingSeed = $this->db->fetchOne(
                     "SELECT id
@@ -208,7 +310,7 @@ class PriceLogger {
                        AND ignored_at IS NULL
                        AND recorded_at <= ?
                      LIMIT 1",
-                    [$storeHash, $productId, $variantId, $currency, $recordedAt]
+                    [$storeHash, $row['product_id'], $row['variant_id'], $row['currency'], $row['recorded_at']]
                 );
             } else {
                 $existingSeed = $this->db->fetchOne(
@@ -220,9 +322,8 @@ class PriceLogger {
                        AND ignored_at IS NULL
                        AND recorded_at <= ?
                      LIMIT 1",
-                    [$storeHash, $productId, $currency, $recordedAt]
+                    [$storeHash, $row['product_id'], $row['currency'], $row['recorded_at']]
                 );
-                $variantId = null;
             }
 
             if ($existingSeed) {
@@ -233,16 +334,15 @@ class PriceLogger {
                 $this->db->query(
                     "INSERT INTO product_price_history (store_hash, product_id, variant_id, price, currency, recorded_at)
                      VALUES (?, ?, ?, ?, ?, ?)",
-                    [$storeHash, $productId, $variantId, $price, $currency, $recordedAt]
+                    [$storeHash, $row['product_id'], $row['variant_id'], $row['price'], $row['currency'], $row['recorded_at']]
                 );
             } else {
                 $this->db->query(
                     "INSERT INTO product_price_history (store_hash, product_id, price, currency, recorded_at)
                      VALUES (?, ?, ?, ?, ?)",
-                    [$storeHash, $productId, $price, $currency, $recordedAt]
+                    [$storeHash, $row['product_id'], $row['price'], $row['currency'], $row['recorded_at']]
                 );
             }
-
             $inserted++;
         }
 

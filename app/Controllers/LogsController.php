@@ -76,8 +76,6 @@ class LogsController {
     public function promotions() {
         $db = Database::getInstance();
         $storeHash = $db->getStoreContext();
-        $archiveService = new PromotionArchiveService($db, $storeHash);
-        $archiveService->backfillExistingExpiredPromotions();
 
         $archiveModel = new PromotionArchive($db);
         $filters = $this->getArchiveFilters();
@@ -114,7 +112,6 @@ class LogsController {
         $db = Database::getInstance();
         $storeHash = $db->getStoreContext();
         $archiveService = new PromotionArchiveService($db, $storeHash);
-        $archiveService->backfillExistingExpiredPromotions();
 
         $archiveModel = new PromotionArchive($db);
         $archiveId = max(0, (int)$this->getQueryParam('id', '0'));

@@ -14,3 +14,6 @@ deployment:
     - test -f "$DEPLOYPATH/.env" || (echo "Missing $DEPLOY_ENV .env at $DEPLOYPATH/.env"; exit 1)
     - cd "$DEPLOYPATH" && unset COMPOSER && "$PHPBIN" "$COMPOSER_BIN" install --no-dev --prefer-dist --optimize-autoloader --no-interaction
     - cd "$DEPLOYPATH" && "$PHPBIN" app/install/install.php
+    - cd "$DEPLOYPATH" && test -f bin/migrate.php || (echo "Missing migration runner at $DEPLOYPATH/bin/migrate.php"; exit 1)
+    - cd "$DEPLOYPATH" && "$PHPBIN" bin/migrate.php --up
+    - cd "$DEPLOYPATH" && "$PHPBIN" bin/migrate.php --status

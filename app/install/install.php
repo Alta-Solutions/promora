@@ -12,6 +12,7 @@ require_once ROOT_PATH . 'config.php';
 
 use App\Models\Database;
 use App\Support\BigCommerceStoreSchema;
+use App\Support\MigrationRunner;
 
 // Funkcija za prikaz poruka
 function message($text, $type = 'info') {
@@ -363,6 +364,9 @@ try {
 
     BigCommerceStoreSchema::ensure($db);
     message("  - Table `bigcommerce_stores` columns verified successfully.", 'success');
+
+    $migrations = (new MigrationRunner($db))->up();
+    message("  - Performance migrations applied: " . count($migrations), 'success');
 
     message("\n--- Database setup complete! ---", 'info');
 

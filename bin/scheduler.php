@@ -47,6 +47,9 @@ try {
     $promotionJobsSkipped = 0;
     $completedJobsDeleted = 0;
     $failedJobsDeleted = 0;
+    $syncLogSuccessDeleted = 0;
+    $syncLogErrorDeleted = 0;
+    $webhookProcessedDeleted = 0;
     foreach ($promotionStores as $store) {
         $storeHash = $store['store_hash'];
         $db->setStoreContext($storeHash);
@@ -59,9 +62,14 @@ try {
         $purgedJobs = $queueService->purgeOldJobs();
         $completedJobsDeleted += $purgedJobs['completed_deleted'] ?? 0;
         $failedJobsDeleted += $purgedJobs['failed_deleted'] ?? 0;
+        $purgedHistory = $queueService->purgeOperationalHistory();
+        $syncLogSuccessDeleted += $purgedHistory['sync_log_success_deleted'] ?? 0;
+        $syncLogErrorDeleted += $purgedHistory['sync_log_error_deleted'] ?? 0;
+        $webhookProcessedDeleted += $purgedHistory['webhook_processed_deleted'] ?? 0;
     }
     logMsg("-> Created {$promotionJobsCreated} promotion-related jobs. Skipped open duplicates: {$promotionJobsSkipped}.");
     logMsg("-> Purged old sync_jobs rows. Completed: {$completedJobsDeleted}, failed: {$failedJobsDeleted}.");
+    logMsg("-> Purged operational history. sync_log success: {$syncLogSuccessDeleted}, sync_log errors: {$syncLogErrorDeleted}, processed webhooks: {$webhookProcessedDeleted}.");
 
 } catch (\Exception $e) {
     logMsg("ERROR in Scheduler: " . $e->getMessage());

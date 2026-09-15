@@ -460,6 +460,42 @@ class QueueService {
         ];
     }
 
+    public function purgeOperationalHistory(int $successRetentionDays = 90, int $errorRetentionDays = 180): array {
+        $successRetentionDays = max(1, $successRetentionDays);
+        $errorRetentionDays = max(1, $errorRetentionDays);
+
+        $syncSuccessStmt = $this->db->query(
+            "DELETE FROM sync_log
+             WHERE store_hash = ?
+               AND errors = 0
+               AND synced_at < DATE_SUB(NOW(), INTERVAL {$successRetentionDays} DAY)
+             LIMIT 1000",
+            [$this->storeHash]
+        );
+        $syncErrorStmt = $this->db->query(
+            "DELETE FROM sync_log
+             WHERE store_hash = ?
+               AND errors > 0
+               AND synced_at < DATE_SUB(NOW(), INTERVAL {$errorRetentionDays} DAY)
+             LIMIT 1000",
+            [$this->storeHash]
+        );
+        $webhookSuccessStmt = $this->db->query(
+            "DELETE FROM webhook_events
+             WHERE store_hash = ?
+               AND processed = 1
+               AND created_at < DATE_SUB(NOW(), INTERVAL {$successRetentionDays} DAY)
+             LIMIT 1000",
+            [$this->storeHash]
+        );
+
+        return [
+            'sync_log_success_deleted' => $syncSuccessStmt->rowCount(),
+            'sync_log_error_deleted' => $syncErrorStmt->rowCount(),
+            'webhook_processed_deleted' => $webhookSuccessStmt->rowCount(),
+        ];
+    }
+
     /**
      * NOVO: Pametna obrada greške sa Retry logikom
      */

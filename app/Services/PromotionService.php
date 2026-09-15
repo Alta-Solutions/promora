@@ -16,6 +16,7 @@ class PromotionService {
     private $archiveService = null;
     private $storeConfigCache = null;
     private $priceHistoryHasVariantId;
+    private $promotionProductExclusionMap = null;
     private const API_PRODUCT_LIMIT = 250;
     private const BLOCK_BELOW_COST_PRICE_FILTER_KEY = '_block_below_cost_price';
     private const MANUAL_UNBLOCK_FILTER_KEY = '_manual_unblocked_items';
@@ -24,6 +25,7 @@ class PromotionService {
     private const CHANGE_TYPE_STANDARD = 'standard';
     private const CHANGE_TYPE_ACTIVE_DISCOUNT_CORRECTION = 'active_discount_correction';
     private const MAX_CORRECTION_REASON_LENGTH = 1000;
+    private const PREVIEW_PAGE_LIMIT = 100;
     
 public function __construct(Database $db = null) {
         $this->promotionModel = new Promotion();
@@ -611,7 +613,17 @@ public function __construct(Database $db = null) {
             : null;
         $newPreviewItemReferenceAt = $this->resolveNewPreviewItemOmnibusReferenceAt($referenceAt);
         // getProductsByFilters sada vraća i proizvode i varijante
-        $items = $this->cacheService->getProductsByFilters($filters);
+        $limit = self::PREVIEW_PAGE_LIMIT;
+        $search = $this->normalizePreviewSearch($context['search'] ?? '');
+        $cursorPayload = $this->decodePreviewCursor($context['cursor'] ?? null, $filters, $search);
+        $items = $this->cacheService->getProductsByFilters($filters, $limit + 1, 0, [
+            'cursor' => $cursorPayload,
+            'search' => $search,
+        ]);
+        $hasMore = count($items) > $limit;
+        if ($hasMore) {
+            $items = array_slice($items, 0, $limit);
+        }
         
         $preview = [];
         foreach ($items as $item) {
@@ -634,10 +646,19 @@ public function __construct(Database $db = null) {
             }
         }
         
+        $pageInvalidProducts = count(array_filter($preview, fn($row) => empty($row['will_apply'])));
+        $pageSavings = array_sum(array_column($preview, 'savings'));
+
         return [
-            'total_products' => count($preview),
-            'total_invalid_products' => count(array_filter($preview, fn($row) => empty($row['will_apply']))),
-            'total_savings' => array_sum(array_column($preview, 'savings')),
+            'total_products' => method_exists($this->cacheService, 'countProductsByFilters')
+                ? $this->cacheService->countProductsByFilters($filters, ['search' => $search])
+                : count($preview),
+            'total_invalid_products' => $pageInvalidProducts,
+            'total_savings' => $pageSavings,
+            'next_cursor' => $hasMore ? $this->encodePreviewCursor(end($items), $filters, $search) : null,
+            'has_more' => $hasMore,
+            'page_total_invalid_products' => $pageInvalidProducts,
+            'page_total_savings' => $pageSavings,
             'products' => $preview
         ];
     }
@@ -646,19 +667,65 @@ public function __construct(Database $db = null) {
      * Get statistics about filters
      */
     public function getFilterStats($filters) {
-        $products = $this->cacheService->getProductsByFilters($filters);
-        
-        $totalValue = array_sum(array_column($products, 'price'));
-        $avgPrice = count($products) > 0 ? $totalValue / count($products) : 0;
-        
-        return [
-            'total_products' => count($products),
-            'total_inventory' => array_sum(array_column($products, 'inventory_level')),
-            'total_value' => round($totalValue, 2),
-            'average_price' => round($avgPrice, 2),
-            'visible_products' => count(array_filter($products, fn($p) => $p['is_visible'])),
-            'featured_products' => count(array_filter($products, fn($p) => $p['is_featured'])),
+        return $this->cacheService->getFilterStats($filters);
+    }
+
+    private function encodePreviewCursor($item, $filters, string $search): ?string {
+        if (!is_array($item) || empty($item['product_id']) || empty($item['id'])) {
+            return null;
+        }
+
+        $payload = [
+            'product_id' => (int)$item['product_id'],
+            'variant_sort_id' => isset($item['variant_sort_id'])
+                ? (int)$item['variant_sort_id']
+                : (int)($item['variant_id'] ?? 0),
+            'id' => (string)$item['id'],
+            'fingerprint' => $this->buildPreviewCursorFingerprint($filters, $search),
         ];
+
+        return rtrim(strtr(base64_encode(json_encode($payload, JSON_UNESCAPED_UNICODE)), '+/', '-_'), '=');
+    }
+
+    private function decodePreviewCursor($cursor, $filters, string $search): ?array {
+        $cursor = trim((string)$cursor);
+        if ($cursor === '') {
+            return null;
+        }
+
+        $decoded = base64_decode(strtr($cursor, '-_', '+/'), true);
+        $payload = $decoded !== false ? json_decode($decoded, true) : null;
+        if (!is_array($payload)) {
+            throw new \InvalidArgumentException('Invalid preview cursor.');
+        }
+
+        $expectedFingerprint = $this->buildPreviewCursorFingerprint($filters, $search);
+        $actualFingerprint = (string)($payload['fingerprint'] ?? '');
+        if (!hash_equals($expectedFingerprint, $actualFingerprint)) {
+            throw new \InvalidArgumentException('Preview cursor is no longer valid for these filters.');
+        }
+
+        return [
+            'product_id' => (int)($payload['product_id'] ?? 0),
+            'variant_sort_id' => (int)($payload['variant_sort_id'] ?? 0),
+            'id' => (string)($payload['id'] ?? ''),
+        ];
+    }
+
+    private function buildPreviewCursorFingerprint($filters, string $search): string {
+        return hash('sha256', implode('|', [
+            (string)$this->storeHash,
+            $this->normalizeFiltersForComparison($filters),
+            $this->normalizePreviewSearch($search),
+        ]));
+    }
+
+    private function normalizePreviewSearch($search): string {
+        $search = trim((string)$search);
+
+        return function_exists('mb_substr')
+            ? mb_substr($search, 0, 120)
+            : substr($search, 0, 120);
     }
     
     /**
@@ -1145,7 +1212,7 @@ public function __construct(Database $db = null) {
         if (!$promotion) throw new \Exception("Promocija nije pronađena.");
 
         $filters = json_decode($promotion['filters'], true);
-        $activePromotions = $this->promotionModel->findActive();
+        $activePromotions = $this->normalizeActivePromotionsForBatch($this->promotionModel->findActive());
         $reconciliationResult = $offset === 0
             ? $this->reconcilePromotionProductsForPromotion($promotion, $activePromotions)
             : ['changed' => 0, 'omnibus_product_ids' => []];
@@ -1162,6 +1229,7 @@ public function __construct(Database $db = null) {
             ];
         }
 
+        $this->prefetchPromotionProductExclusions($activePromotions, $items);
         $productPromotions = [];
 
         // 2. Priprema podataka (samo logika, bez API poziva)
@@ -1748,7 +1816,9 @@ public function __construct(Database $db = null) {
                 continue;
             }
 
-            $filters = json_decode($promo['filters'], true) ?: [];
+            $filters = is_array($promo['filters'] ?? null)
+                ? $promo['filters']
+                : (json_decode($promo['filters'] ?? '[]', true) ?: []);
             if (!$this->productMatchesFilters($product, $filters)) {
                 continue;
             }
@@ -3026,6 +3096,10 @@ public function __construct(Database $db = null) {
             ? (int)$product['variant_id']
             : null;
 
+        if (is_array($this->promotionProductExclusionMap)) {
+            return isset($this->promotionProductExclusionMap[$this->buildPromotionProductExclusionKey($promotionId, $productId, $variantId)]);
+        }
+
         try {
             $row = $this->db->fetchOne(
                 "SELECT id
@@ -3042,6 +3116,58 @@ public function __construct(Database $db = null) {
         }
 
         return !empty($row);
+    }
+
+    private function normalizeActivePromotionsForBatch(array $activePromotions): array {
+        foreach ($activePromotions as &$promotion) {
+            if (isset($promotion['filters']) && is_string($promotion['filters'])) {
+                $decoded = json_decode($promotion['filters'], true);
+                $promotion['filters'] = is_array($decoded) ? $decoded : [];
+            }
+        }
+        unset($promotion);
+
+        return $activePromotions;
+    }
+
+    private function prefetchPromotionProductExclusions(array $activePromotions, array $items): void {
+        $promotionIds = array_values(array_unique(array_filter(array_map(static function (array $promotion): int {
+            return (int)($promotion['id'] ?? $promotion['promotion_id'] ?? 0);
+        }, $activePromotions), static fn(int $id): bool => $id > 0)));
+        $productIds = array_values(array_unique(array_filter(array_map(static function (array $item): int {
+            return (int)($item['product_id'] ?? 0);
+        }, $items), static fn(int $id): bool => $id > 0)));
+
+        $this->promotionProductExclusionMap = [];
+        if (empty($promotionIds) || empty($productIds)) {
+            return;
+        }
+
+        $promotionPlaceholders = implode(',', array_fill(0, count($promotionIds), '?'));
+        $productPlaceholders = implode(',', array_fill(0, count($productIds), '?'));
+        $rows = $this->db->fetchAll(
+            "SELECT promotion_id, product_id, variant_id
+             FROM promotion_product_exclusions
+             WHERE store_hash = ?
+               AND promotion_id IN ($promotionPlaceholders)
+               AND product_id IN ($productPlaceholders)",
+            array_merge([$this->storeHash], $promotionIds, $productIds)
+        );
+
+        foreach ($rows as $row) {
+            $variantId = isset($row['variant_id']) && $row['variant_id'] !== null
+                ? (int)$row['variant_id']
+                : null;
+            $this->promotionProductExclusionMap[$this->buildPromotionProductExclusionKey(
+                (int)$row['promotion_id'],
+                (int)$row['product_id'],
+                $variantId
+            )] = true;
+        }
+    }
+
+    private function buildPromotionProductExclusionKey(int $promotionId, int $productId, ?int $variantId): string {
+        return $promotionId . ':' . $productId . ':' . ($variantId === null ? 'base' : (string)$variantId);
     }
 
     private function insertPromotionProductExclusion(

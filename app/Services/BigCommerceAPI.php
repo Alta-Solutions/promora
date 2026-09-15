@@ -117,6 +117,8 @@ class BigCommerceAPI {
     }
 
     protected function request($method, $endpoint, $data = null) {
+        $method = strtoupper($method);
+        $this->assertReadOnlyAllowsMethod($method, $endpoint);
         $this->suppressWebhookForWrite($method, $endpoint, $data);
 
         $retries = 0;
@@ -127,19 +129,20 @@ class BigCommerceAPI {
             
             $this->requestCount++;
 
+            $startedAt = microtime(true);
             $ch = curl_init($this->baseUrl . $endpoint);
 
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_HTTPHEADER     => $this->headers,
-                CURLOPT_CUSTOMREQUEST  => strtoupper($method),
+                CURLOPT_CUSTOMREQUEST  => $method,
                 CURLOPT_TIMEOUT        => 30,
                 CURLOPT_HEADER         => true,
             ]);
             
-            if (in_array(strtoupper($method), ['POST', 'PUT'])) {
+            if (in_array($method, ['POST', 'PUT', 'PATCH'], true)) {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-            } elseif (strtoupper($method) === 'DELETE' && $data !== null) {
+            } elseif ($method === 'DELETE' && $data !== null) {
                  curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
             }
             
@@ -157,7 +160,8 @@ class BigCommerceAPI {
             // Parsiranjem hedera se automatski ažuriraju $this->rateLimitLeft i $this->rateLimitResetMs
             $parsedHeaders = $this->parseHeaders($headerContent);
 
-            $this->logResponse(strtoupper($method), $endpoint, $data, $status, $body, $error);
+            $durationMs = round((microtime(true) - $startedAt) * 1000, 2);
+            $this->logResponse($method, $endpoint, $status, strlen((string)$body), $error, $durationMs, $retries, $parsedHeaders);
 
             if ($status >= 200 && $status < 300 && !$error) {
                 return [
@@ -203,9 +207,16 @@ class BigCommerceAPI {
             return [];
         }
 
+        foreach ($requests as $request) {
+            $this->assertReadOnlyAllowsMethod(
+                (string)($request['method'] ?? 'GET'),
+                (string)($request['endpoint'] ?? '')
+            );
+        }
+
         // OPTIMIZACIJA: Ograničavamo konkurentnost da izbegnemo 429 "Too many simultaneous requests"
         // BigCommerce obično dozvoljava 3-5 paralelnih konekcija.
-        $concurrencyLimit = 5; 
+        $concurrencyLimit = max(1, min(10, (int)($_ENV['BC_HTTP_CONCURRENCY'] ?? getenv('BC_HTTP_CONCURRENCY') ?: 5)));
         $batches = array_chunk($requests, $concurrencyLimit, true);
         $results = [];
 
@@ -293,9 +304,17 @@ class BigCommerceAPI {
     }
 
     public function getProducts($filters = []) {
+        $allProducts = [];
+        $this->eachProductPage($filters, function (array $products) use (&$allProducts): void {
+            $allProducts = array_merge($allProducts, $products);
+        });
+
+        return $allProducts;
+    }
+
+    public function eachProductPage(array $filters, callable $callback): void {
         $validFilters = $this->validateFilters($filters);
         $validFilters['limit'] = 250;
-        $allProducts = [];
         $page = 1;
         $maxPages = 200;
         
@@ -309,28 +328,30 @@ class BigCommerceAPI {
                 
                 // Uklonjen print_r($response);
                 $products = $response['body']['data'] ?? [];
-                // Uklonjen print_r($products);
-                $allProducts = array_merge($allProducts, $products);
                 
                 $meta = $response['body']['meta'] ?? [];
                 $pagination = $meta['pagination'] ?? [];
                 $totalPages = $pagination['total_pages'] ?? 1;
                 $currentPage = $pagination['current_page'] ?? $page;
+
+                $callback($products, $pagination);
                 
                 $page++;
 
-                if ($currentPage >= $totalPages || $page > $maxPages) {
+                if ($currentPage >= $totalPages) {
                     break;
+                }
+
+                if ($page > $maxPages) {
+                    throw new \RuntimeException("BigCommerce product page safety limit reached at {$maxPages} pages.");
                 }
                 
             } catch (\Exception $e) {
                 error_log("Error fetching products page {$page}: " . $e->getMessage());
-                break;
+                throw $e;
             }
             
         } while (count($products) > 0);
-        
-        return $allProducts;
     }
 
     public function getTaxSettings(): array {
@@ -801,11 +822,42 @@ class BigCommerceAPI {
         return $this->requestCount;
     }
 
+    private function assertReadOnlyAllowsMethod(string $method, string $endpoint): void {
+        $method = strtoupper($method);
+        if (!in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
+            return;
+        }
+
+        $readOnly = strtolower((string)($_ENV['BIGCOMMERCE_READ_ONLY'] ?? getenv('BIGCOMMERCE_READ_ONLY') ?: ''));
+        if (in_array($readOnly, ['1', 'true', 'yes', 'on'], true)) {
+            throw new \RuntimeException("BIGCOMMERCE_READ_ONLY blocked {$method} {$endpoint}");
+        }
+    }
+
     /**
      * Loguje kompletan odgovor sa BC API poziva.
      */
-    private function logResponse($method, $endpoint, $data, $status, $responseBody, $error) {
+    private function logResponse($method, $endpoint, $status, int $responseBytes, $error, float $durationMs = 0.0, int $retry = 0, array $headers = []) {
         $logFile = __DIR__ . '/../logs/bc_api_requests.log'; 
+        $this->rotateLogFile($logFile);
+
+        $logEntry = [
+            'timestamp' => date('Y-m-d H:i:s'),
+            'method' => $method,
+            'endpoint' => $this->sanitizeEndpoint($endpoint),
+            'status' => $status,
+            'duration_ms' => $durationMs,
+            'response_bytes' => $responseBytes,
+            'retry' => $retry,
+            'rate_limit_left' => $headers['X-Rate-Limit-Requests-Left'] ?? null,
+            'rate_limit_reset_ms' => $headers['X-Rate-Limit-Time-Reset-Ms'] ?? null,
+            'error_msg' => $error,
+        ];
+
+        $logString = "Request: {$method} {$endpoint} | Status: {$status}\n";
+        $logString .= print_r($logEntry, true) . "\n----------------------------------------\n";
+        file_put_contents($logFile, $logString, FILE_APPEND);
+        return;
 
         $logEntry = [
             'timestamp' => date('Y-m-d H:i:s'),
@@ -822,5 +874,42 @@ class BigCommerceAPI {
         $logString .= print_r($logEntry, true) . "\n----------------------------------------\n";
         
         file_put_contents($logFile, $logString, FILE_APPEND);
+    }
+
+    private function sanitizeEndpoint(string $endpoint): string {
+        $parts = parse_url($endpoint);
+        if (empty($parts['query'])) {
+            return $endpoint;
+        }
+
+        parse_str($parts['query'], $query);
+        foreach (['access_token', 'token', 'client_secret'] as $secretKey) {
+            if (array_key_exists($secretKey, $query)) {
+                $query[$secretKey] = '[redacted]';
+            }
+        }
+
+        $path = $parts['path'] ?? '';
+        $queryString = http_build_query($query);
+        return $queryString !== '' ? "{$path}?{$queryString}" : $path;
+    }
+
+    private function rotateLogFile(string $logFile): void {
+        $maxBytes = 10 * 1024 * 1024;
+        $maxFiles = 5;
+
+        if (!is_file($logFile) || filesize($logFile) < $maxBytes) {
+            return;
+        }
+
+        for ($i = $maxFiles - 1; $i >= 1; $i--) {
+            $source = "{$logFile}.{$i}";
+            $target = "{$logFile}." . ($i + 1);
+            if (is_file($source)) {
+                @rename($source, $target);
+            }
+        }
+
+        @rename($logFile, "{$logFile}.1");
     }
 }
