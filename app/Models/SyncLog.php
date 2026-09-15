@@ -70,26 +70,21 @@ class SyncLog {
     }
     
     public function getStats() {
+        $row = $this->db->fetchOne(
+            "SELECT COUNT(*) AS total_syncs,
+                    COALESCE(SUM(products_synced), 0) AS total_products_synced,
+                    COALESCE(SUM(errors), 0) AS total_errors,
+                    MAX(synced_at) AS last_sync
+             FROM sync_log
+             WHERE store_hash = ?",
+            [$this->storeHash]
+        );
+
         return [
-            'total_syncs' => $this->db->fetchOne(
-                "SELECT COUNT(*) as cnt FROM sync_log WHERE store_hash = ?", 
-                [$this->storeHash]
-            )['cnt'],
-            
-            'total_products_synced' => $this->db->fetchOne(
-                "SELECT SUM(products_synced) as total FROM sync_log WHERE store_hash = ?", 
-                [$this->storeHash]
-            )['total'] ?? 0,
-            
-            'total_errors' => $this->db->fetchOne(
-                "SELECT SUM(errors) as total FROM sync_log WHERE store_hash = ?", 
-                [$this->storeHash]
-            )['total'] ?? 0,
-            
-            'last_sync' => $this->db->fetchOne(
-                "SELECT MAX(synced_at) as last_sync FROM sync_log WHERE store_hash = ?", 
-                [$this->storeHash]
-            )['last_sync']
+            'total_syncs' => (int)($row['total_syncs'] ?? 0),
+            'total_products_synced' => (int)($row['total_products_synced'] ?? 0),
+            'total_errors' => (int)($row['total_errors'] ?? 0),
+            'last_sync' => $row['last_sync'] ?? null,
         ];
     }
 }

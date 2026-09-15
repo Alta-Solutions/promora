@@ -193,6 +193,7 @@
 
                 <div class="promotion-preview-toolbar">
                     <input type="search" id="preview-search" class="form-input promotion-preview-search" placeholder="<?= trans_e('promotions.preview.search_placeholder') ?>">
+                    <button type="button" id="preview-load-more" class="btn btn-secondary promotion-preview-load-more" hidden>Load more</button>
                 </div>
 
                 <div class="promotion-preview-table-wrap">
@@ -1010,10 +1011,12 @@ renderFilters();
 // Auto-update preview when filters change
 let previewTimeout;
 let previewProducts = [];
+let previewNextCursor = null;
+let previewLastFingerprint = '';
 
 function schedulePreviewUpdate() {
     clearTimeout(previewTimeout);
-    previewTimeout = setTimeout(updatePreview, 1000); // Update after 1s of inactivity
+    previewTimeout = setTimeout(() => updatePreview(false), 1000); // Update after 1s of inactivity
 }
 
 function formatPreviewMoney(value) {
@@ -1051,7 +1054,7 @@ function toggleManualUnblock(itemKey, shouldUnblock) {
         manualUnblockedItemKeys.delete(itemKey);
     }
 
-    updatePreview();
+    updatePreview(false);
 }
 
 function bindPreviewOverrideButtons(tbody) {
@@ -1066,8 +1069,6 @@ function bindPreviewOverrideButtons(tbody) {
 }
 
 function pruneManualUnblocks(products) {
-    const currentKeys = new Set(products.map(getPreviewItemKey).filter(Boolean));
-    manualUnblockedItemKeys = new Set(Array.from(manualUnblockedItemKeys).filter(key => currentKeys.has(key)));
 }
 
 function renderPreviewRows(products) {
@@ -1176,11 +1177,29 @@ function renderPreviewRows(products) {
 }
 
 function applyPreviewSearch() {
-    renderPreviewRows(previewProducts);
+    updatePreview(false);
 }
 
-async function updatePreview() {
+function buildPreviewFingerprint(filtersObj) {
+    return JSON.stringify({
+        filters: filtersObj,
+        discount: document.getElementById('promo-discount').value || 0,
+        startDate: document.getElementById('start-date')?.value || '',
+        search: document.getElementById('preview-search')?.value || ''
+    });
+}
+
+async function updatePreview(loadMore = false) {
     const filtersObj = buildFiltersPayload();
+    const fingerprint = buildPreviewFingerprint(filtersObj);
+    if (!loadMore && fingerprint !== previewLastFingerprint) {
+        previewProducts = [];
+        previewNextCursor = null;
+        previewLastFingerprint = fingerprint;
+    }
+    if (loadMore && !previewNextCursor) {
+        return;
+    }
     
     const discount = document.getElementById('promo-discount').value || 0;
     
@@ -1190,6 +1209,10 @@ async function updatePreview() {
         params.append('filters', JSON.stringify(filtersObj));
         params.append('discount_percent', discount);
         params.append('start_date', document.getElementById('start-date')?.value || '');
+        params.append('search', document.getElementById('preview-search')?.value || '');
+        if (loadMore && previewNextCursor) {
+            params.append('cursor', previewNextCursor);
+        }
 
         const response = await fetch('?route=promotions&action=preview', {
             method: 'POST',
@@ -1205,7 +1228,13 @@ async function updatePreview() {
             pruneManualUnblocks(products);
             
             document.getElementById('preview-count').textContent = data.total_products;
-            previewProducts = products;
+            previewProducts = loadMore ? previewProducts.concat(products) : products;
+            previewNextCursor = data.next_cursor || null;
+            const loadMoreButton = document.getElementById('preview-load-more');
+            if (loadMoreButton) {
+                loadMoreButton.hidden = !data.has_more;
+                loadMoreButton.disabled = false;
+            }
             renderPreviewRows(previewProducts);
         } else {
             document.getElementById('preview-table-body').innerHTML = `<tr><td colspan="6" class="promotion-preview-empty promotion-preview-error">${escapeHtml(result.error || appT('common.unknown_error'))}</td></tr>`;
@@ -1219,6 +1248,10 @@ async function updatePreview() {
 document.getElementById('preview-search')?.addEventListener('input', applyPreviewSearch);
 document.getElementById('promo-discount')?.addEventListener('input', schedulePreviewUpdate);
 document.getElementById('block-below-cost-price')?.addEventListener('change', schedulePreviewUpdate);
+document.getElementById('preview-load-more')?.addEventListener('click', function() {
+    this.disabled = true;
+    updatePreview(true);
+});
 
 // Initial preview
 setTimeout(updatePreview, 500);

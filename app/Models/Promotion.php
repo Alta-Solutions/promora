@@ -79,16 +79,12 @@ class Promotion {
         $offset = isset($options['offset']) ? max(0, (int)$options['offset']) : 0;
         $whereParams = [];
         $whereSql = $this->buildListWhereClause((bool)$includeExpired, $storeHash, $search, $statusFilter, $whereParams);
-        
-        $sql = "SELECT p.*, 
-                COUNT(DISTINCT pp.product_id) as product_count,
-                MAX(sl.synced_at) as last_sync
+
+        $sql = "SELECT p.*
                 FROM promotions p
-                LEFT JOIN promotion_products pp ON p.id = pp.promotion_id AND pp.store_hash = ?
-                LEFT JOIN sync_log sl ON p.id = sl.promotion_id AND sl.store_hash = ?
                 WHERE {$whereSql}";
-        
-        $sql .= " GROUP BY p.id ORDER BY 
+
+        $sql .= " ORDER BY
                   CASE 
                     WHEN p.status = 'active' THEN 1
                     WHEN p.status = 'scheduled' THEN 2
@@ -102,8 +98,13 @@ class Promotion {
         if ($limit !== null) {
             $sql .= " LIMIT {$limit} OFFSET {$offset}";
         }
-        
-        return $this->db->fetchAll($sql, array_merge([$storeHash, $storeHash], $whereParams));
+
+        $promotions = $this->db->fetchAll($sql, $whereParams);
+        if (empty($promotions)) {
+            return [];
+        }
+
+        return $this->attachListAggregates($promotions, $storeHash);
     }
 
     public function countAll($includeExpired = true, string $search = '', array $options = []): int {
@@ -288,5 +289,44 @@ class Promotion {
         return in_array($statusFilter, ['current', 'expired', 'all'], true)
             ? $statusFilter
             : null;
+    }
+
+    private function attachListAggregates(array $promotions, ?string $storeHash): array {
+        $promotionIds = array_values(array_unique(array_map(static function ($promotion): int {
+            return (int)($promotion['id'] ?? 0);
+        }, $promotions)));
+        $promotionIds = array_values(array_filter($promotionIds, static fn(int $id): bool => $id > 0));
+
+        if (empty($promotionIds)) {
+            return $promotions;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($promotionIds), '?'));
+        $productRows = $this->db->fetchAll(
+            "SELECT promotion_id, COUNT(DISTINCT product_id) AS product_count
+             FROM promotion_products
+             WHERE store_hash = ? AND promotion_id IN ($placeholders)
+             GROUP BY promotion_id",
+            array_merge([$storeHash], $promotionIds)
+        );
+        $syncRows = $this->db->fetchAll(
+            "SELECT promotion_id, MAX(synced_at) AS last_sync
+             FROM sync_log
+             WHERE store_hash = ? AND promotion_id IN ($placeholders)
+             GROUP BY promotion_id",
+            array_merge([$storeHash], $promotionIds)
+        );
+
+        $productCountByPromotion = array_column($productRows, 'product_count', 'promotion_id');
+        $lastSyncByPromotion = array_column($syncRows, 'last_sync', 'promotion_id');
+
+        foreach ($promotions as &$promotion) {
+            $promotionId = (int)($promotion['id'] ?? 0);
+            $promotion['product_count'] = (int)($productCountByPromotion[$promotionId] ?? 0);
+            $promotion['last_sync'] = $lastSyncByPromotion[$promotionId] ?? null;
+        }
+        unset($promotion);
+
+        return $promotions;
     }
 }

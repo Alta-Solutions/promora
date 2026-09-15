@@ -30,6 +30,28 @@ function hasProductsCacheTypeColumn(Database $db): bool {
     return $hasType;
 }
 
+function decodeWorkerPayload($payload): array {
+    if (is_array($payload)) {
+        return $payload;
+    }
+
+    if (!is_string($payload) || trim($payload) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($payload, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+function updateWorkerJobPayload(Database $db, int $jobId, array $payload): void {
+    $db->query(
+        "UPDATE sync_jobs
+         SET payload = ?, updated_at = NOW()
+         WHERE id = ?",
+        [json_encode($payload, JSON_UNESCAPED_SLASHES), $jobId]
+    );
+}
+
 function normalizeWorkerProductIds(array $productIds): array {
     $normalized = [];
 
@@ -238,16 +260,20 @@ do {
             logMsg("Processing Omnibus Sync Job for store {$job['store_hash']}... Total items: {$job['total_items']}");
             $omnibusService = new \App\Services\OmnibusSyncService($job['store_hash']);
             $baseProductClause = hasProductsCacheTypeColumn($db) ? " AND type = 'product'" : '';
+            $payload = decodeWorkerPayload($job['payload'] ?? null);
+            $lastProductId = max(0, (int)($payload['last_product_id'] ?? 0));
 
             while ($processedCount < $job['total_items']) {
-                logMsg("Processing Omnibus batch (Offset: {$processedCount})...");
+                logMsg("Processing Omnibus batch (after product_id: {$lastProductId})...");
 
                 $parentProducts = $db->fetchAll(
                     "SELECT DISTINCT product_id
                      FROM products_cache
                      WHERE store_hash = ?" . $baseProductClause . "
-                     LIMIT ? OFFSET ?",
-                    [$job['store_hash'], $batchSize, $processedCount]
+                       AND product_id > ?
+                     ORDER BY product_id ASC
+                     LIMIT ?",
+                    [$job['store_hash'], $lastProductId, $batchSize]
                 );
 
                 if (empty($parentProducts)) {
@@ -267,6 +293,9 @@ do {
                 }
 
                 $processedCount += $batchProcessed;
+                $lastProductId = (int)end($parentProducts)['product_id'];
+                $payload['last_product_id'] = $lastProductId;
+                updateWorkerJobPayload($db, (int)$job['id'], $payload);
                 $queue->updateProgress($job['id'], $processedCount);
 
                 if (function_exists('gc_collect_cycles')) {
@@ -359,7 +388,6 @@ do {
         $queue->handleJobFailure($job['id'], $e->getMessage());
     }
 
-    usleep(500000);
 } while (true);
 
 logMsg("--- Worker finished ---");

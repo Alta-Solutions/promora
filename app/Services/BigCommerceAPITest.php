@@ -135,4 +135,28 @@ class BigCommerceAPITest extends TestCase {
         $this->assertSame('tax/rates?tax_zone_id%3Ain=3', $api->requests[0]['endpoint']);
         $this->assertSame(21.00, $rates[0]['class_rates'][0]['rate']);
     }
+
+    public function testReadOnlyModeBlocksWriteBeforeNetworkCall(): void {
+        $previousEnv = $_ENV['BIGCOMMERCE_READ_ONLY'] ?? null;
+        $_ENV['BIGCOMMERCE_READ_ONLY'] = 'true';
+        putenv('BIGCOMMERCE_READ_ONLY=true');
+
+        $reflection = new ReflectionClass(BigCommerceAPI::class);
+        $api = $reflection->newInstanceWithoutConstructor();
+
+        try {
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('BIGCOMMERCE_READ_ONLY blocked PUT catalog/products/123');
+
+            $api->call('PUT', 'catalog/products/123', ['sale_price' => 1.23]);
+        } finally {
+            if ($previousEnv === null) {
+                unset($_ENV['BIGCOMMERCE_READ_ONLY']);
+                putenv('BIGCOMMERCE_READ_ONLY');
+            } else {
+                $_ENV['BIGCOMMERCE_READ_ONLY'] = $previousEnv;
+                putenv('BIGCOMMERCE_READ_ONLY=' . $previousEnv);
+            }
+        }
+    }
 }

@@ -52,15 +52,23 @@ class OmnibusSyncService {
         $processedCount = 0;
         $errorCount = 0;
 
-        for ($offset = 0; $offset < $totalParentProducts; $offset += self::BATCH_SIZE) {
+        $lastProductId = 0;
+        while ($processedCount < $totalParentProducts) {
             $parentProducts = $this->db->fetchAll(
-                "SELECT DISTINCT product_id FROM products_cache WHERE store_hash = ?" . $this->baseProductClause() . " LIMIT ? OFFSET ?",
-                [$this->storeHash, self::BATCH_SIZE, $offset]
+                "SELECT DISTINCT product_id
+                 FROM products_cache
+                 WHERE store_hash = ?" . $this->baseProductClause() . "
+                   AND product_id > ?
+                 ORDER BY product_id ASC
+                 LIMIT ?",
+                [$this->storeHash, $lastProductId, self::BATCH_SIZE]
             );
 
             if (empty($parentProducts)) {
                 break;
             }
+
+            $lastProductId = (int)end($parentProducts)['product_id'];
 
             $result = $this->processBatch($parentProducts);
             $processedCount += $result['success'];

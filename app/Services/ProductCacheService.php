@@ -9,6 +9,8 @@ class ProductCacheService {
     private $storeHash;
     private $taxRatesByClass = null;
     private $taxRatesLoaded = false;
+    private $productCategoryIndexAvailable = null;
+    private $productsCacheHasVariantSortId = null;
     
     // Konstanta za veličinu batch-a. MySQL obično odlično rukuje sa 1000-5000.
     private const DB_BATCH_SIZE = 100;
@@ -25,13 +27,56 @@ class ProductCacheService {
         }
         $this->ensureProductsCacheSchema();
         $this->ensureCustomFieldFilterIndexSchema();
+        $this->ensureProductCategoryIndexSchema();
         $this->ensureCustomFieldFilterIndexData();
+        $this->ensureProductCategoryIndexData();
         $this->api = new BigCommerceAPI();
     }
     
     public function fullSync() {
         $startTime = microtime(true);
         echo "\n=== Starting Full Product Cache Sync for Store: {$this->storeHash} ===\n";
+
+        if (method_exists($this->api, 'eachProductPage')) {
+            $totalProducts = 0;
+            $successCount = 0;
+            $errorCount = 0;
+            $pageCount = 0;
+
+            $this->api->eachProductPage([
+                'include' => 'variants,images,custom_fields'
+            ], function (array $products, array $pagination = []) use (&$totalProducts, &$successCount, &$errorCount, &$pageCount): void {
+                $pageCount++;
+                $totalProducts = max($totalProducts, (int)($pagination['total'] ?? 0));
+                if ($totalProducts <= 0) {
+                    $totalProducts += count($products);
+                }
+
+                foreach (array_chunk($products, self::DB_BATCH_SIZE) as $batch) {
+                    try {
+                        $this->batchCacheProducts($batch);
+                        $successCount += count($batch);
+                        $progress = $totalProducts > 0 ? round(($successCount / $totalProducts) * 100) : 0;
+                        echo "Progress: {$successCount}/{$totalProducts} (Page {$pageCount}, {$progress}%)\n";
+                    } catch (\Exception $e) {
+                        $errorCount += count($batch);
+                        error_log("Error caching product cache page {$pageCount}: " . $e->getMessage());
+                    }
+                }
+            });
+
+            $duration = round(microtime(true) - $startTime, 2);
+
+            echo "\n=== Full Sync Complete ===\n";
+            echo "Success: {$successCount}, Errors: {$errorCount}, Duration: {$duration}s\n\n";
+
+            return [
+                'total' => $totalProducts,
+                'success' => $successCount,
+                'errors' => $errorCount,
+                'duration' => $duration
+            ];
+        }
         
         // IZMENA: Uključujemo varijante, slike i custom polja u API poziv
         $allProducts = $this->api->getProducts([
@@ -291,6 +336,7 @@ class ProductCacheService {
             }
             $this->db->query($sql, $params);
             $this->syncCustomFieldFilterIndex($products);
+            $this->syncProductCategoryIndex($products);
         } catch (\PDOException $e) {
             // Ako dođe do greške prilikom izvršavanja upita, ispisujemo sve detalje.
             header('Content-Type: text/plain; charset=utf-8'); // Osigurava ispravan prikaz
@@ -411,14 +457,37 @@ class ProductCacheService {
     // OSTATAK KODA JE ISTI KAO PRETHODNO
     // --------------------------------------------------------------------------------------------------
 
-    public function getProductsByFilters($filters = [], $limit = null, $offset = 0) {
+    public function getProductsByFilters($filters = [], $limit = null, $offset = 0, array $options = []) {
         $sql = "SELECT pc.* FROM products_cache pc WHERE pc.store_hash = ?";
         $params = [$this->storeHash];
 
         $sql .= $this->buildFilterQuery($filters, $params);
-                
+
+        $sql .= $this->buildSearchFilter((string)($options['search'] ?? ''), $params);
+
+        $cursor = $this->normalizeCursor($options['cursor'] ?? null);
+        if ($cursor !== null) {
+            $sortExpression = $this->variantSortExpression();
+            $sql .= " AND (
+                pc.product_id > ?
+                OR (pc.product_id = ? AND {$sortExpression} > ?)
+                OR (pc.product_id = ? AND {$sortExpression} = ? AND pc.id > ?)
+            )";
+            $params[] = $cursor['product_id'];
+            $params[] = $cursor['product_id'];
+            $params[] = $cursor['variant_sort_id'];
+            $params[] = $cursor['product_id'];
+            $params[] = $cursor['variant_sort_id'];
+            $params[] = $cursor['id'];
+        }
+
+        $sql .= " ORDER BY pc.product_id ASC, " . $this->variantSortExpression() . " ASC, pc.id ASC";
+
         if ($limit !== null) {
-            $sql .= " LIMIT " . (int)$limit . " OFFSET " . (int)$offset;
+            $sql .= " LIMIT " . (int)$limit;
+            if ($offset > 0 && $cursor === null) {
+                $sql .= " OFFSET " . (int)$offset;
+            }
         }
         
         $this->logResponse($sql, $params);
@@ -457,6 +526,31 @@ class ProductCacheService {
             )['last']
         ];
     }
+
+    public function getFilterStats($filters = []): array {
+        $forceIndex = empty($filters) ? " FORCE INDEX (idx_store_filter_stats)" : "";
+        $sql = "SELECT COUNT(*) AS total_products,
+                       COALESCE(SUM(pc.inventory_level), 0) AS total_inventory,
+                       COALESCE(SUM(pc.price), 0) AS total_value,
+                       COALESCE(AVG(pc.price), 0) AS average_price,
+                       SUM(CASE WHEN pc.is_visible = 1 THEN 1 ELSE 0 END) AS visible_products,
+                       SUM(CASE WHEN pc.is_featured = 1 THEN 1 ELSE 0 END) AS featured_products
+                FROM products_cache pc{$forceIndex}
+                WHERE pc.store_hash = ?";
+        $params = [$this->storeHash];
+        $sql .= $this->buildFilterQuery($filters, $params);
+
+        $row = $this->db->fetchOne($sql, $params) ?: [];
+
+        return [
+            'total_products' => (int)($row['total_products'] ?? 0),
+            'total_inventory' => (int)($row['total_inventory'] ?? 0),
+            'total_value' => round((float)($row['total_value'] ?? 0), 2),
+            'average_price' => round((float)($row['average_price'] ?? 0), 2),
+            'visible_products' => (int)($row['visible_products'] ?? 0),
+            'featured_products' => (int)($row['featured_products'] ?? 0),
+        ];
+    }
     
     public function syncModifiedProducts() {
         $yesterday = date('Y-m-d H:i:s', strtotime('-24 hours'));
@@ -475,6 +569,9 @@ class ProductCacheService {
     public function clearCache() {
         $this->db->query("DELETE FROM products_cache WHERE store_hash = ?", [$this->storeHash]);
         $this->db->query("DELETE FROM product_custom_field_index WHERE store_hash = ?", [$this->storeHash]);
+        if ($this->productCategoryIndexAvailable()) {
+            $this->db->query("DELETE FROM product_category_index WHERE store_hash = ?", [$this->storeHash]);
+        }
         return true;
     }
 
@@ -620,6 +717,265 @@ class ProductCacheService {
         }
     }
 
+    private function ensureProductCategoryIndexSchema(): void {
+        try {
+            $this->db->query(
+                "CREATE TABLE IF NOT EXISTS product_category_index (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    store_hash VARCHAR(255) NOT NULL,
+                    cache_row_id VARCHAR(255) NOT NULL,
+                    product_id INT UNSIGNED NOT NULL,
+                    category_id INT UNSIGNED NOT NULL,
+                    UNIQUE KEY uniq_store_cache_category (store_hash, cache_row_id, category_id),
+                    INDEX idx_store_category_cache (store_hash, category_id, cache_row_id),
+                    INDEX idx_store_product (store_hash, product_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+            );
+            $this->productCategoryIndexAvailable = true;
+        } catch (\Throwable $e) {
+            $this->productCategoryIndexAvailable = false;
+        }
+    }
+
+    private function ensureProductCategoryIndexData(): void {
+        if (!$this->productCategoryIndexAvailable()) {
+            return;
+        }
+
+        $existingIndexRow = $this->db->fetchOne(
+            "SELECT id
+             FROM product_category_index
+             WHERE store_hash = ?
+             LIMIT 1",
+            [$this->storeHash]
+        );
+        if ($existingIndexRow) {
+            return;
+        }
+
+        $existingCacheRow = $this->db->fetchOne(
+            "SELECT id
+             FROM products_cache
+             WHERE store_hash = ?
+               AND categories IS NOT NULL
+             LIMIT 1",
+            [$this->storeHash]
+        );
+        if (!$existingCacheRow) {
+            return;
+        }
+
+        $lastId = '';
+        do {
+            $rows = $this->db->fetchAll(
+                "SELECT id, product_id, categories
+                 FROM products_cache
+                 WHERE store_hash = ?
+                   AND id > ?
+                   AND categories IS NOT NULL
+                 ORDER BY id ASC
+                 LIMIT " . self::CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE,
+                [$this->storeHash, $lastId]
+            );
+
+            if (empty($rows)) {
+                break;
+            }
+
+            $this->insertProductCategoryIndexRows($rows);
+            $lastId = (string)end($rows)['id'];
+        } while (count($rows) === self::CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE);
+    }
+
+    private function productCategoryIndexAvailable(): bool {
+        if ($this->productCategoryIndexAvailable !== null) {
+            return (bool)$this->productCategoryIndexAvailable;
+        }
+
+        try {
+            $row = $this->db->fetchOne("SHOW TABLES LIKE 'product_category_index'");
+            $this->productCategoryIndexAvailable = !empty($row);
+        } catch (\Throwable $e) {
+            $this->productCategoryIndexAvailable = false;
+        }
+
+        return (bool)$this->productCategoryIndexAvailable;
+    }
+
+    private function syncProductCategoryIndex(array $products): void {
+        if (empty($products) || !$this->productCategoryIndexAvailable()) {
+            return;
+        }
+
+        $cacheIds = [];
+        $rows = [];
+
+        foreach ($products as $product) {
+            $productId = (int)($product['id'] ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $categoryIds = $this->normalizeCategoryIds($product['categories'] ?? []);
+            $parentCacheId = $this->generateCompositeId($productId, null);
+            $cacheIds[$parentCacheId] = $parentCacheId;
+            foreach ($categoryIds as $categoryId) {
+                $rows[] = [$parentCacheId, $productId, $categoryId];
+            }
+
+            $variants = $product['variants'] ?? [];
+            $isSimpleProduct = is_array($variants)
+                && count($variants) === 1
+                && empty($variants[0]['option_values']);
+            if (!is_array($variants) || $isSimpleProduct) {
+                continue;
+            }
+
+            foreach ($variants as $variant) {
+                $variantId = (int)($variant['id'] ?? 0);
+                if ($variantId <= 0) {
+                    continue;
+                }
+
+                $cacheId = $this->generateCompositeId($productId, $variantId);
+                $cacheIds[$cacheId] = $cacheId;
+                foreach ($categoryIds as $categoryId) {
+                    $rows[] = [$cacheId, $productId, $categoryId];
+                }
+            }
+        }
+
+        if (!empty($cacheIds)) {
+            $placeholders = implode(',', array_fill(0, count($cacheIds), '?'));
+            $this->db->query(
+                "DELETE FROM product_category_index
+                 WHERE store_hash = ? AND cache_row_id IN ($placeholders)",
+                array_merge([$this->storeHash], array_values($cacheIds))
+            );
+        }
+
+        if (empty($rows)) {
+            return;
+        }
+
+        $this->insertProductCategoryIndexRows(array_map(static function (array $row): array {
+            return [
+                'id' => $row[0],
+                'product_id' => $row[1],
+                'categories' => [$row[2]],
+            ];
+        }, $rows));
+    }
+
+    private function insertProductCategoryIndexRows(array $sourceRows): void {
+        $placeholders = [];
+        $params = [];
+        foreach ($sourceRows as $sourceRow) {
+            $cacheId = (string)($sourceRow['id'] ?? '');
+            $productId = (int)($sourceRow['product_id'] ?? 0);
+            if ($cacheId === '' || $productId <= 0) {
+                continue;
+            }
+
+            foreach ($this->normalizeCategoryIds($sourceRow['categories'] ?? []) as $categoryId) {
+                $placeholders[] = '(?, ?, ?, ?)';
+                $params[] = $this->storeHash;
+                $params[] = $cacheId;
+                $params[] = $productId;
+                $params[] = $categoryId;
+            }
+        }
+
+        if (empty($placeholders)) {
+            return;
+        }
+
+        $this->db->query(
+            "INSERT INTO product_category_index (store_hash, cache_row_id, product_id, category_id)
+             VALUES " . implode(', ', $placeholders) . "
+             ON DUPLICATE KEY UPDATE product_id = VALUES(product_id)",
+            $params
+        );
+    }
+
+    private function normalizeCategoryIds($categories): array {
+        if (is_string($categories)) {
+            $decoded = json_decode($categories, true);
+            $categories = is_array($decoded) ? $decoded : [];
+        }
+
+        if (!is_array($categories)) {
+            return [];
+        }
+
+        $ids = [];
+        foreach ($categories as $categoryId) {
+            if (!is_numeric($categoryId)) {
+                continue;
+            }
+
+            $categoryId = (int)$categoryId;
+            if ($categoryId > 0) {
+                $ids[$categoryId] = $categoryId;
+            }
+        }
+
+        return array_values($ids);
+    }
+
+    private function buildSearchFilter(string $search, array &$params): string {
+        $search = trim($this->normalizeEscapedUnicodeString($search));
+        if ($search === '') {
+            return '';
+        }
+
+        $params[] = '%' . $search . '%';
+        $params[] = '%' . $search . '%';
+
+        return " AND (pc.name LIKE ? OR pc.sku LIKE ?)";
+    }
+
+    private function normalizeCursor($cursor): ?array {
+        if (!is_array($cursor)) {
+            return null;
+        }
+
+        $productId = (int)($cursor['product_id'] ?? 0);
+        $variantSortId = (int)($cursor['variant_sort_id'] ?? 0);
+        $id = trim((string)($cursor['id'] ?? ''));
+
+        if ($productId <= 0 || $id === '') {
+            return null;
+        }
+
+        return [
+            'product_id' => $productId,
+            'variant_sort_id' => max(0, $variantSortId),
+            'id' => $id,
+        ];
+    }
+
+    private function variantSortExpression(): string {
+        return $this->productsCacheHasVariantSortId()
+            ? 'pc.variant_sort_id'
+            : 'COALESCE(pc.variant_id, 0)';
+    }
+
+    private function productsCacheHasVariantSortId(): bool {
+        if ($this->productsCacheHasVariantSortId !== null) {
+            return (bool)$this->productsCacheHasVariantSortId;
+        }
+
+        try {
+            $column = $this->db->fetchOne("SHOW COLUMNS FROM products_cache LIKE 'variant_sort_id'");
+            $this->productsCacheHasVariantSortId = !empty($column);
+        } catch (\Throwable $e) {
+            $this->productsCacheHasVariantSortId = false;
+        }
+
+        return (bool)$this->productsCacheHasVariantSortId;
+    }
+
     private function getEffectivePrice($price, $salePrice): ?float {
         $basePrice = is_numeric($price) ? (float)$price : null;
         $discountedPrice = is_numeric($salePrice) ? (float)$salePrice : null;
@@ -733,11 +1089,12 @@ class ProductCacheService {
         return (int)$variantId;
     }
 
-    public function countProductsByFilters($filters = []) {
+    public function countProductsByFilters($filters = [], array $options = []) {
         $sql = "SELECT COUNT(*) as total FROM products_cache pc WHERE pc.store_hash = ?";
         $params = [$this->storeHash];
         
         $sql .= $this->buildFilterQuery($filters, $params);
+        $sql .= $this->buildSearchFilter((string)($options['search'] ?? ''), $params);
 
         $result = $this->db->fetchOne($sql, $params);
         return (int)$result['total'];
@@ -816,6 +1173,29 @@ class ProductCacheService {
                 case 'categories:in':
                     // Očekujemo niz ID-eva ili string odvojen zarezima
                     $categoryIds = is_array($value) ? $value : explode(',', $value);
+                    $categoryIds = array_values(array_filter(array_map(static function ($catId): int {
+                        return (int)trim((string)$catId);
+                    }, $categoryIds), static fn(int $catId): bool => $catId > 0));
+
+                    if (empty($categoryIds)) {
+                        break;
+                    }
+
+                    if ($this->productCategoryIndexAvailable()) {
+                        $placeholders = implode(',', array_fill(0, count($categoryIds), '?'));
+                        $sql .= " AND EXISTS (
+                            SELECT 1
+                            FROM product_category_index pci
+                            WHERE pci.store_hash = ?
+                              AND pci.cache_row_id = pc.id
+                              AND pci.category_id IN ($placeholders)
+                        )";
+                        $params[] = $this->storeHash;
+                        foreach ($categoryIds as $catId) {
+                            $params[] = $catId;
+                        }
+                        break;
+                    }
                     $categoryConditions = [];
                     
                     foreach ($categoryIds as $catId) {
@@ -1644,7 +2024,7 @@ class ProductCacheService {
             [$this->storeHash]
         );
 
-        $offset = 0;
+        $lastProductId = 0;
 
         do {
             $rows = $this->db->fetchAll(
@@ -1652,9 +2032,10 @@ class ProductCacheService {
                  FROM products_cache
                  WHERE store_hash = ?
                    AND variant_id IS NULL
+                   AND product_id > ?
                  ORDER BY product_id ASC
-                 LIMIT " . self::CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE . " OFFSET " . (int)$offset,
-                [$this->storeHash]
+                 LIMIT " . self::CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE,
+                [$this->storeHash, $lastProductId]
             );
 
             if (empty($rows)) {
@@ -1670,7 +2051,7 @@ class ProductCacheService {
             }
 
             $this->insertCustomFieldIndexRows($indexRows);
-            $offset += self::CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE;
+            $lastProductId = (int)end($rows)['product_id'];
         } while (count($rows) === self::CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE);
     }
 

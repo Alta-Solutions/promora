@@ -26,86 +26,36 @@ class DashboardController {
     }
     
     private function getStats() {
+        $promotionStats = $this->db->fetchOne(
+            "SELECT COUNT(*) AS total_promotions,
+                    SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_promotions
+             FROM promotions
+             WHERE store_hash = ?",
+            [$this->storeHash]
+        );
+        $productStats = $this->db->fetchOne(
+            "SELECT COUNT(DISTINCT product_id) AS total_products
+             FROM promotion_products
+             WHERE store_hash = ?",
+            [$this->storeHash]
+        );
+        $syncStats = $this->getSyncSummary();
+
         return [
-            'total_promotions' => $this->db->fetchOne(
-                "SELECT COUNT(*) as cnt FROM promotions WHERE store_hash = ?", 
-                [$this->storeHash]
-            )['cnt'],
-            
-            'active_promotions' => $this->db->fetchOne(
-                "SELECT COUNT(*) as cnt FROM promotions WHERE status = 'active' AND store_hash = ?", 
-                [$this->storeHash]
-            )['cnt'],
-            
-            'total_products' => $this->db->fetchOne(
-                "SELECT COUNT(DISTINCT product_id) as cnt FROM promotion_products WHERE store_hash = ?", 
-                [$this->storeHash]
-            )['cnt'],
-            
-            'last_sync' => $this->db->fetchOne(
-                "SELECT MAX(synced_at) as last_sync FROM sync_log WHERE store_hash = ?", 
-                [$this->storeHash]
-            )['last_sync']
+            'total_promotions' => (int)($promotionStats['total_promotions'] ?? 0),
+            'active_promotions' => (int)($promotionStats['active_promotions'] ?? 0),
+            'total_products' => (int)($productStats['total_products'] ?? 0),
+            'last_sync' => $syncStats['last_sync'] ?? null,
         ];
     }
     
     private function getPromotionAttention(): array {
+        $attentionSummary = $this->getPromotionAttentionSummary();
+
         return [
-            'summary' => [
-                'expires_today' => $this->countPromotions(
-                    "status = 'active'
-                     AND start_date <= NOW()
-                     AND end_date >= NOW()
-                     AND DATE(end_date) = CURDATE()"
-                ),
-                'expires_soon' => $this->countPromotions(
-                    "status = 'active'
-                     AND start_date <= NOW()
-                     AND end_date > NOW()
-                     AND DATE(end_date) > CURDATE()
-                     AND end_date <= DATE_ADD(NOW(), INTERVAL 7 DAY)"
-                ),
-                'starts_soon' => $this->countPromotions(
-                    "status = 'scheduled'
-                     AND start_date > NOW()
-                     AND start_date <= DATE_ADD(NOW(), INTERVAL 7 DAY)"
-                ),
-                'never_synced' => $this->countNeverSyncedActivePromotions(),
-            ],
+            'summary' => $attentionSummary,
             'items' => $this->getPromotionAttentionItems(),
         ];
-    }
-
-    private function countPromotions(string $whereSql): int {
-        $row = $this->db->fetchOne(
-            "SELECT COUNT(*) AS cnt FROM promotions WHERE store_hash = ? AND {$whereSql}",
-            [$this->storeHash]
-        );
-
-        return (int)($row['cnt'] ?? 0);
-    }
-
-    private function countNeverSyncedActivePromotions(): int {
-        $row = $this->db->fetchOne(
-            "SELECT COUNT(*) AS cnt
-             FROM promotions p
-             LEFT JOIN (
-                SELECT store_hash, promotion_id, MAX(synced_at) AS last_sync
-                FROM sync_log
-                WHERE store_hash = ?
-                GROUP BY store_hash, promotion_id
-             ) sl
-                ON sl.store_hash = p.store_hash
-               AND sl.promotion_id = p.id
-             WHERE p.store_hash = ?
-               AND p.status = 'active'
-               AND p.start_date <= NOW()
-               AND p.end_date >= NOW()
-               AND sl.last_sync IS NULL",
-            [$this->storeHash, $this->storeHash]
-        );
-
-        return (int)($row['cnt'] ?? 0);
     }
 
     private function getPromotionAttentionItems(): array {
@@ -174,6 +124,67 @@ class DashboardController {
              LIMIT 6",
             [$this->storeHash, $this->storeHash]
         );
+    }
+
+    private function getSyncSummary(): array {
+        $row = $this->db->fetchOne(
+            "SELECT MAX(synced_at) AS last_sync
+             FROM sync_log
+             WHERE store_hash = ?",
+            [$this->storeHash]
+        );
+
+        return $row ?: ['last_sync' => null];
+    }
+
+    private function getPromotionAttentionSummary(): array {
+        $row = $this->db->fetchOne(
+            "SELECT
+                SUM(CASE
+                    WHEN p.status = 'active'
+                     AND p.start_date <= NOW()
+                     AND p.end_date >= NOW()
+                     AND DATE(p.end_date) = CURDATE()
+                        THEN 1 ELSE 0 END
+                ) AS expires_today,
+                SUM(CASE
+                    WHEN p.status = 'active'
+                     AND p.start_date <= NOW()
+                     AND p.end_date > NOW()
+                     AND DATE(p.end_date) > CURDATE()
+                     AND p.end_date <= DATE_ADD(NOW(), INTERVAL 7 DAY)
+                        THEN 1 ELSE 0 END
+                ) AS expires_soon,
+                SUM(CASE
+                    WHEN p.status = 'scheduled'
+                     AND p.start_date > NOW()
+                     AND p.start_date <= DATE_ADD(NOW(), INTERVAL 7 DAY)
+                        THEN 1 ELSE 0 END
+                ) AS starts_soon,
+                SUM(CASE
+                    WHEN p.status = 'active'
+                     AND p.start_date <= NOW()
+                     AND p.end_date >= NOW()
+                     AND sl.last_sync IS NULL
+                        THEN 1 ELSE 0 END
+                ) AS never_synced
+             FROM promotions p
+             LEFT JOIN (
+                SELECT promotion_id, MAX(synced_at) AS last_sync
+                FROM sync_log
+                WHERE store_hash = ?
+                GROUP BY promotion_id
+             ) sl ON sl.promotion_id = p.id
+             WHERE p.store_hash = ?",
+            [$this->storeHash, $this->storeHash]
+        );
+
+        return [
+            'expires_today' => (int)($row['expires_today'] ?? 0),
+            'expires_soon' => (int)($row['expires_soon'] ?? 0),
+            'starts_soon' => (int)($row['starts_soon'] ?? 0),
+            'never_synced' => (int)($row['never_synced'] ?? 0),
+        ];
     }
 
     private function renderView($stats, $promotionAttention) {
