@@ -74,9 +74,6 @@ class OmnibusSyncSchedulerService {
             [
                 'source' => 'scheduler_incremental',
                 'day_start' => $dayStart,
-                'cache_dirty_count' => $dirty['cache_dirty_count'],
-                'history_dirty_count' => $dirty['history_dirty_count'],
-                'ignored_history_dirty_count' => $dirty['ignored_history_dirty_count'],
                 'total_dirty_count' => count($dirty['product_ids']),
             ]
         );
@@ -90,48 +87,11 @@ class OmnibusSyncSchedulerService {
     }
 
     public function collectDirtyProductIds(string $storeHash, string $dayStart): array {
-        $cacheProductIds = $this->fetchProductIds(
-            "SELECT DISTINCT product_id
-             FROM products_cache
-             WHERE store_hash = ?
-               AND cached_at >= ?
-               AND product_id IS NOT NULL",
-            [$storeHash, $dayStart]
+        $ids = $this->fetchProductIds(
+            'SELECT product_id FROM omnibus_changes WHERE store_hash=? AND version > acknowledged ORDER BY last_failure_at,product_id LIMIT 1000',
+            [$storeHash]
         );
-
-        $historyProductIds = $this->fetchProductIds(
-            "SELECT DISTINCT product_id
-             FROM product_price_history
-             WHERE store_hash = ?
-               AND recorded_at >= ?
-               AND product_id IS NOT NULL",
-            [$storeHash, $dayStart]
-        );
-
-        $ignoredHistoryProductIds = [];
-        if ($this->tableHasColumn('product_price_history', 'ignored_at')) {
-            $ignoredHistoryProductIds = $this->fetchProductIds(
-                "SELECT DISTINCT product_id
-                 FROM product_price_history
-                 WHERE store_hash = ?
-                   AND ignored_at >= ?
-                   AND product_id IS NOT NULL",
-                [$storeHash, $dayStart]
-            );
-        }
-
-        $productIds = $this->normalizeProductIds(array_merge(
-            $cacheProductIds,
-            $historyProductIds,
-            $ignoredHistoryProductIds
-        ));
-
-        return [
-            'product_ids' => $productIds,
-            'cache_dirty_count' => count($cacheProductIds),
-            'history_dirty_count' => count($historyProductIds),
-            'ignored_history_dirty_count' => count($ignoredHistoryProductIds),
-        ];
+        return ['product_ids' => $ids];
     }
 
     private function shouldScheduleFullSync(string $storeHash, DateTimeImmutable $now, string $dayStart): bool {

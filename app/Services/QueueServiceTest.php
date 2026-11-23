@@ -163,6 +163,7 @@ class QueueServiceTest extends TestCase {
                     'sql' => preg_replace('/\s+/', ' ', trim($sql)),
                     'params' => $params,
                 ];
+                return new class { public function rowCount() { return 1; } };
             }
         };
 
@@ -271,9 +272,10 @@ class QueueServiceTest extends TestCase {
         $this->assertSame([], $db->queries);
     }
 
-    public function testCreateTargetedOmnibusSyncJobSkipsWhenProcessingFullOmnibusExists(): void {
+    public function testCreateTargetedOmnibusSyncJobPersistsWhenProcessingFullOmnibusExists(): void {
         $db = new class {
             public $queries = [];
+            public function lastInsertId() { return 46; }
 
             public function fetchOne($sql, $params = []) {
                 $normalizedSql = preg_replace('/\s+/', ' ', trim($sql));
@@ -308,10 +310,10 @@ class QueueServiceTest extends TestCase {
         $service = $this->createQueueService($db, 'store-a');
         $result = $service->createTargetedOmnibusSyncJob([1, 2]);
 
-        $this->assertFalse($result['created']);
-        $this->assertSame(45, $result['job_id']);
-        $this->assertSame('covered_by_full_sync', $result['reason']);
-        $this->assertSame([], $db->queries);
+        $this->assertTrue($result['created']);
+        $this->assertSame(46, $result['job_id']);
+        $this->assertSame('created', $result['reason']);
+        $this->assertCount(1, $db->queries);
     }
 
     public function testExtractProductIdsFromPayloadNormalizesIds(): void {
@@ -405,6 +407,7 @@ class QueueServiceTest extends TestCase {
                     'sql' => preg_replace('/\s+/', ' ', trim($sql)),
                     'params' => $params,
                 ];
+                return new class { public function rowCount() { return 1; } };
             }
         };
 
@@ -434,32 +437,6 @@ class QueueServiceTest extends TestCase {
         );
     }
 
-    public function testDeferWebhookEventJobRequeuesRemainingEvents(): void {
-        $db = new class {
-            public $queries = [];
-
-            public function query($sql, $params = []) {
-                $this->queries[] = [
-                    'sql' => preg_replace('/\s+/', ' ', trim($sql)),
-                    'params' => $params,
-                ];
-            }
-        };
-
-        $service = $this->createQueueService($db, 'store-a');
-        $service->deferWebhookEventJob(77, 'store-a', [102, '101', 101, 0, 'bad']);
-
-        $this->assertStringContainsString('UPDATE sync_jobs', $db->queries[0]['sql']);
-        $this->assertStringContainsString('next_run_at = NULL', $db->queries[0]['sql']);
-
-        $payload = json_decode($db->queries[0]['params'][0], true);
-        $this->assertSame(101, $payload['webhook_event_id']);
-        $this->assertSame([101, 102], $payload['webhook_event_ids']);
-        $this->assertSame(2, $db->queries[0]['params'][1]);
-        $this->assertSame(77, $db->queries[0]['params'][2]);
-        $this->assertSame('store-a', $db->queries[0]['params'][3]);
-    }
-
     public function testNextPendingJobPrioritizesPromotionWorkBeforeOmnibusWork(): void {
         $db = new class {
             public $sql = null;
@@ -471,7 +448,7 @@ class QueueServiceTest extends TestCase {
         };
 
         $service = $this->createQueueService($db, 'store-a');
-        $service->getNextPendingJob();
+        (new ReflectionMethod($service, 'nextReadyRow'))->invoke($service);
 
         $this->assertStringContainsString("WHEN 'sync_promotion' THEN 10", $db->sql);
         $this->assertStringContainsString("WHEN 'single_sync' THEN 10", $db->sql);

@@ -68,3 +68,18 @@ run with `--dry-run`.
 - Omnibus calculation: `OmnibusPricingService`, `PriceLogger`, and `OmnibusSyncService` tests.
 - View-only JavaScript/CSS changes: PHP syntax checks for the view and manual browser verification when behavior is interactive.
 - DB query changes: add tests where possible and inspect `store_hash` scoping.
+
+## Operational regression tests
+
+Run the full suite with `vendor\bin\phpunit.bat app`. The MariaDB tests require
+a disposable, separately initialized local database whose name begins with
+`promora_test_`, on a dedicated port other than 3306. Use the installer with
+its database credentials explicitly pointed at this fixture. These tests claim
+jobs across the fixture database and exercise schema triggers. All API calls use
+test doubles. Set `PROMORA_TEST_DATABASE` and `PROMORA_TEST_MYSQL_PORT` for the
+test process. Optional credentials are `PROMORA_TEST_USER` and
+`PROMORA_TEST_PASSWORD`. Without the two fixture settings the MariaDB tests skip.
+
+The fixture covers parent ownership, operator decisions, lost-response recovery,
+partial correction finalization, expiring leases on two independent connections,
+retention across stores, interrupted catalog refresh and grouped history parity.

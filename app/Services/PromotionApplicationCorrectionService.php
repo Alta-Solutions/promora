@@ -16,6 +16,7 @@ class PromotionApplicationCorrectionService {
     public function __construct(Database $db = null, PromotionService $promotionService = null) {
         $this->db = $db ?? Database::getInstance();
         $this->ensureSchema();
+        new PriceLogger($this->db);
         $this->promotionService = $promotionService;
     }
 
@@ -118,28 +119,76 @@ class PromotionApplicationCorrectionService {
         }
 
         $this->db->setStoreContext($storeHash);
-        $activeRow = $this->fetchActivePromotionRow($storeHash, $productId, $variantId, $promotionId);
-        if (!$activeRow) {
-            throw new \InvalidArgumentException('Active promotion product row was not found.');
+        $service = $this->getPromotionService();
+        return $service->withProductLock($productId, function () use ($storeHash,$productId,$variantId,$promotionId,$reason,$actorContext,$visibilityConfirmed) {
+            $pending = $this->db->fetchOne("SELECT * FROM promotion_application_corrections
+                WHERE store_hash=? AND product_id=? AND variant_id <=> ? AND promotion_id=? AND status='pending'
+                ORDER BY id DESC LIMIT 1", [$storeHash,$productId,$variantId,$promotionId]);
+            if ($pending) {
+                return $this->finishPending($pending);
+            }
+            $activeRow = $this->fetchActivePromotionRow($storeHash, $productId, $variantId, $promotionId);
+            if (!$activeRow) {
+                throw new \InvalidArgumentException('Active promotion product row was not found.');
+            }
+
+            if ($this->hasAppliedCorrection($storeHash, $productId, $variantId, $promotionId)) {
+                throw new \InvalidArgumentException('This promotion application has already been corrected.');
+            }
+
+            $historyRows = $this->fetchAffectedHistoryRows($storeHash, $activeRow);
+            $historyRowIds = array_map('intval', array_column($historyRows, 'id'));
+            $this->db->beginTransaction();
+            try {
+                $correctionId = $this->insertPendingCorrection(
+                    $storeHash,
+                    $activeRow,
+                    $historyRowIds,
+                    $reason,
+                    $actorContext,
+                    $visibilityConfirmed
+                );
+
+                $this->db->query("INSERT INTO sync_jobs(store_hash,job_type,payload,status,total_items,created_at,next_run_at)
+                    VALUES (?,'resume_correction',?,'pending',1,NOW(),DATE_ADD(NOW(),INTERVAL 1 MINUTE))",
+                    [$storeHash,json_encode(['correction_id'=>$correctionId])]);
+                $this->db->commit();
+            } catch (\Throwable $e) {
+                $this->db->rollback();
+                throw $e;
+            }
+            return $this->finishPending(['id'=>$correctionId,'store_hash'=>$storeHash,'promotion_id'=>$promotionId,
+                'product_id'=>$productId,'variant_id'=>$variantId,'reason'=>$reason,'before_state'=>json_encode($activeRow),
+                'ignored_history_row_ids'=>json_encode($historyRowIds)]);
+        });
+    }
+
+    public function resume(string $store, int $id): void {
+        $row = $this->db->fetchOne('SELECT product_id FROM promotion_application_corrections WHERE store_hash=? AND id=?', [$store,$id]);
+        if (!$row) {
+            throw new \RuntimeException('Correction record missing.');
         }
+        $this->getPromotionService()->withProductLock((int)$row['product_id'], function () use ($store,$id) {
+            $row = $this->db->fetchOne("SELECT * FROM promotion_application_corrections WHERE store_hash=? AND id=? AND status='pending'", [$store,$id]);
+            if ($row) {
+                $this->finishPending($row);
+            }
+        });
+    }
 
-        if ($this->hasAppliedCorrection($storeHash, $productId, $variantId, $promotionId)) {
-            throw new \InvalidArgumentException('This promotion application has already been corrected.');
-        }
-
-        $historyRows = $this->fetchAffectedHistoryRows($storeHash, $activeRow);
-        $historyRowIds = array_map('intval', array_column($historyRows, 'id'));
-        $correctionId = $this->insertPendingCorrection(
-            $storeHash,
-            $activeRow,
-            $historyRowIds,
-            $reason,
-            $actorContext,
-            $visibilityConfirmed
-        );
-
+    private function finishPending(array $row): array {
+        $storeHash = $row['store_hash'];
+        $productId = (int)$row['product_id'];
+        $variantId = $this->normalizeVariantId($row['variant_id']);
+        $promotionId = (int)$row['promotion_id'];
+        $correctionId = (int)$row['id'];
+        $activeRow = json_decode($row['before_state'], true, 512, JSON_THROW_ON_ERROR);
+        $historyRowIds = json_decode($row['ignored_history_row_ids'], true, 512, JSON_THROW_ON_ERROR);
+        $reason = $row['reason'];
+        $journal = json_decode($row['after_state'] ?? 'null', true);
+        $transaction = false;
         try {
-            $promotionResult = $this->getPromotionService()->voidPromotionProductAndReconcile(
+            $promotionResult = $journal['promotion_result'] ?? $this->getPromotionService()->voidPromotionProductAndReconcile(
                 $productId,
                 $variantId,
                 $promotionId,
@@ -147,6 +196,8 @@ class PromotionApplicationCorrectionService {
                 $reason
             );
 
+            $this->db->beginTransaction();
+            $transaction = true;
             $ignoredCount = $this->markHistoryRowsIgnored($storeHash, $historyRowIds, $correctionId, $reason);
             $postCorrectionHistoryLogged = $this->logPostCorrectionPrice($storeHash, $activeRow, $promotionResult);
             $queueResult = $this->queueTargetedOmnibusSync($storeHash, [$productId], $promotionId, $correctionId);
@@ -164,6 +215,7 @@ class PromotionApplicationCorrectionService {
                 $promotionResult['replacement_promotion_id'] ?? null
             );
 
+            $this->db->commit();
             return [
                 'status' => 'applied',
                 'correction_id' => $correctionId,
@@ -173,7 +225,11 @@ class PromotionApplicationCorrectionService {
                 'omnibus_queue' => $queueResult,
             ];
         } catch (\Throwable $e) {
-            $this->markCorrectionFailed($correctionId, $storeHash, $e->getMessage());
+            if ($transaction) {
+                $this->db->rollback();
+            }
+            $this->db->query("UPDATE promotion_application_corrections SET error_message=? WHERE store_hash=? AND id=? AND status='pending'",
+                [get_class($e),$storeHash,$correctionId]);
             throw $e;
         }
     }
@@ -377,7 +433,7 @@ class PromotionApplicationCorrectionService {
         $this->db->query(
             "UPDATE promotion_application_corrections
              SET status = 'applied',
-                 after_state = ?,
+                 after_state = ?, error_message = NULL,
                  replacement_promotion_id = ?,
                  applied_at = NOW()
              WHERE store_hash = ? AND id = ?",
@@ -387,16 +443,6 @@ class PromotionApplicationCorrectionService {
                 $storeHash,
                 $correctionId,
             ]
-        );
-    }
-
-    private function markCorrectionFailed(int $correctionId, string $storeHash, string $errorMessage): void {
-        $this->db->query(
-            "UPDATE promotion_application_corrections
-             SET status = 'failed',
-                 error_message = ?
-             WHERE store_hash = ? AND id = ?",
-            [$errorMessage, $storeHash, $correctionId]
         );
     }
 
@@ -410,20 +456,13 @@ class PromotionApplicationCorrectionService {
             return null;
         }
 
-        try {
-            return (new QueueService($storeHash))->createTargetedOmnibusSyncJob($productIds, [
-                'source' => 'promotion_application_correction',
-                'promotion_id' => $promotionId,
-                'source_job_id' => $correctionId,
-            ]);
-        } catch (\Throwable $e) {
-            return [
-                'created' => false,
-                'job_id' => null,
-                'reason' => 'queue_error',
-                'message' => $e->getMessage(),
-            ];
+        $queued = (new QueueService($storeHash))->createTargetedOmnibusSyncJob($productIds, [
+            'source'=>'promotion_application_correction', 'promotion_id'=>$promotionId, 'source_job_id'=>$correctionId,
+        ]);
+        if (empty($queued['job_id'])) {
+            throw new \RuntimeException('Could not enqueue correction Omnibus work.');
         }
+        return $queued;
     }
 
     private function logPostCorrectionPrice(string $storeHash, array $activeRow, array $promotionResult): bool {
@@ -438,25 +477,16 @@ class PromotionApplicationCorrectionService {
         if (($promotionResult['status'] ?? null) === 'replaced') {
             $price = $this->normalizePrice($promotionResult['replacement']['promo_price'] ?? null);
         } else {
-            $price = $this->normalizePrice($activeRow['price'] ?? null);
+            $price = $this->normalizePrice($promotionResult['restored_sale_price'] ?? $activeRow['price'] ?? null);
         }
 
         if ($price === null || $price <= 0) {
             return false;
         }
 
-        try {
-            return (new PriceLogger($this->db))->logPriceChange(
-                $storeHash,
-                (int)$activeRow['product_id'],
-                $price,
-                $currency,
-                $variantId,
-                new \DateTimeImmutable('now')
-            );
-        } catch (\Throwable $e) {
-            return false;
-        }
+        return (new PriceLogger($this->db))->logPriceChange(
+            $storeHash, (int)$activeRow['product_id'], $price, $currency, $variantId, new \DateTimeImmutable('now')
+        );
     }
 
     private function hasAppliedCorrection(string $storeHash, int $productId, ?int $variantId, int $promotionId): bool {

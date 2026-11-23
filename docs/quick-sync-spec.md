@@ -1,5 +1,8 @@
 # Quick Product Cache Sync Specification
 
+This is the original design proposal. The implementation uses the store column catalog_synced_until, UTC bounds, a ten-minute overlap and a shared refresh lock. See [current behavior and recovery](operations-rollout.md).
+
+
 ## Context
 
 `CacheController::quickSync()` currently exposes `?route=cache&action=quickSync`.

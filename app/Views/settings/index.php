@@ -183,7 +183,7 @@ $cacheStats = $cacheService->getCacheStats();
                 <a href="?route=cache&action=fullSync" class="btn btn-primary" onclick="return confirm(appT('settings.confirm_full_sync'))">
                     <?= trans_e('settings.full_sync') ?>
                 </a>
-                <button onclick="quickSync()" class="btn btn-secondary" style="background: white; color: #374151; border: 1px solid #d1d5db;">
+                <button onclick="refreshProductCatalog(this)" class="btn btn-secondary" style="background: white; color: #374151; border: 1px solid #d1d5db;">
                     <?= trans_e('settings.quick_sync') ?>
                 </button>
                 <button onclick="clearCache()" class="btn btn-danger" style="margin-left: auto;">
@@ -279,16 +279,18 @@ $cacheStats = $cacheService->getCacheStats();
 </div>
 
 <script>
-async function quickSync() {
+async function refreshProductCatalog(btn) {
     if (!confirm(appT('settings.confirm_quick_sync'))) return;
 
-    const btn = event.target;
     const originalText = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = appT('settings.sync_loading');
 
     try {
-        const response = await fetch('?route=cache&action=quickSync');
+        const response = await fetch('?route=cache&action=quickSync', {
+            method: 'POST',
+            body: new URLSearchParams({_csrf_token: <?= json_encode(\App\Support\Csrf::token()) ?>})
+        });
         const result = await response.json();
 
         if (result.success) {

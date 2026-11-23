@@ -35,7 +35,7 @@ class Config {
     public static $CUSTOM_FIELD_NAME;
     public static $SESSION_LIFETIME;
 
-    public static $DEBUG_WEBHOOKS = true;
+    public static $DEBUG_WEBHOOKS = false;
     public static $PHP_CLI_PATH = '/usr/local/bin/ea-php82';
     
     public static function init() {

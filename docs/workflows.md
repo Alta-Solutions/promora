@@ -149,12 +149,12 @@ Manual Omnibus sync creates an `omnibus_sync` job. The worker runs
 Targeted jobs use `omnibus_sync_products` and pass product IDs from the job
 payload to the same service method.
 
-Scheduled Omnibus sync uses `OmnibusSyncSchedulerService`. During the day it
-creates `omnibus_sync_products` only for dirty parent products: rows touched in
-`products_cache` today, products with today's `product_price_history` rows, and
-ignored price-history rows when the `ignored_at` column exists. Once per day,
-at `OMNIBUS_FULL_SYNC_HOUR` or the first scheduler run after it, the scheduler
-creates a full `omnibus_sync` job instead. The default full-sync hour is `2`.
+Scheduled Omnibus sync selects up to 1,000 dirty parent IDs per pass from
+`omnibus_changes`. Price, ownership and history changes advance a store-scoped
+version. The worker acknowledges the observed version after both the canonical
+metafields and the legacy custom field succeed. Changes made during publication
+remain eligible. The daily full scan begins at or after `OMNIBUS_FULL_SYNC_HOUR`
+(default 2).
 
 The service calculates product and variant reference prices, writes the canonical
 `promora.lowest_price_30d` BigCommerce metafields through
@@ -194,3 +194,5 @@ php bin/worker.php
 The worker processes pending jobs until it runs out of jobs or reaches its
 execution time limit. It mutates database state and can call BigCommerce write
 APIs through services.
+
+See [the rollout and maintenance guide](operations-rollout.md) for price decisions, worker recovery, catalog refresh and log retention.

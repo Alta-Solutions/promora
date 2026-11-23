@@ -14,33 +14,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && isset($_GET['health'])) {
 // Prvo čitamo sirovi payload da bismo ga imali za logovanje
 $rawPayload = file_get_contents('php://input');
 
-// NOVO: Debug logovanje ako je omogućeno u konfiguraciji
-if (isset(\Config::$DEBUG_WEBHOOKS) && \Config::$DEBUG_WEBHOOKS === true) {
-    $headers = function_exists('getallheaders') ? json_encode(getallheaders()) : "[]"; // getallheaders() radi na Apache (XAMPP)
-    $logEntry = "--- INCOMING WEBHOOK [" . date('Y-m-d H:i:s') . "] ---\n";
-    $logEntry .= "Headers: " . $headers . "\n";
-    $logEntry .= "Payload: " . $rawPayload . "\n\n";
-    
-    $logFile = __DIR__ . '/../logs/webhook_debug.log';
-    $logDir = dirname($logFile);
-    
-    // Kreiraj 'logs' direktorijum ako ne postoji
-    if (!is_dir($logDir)) {
-        mkdir($logDir, 0775, true);
-    }
-    
-    file_put_contents($logFile, $logEntry, FILE_APPEND);
-}
-
-// POBOLJŠANJE: Uklonjena redundantna provera autentifikacije.
-// WebhookService->processWebhook() već sadrži ovu logiku, čime se izbegava dupliranje koda.
-
 // Dekodiramo sirovi payload koji smo već pročitali
 $payload = json_decode($rawPayload, true);
 
 if (!$payload) {
     // Ako je payload nevalidan, i dalje želimo da ga logujemo u standardni error log
-    error_log("Webhook Error: Invalid or empty JSON payload received. Raw: " . $rawPayload);
+    error_log("Webhook rejected: invalid JSON (" . strlen($rawPayload) . " bytes)");
     http_response_code(400);
     die('Invalid payload');
 }

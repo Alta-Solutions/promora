@@ -117,7 +117,7 @@ class OmnibusFieldService {
         }
 
         if (empty($requests)) {
-            return array_values($results);
+            return array_values(array_map(fn($id, $r) => ['product_id' => $id] + $r, array_keys($results), $results));
         }
 
         $apiResults = $this->api->multiRequest($requests);
@@ -129,7 +129,7 @@ class OmnibusFieldService {
             );
         }
 
-        return array_values($results);
+        return array_values(array_map(fn($id, $r) => ['product_id' => $id] + $r, array_keys($results), $results));
     }
 
     private function extractExistingFieldState($rawFields): array {
@@ -304,53 +304,7 @@ class OmnibusFieldService {
     }
 
     private function syncCachedFieldState(int $productId, ?array $fieldState): void {
-        $storeHash = $this->db->getStoreContext();
-        if (empty($storeHash)) {
-            return;
-        }
-
-        $product = $this->db->fetchOne(
-            "SELECT custom_fields
-             FROM products_cache
-             WHERE store_hash = ? AND product_id = ? AND variant_id IS NULL
-             LIMIT 1",
-            [$storeHash, $productId]
-        );
-
-        if (!$product) {
-            return;
-        }
-
-        $fields = is_string($product['custom_fields'])
-            ? json_decode($product['custom_fields'], true)
-            : $product['custom_fields'];
-
-        if (!is_array($fields)) {
-            $fields = [];
-        }
-
-        $nextFields = [];
-        foreach ($fields as $field) {
-            if (($field['name'] ?? null) === self::FIELD_NAME) {
-                continue;
-            }
-            $nextFields[] = $field;
-        }
-
-        if ($fieldState !== null) {
-            $nextFields[] = [
-                'id' => (int)$fieldState['id'],
-                'name' => self::FIELD_NAME,
-                'value' => (string)($fieldState['value'] ?? ''),
-            ];
-        }
-
-        $this->db->query(
-            "UPDATE products_cache
-             SET custom_fields = ?
-             WHERE store_hash = ? AND product_id = ? AND variant_id IS NULL",
-            [json_encode($nextFields), $storeHash, $productId]
-        );
+        CachedCustomField::save($this->db,$productId,self::FIELD_NAME,$fieldState);
     }
 
     private function formatFieldValue($price): string {

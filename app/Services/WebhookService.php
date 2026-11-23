@@ -53,20 +53,20 @@ class WebhookService {
         }
 
         $this->db->setStoreContext($storeHash);
-        $eventId = $this->createWebhookEvent($storeHash, $metadata['scope'], $metadata['product_id'], $payload);
-
-        if (!$eventId) {
-            $this->fail(500, "Webhook event could not be stored for store: {$storeHash}");
-            return false;
-        }
-
+        $queue = $this->createQueueService($storeHash);
+        $this->db->beginTransaction();
         try {
-            $queue = $this->createQueueService($storeHash);
+            $eventId = $this->createWebhookEvent($storeHash,$metadata['scope'],$metadata['product_id'],$payload);
+            if (!$eventId) {
+                throw new \RuntimeException('Webhook event insert failed');
+            }
             $queue->createWebhookEventJob($eventId);
+            $this->db->commit();
             $this->lastStatusCode = 202;
             return true;
         } catch (\Throwable $e) {
-            $this->fail(500, "Webhook event {$eventId} could not be queued: " . $e->getMessage());
+            $this->db->rollback();
+            $this->fail(500, 'Webhook event could not be queued.');
             return false;
         }
     }
@@ -462,21 +462,21 @@ class WebhookService {
         }
     }
 
-    public function processQueuedWebhookEvent(int $eventId): array {
+    public function processQueuedWebhookEvent(int $eventId, string $expectedStore): array {
         $this->resetLastResult();
 
         $event = $this->db->fetchOne(
             "SELECT *
              FROM webhook_events
-             WHERE id = ?",
-            [$eventId]
+             WHERE id = ? AND store_hash = ?",
+            [$eventId, $expectedStore]
         );
 
         if (!$event) {
             throw new \RuntimeException("Webhook event #{$eventId} not found.");
         }
 
-        if (!empty($event['processed'])) {
+        if (!empty($event['processed']) || !empty($event['terminal_at'])) {
             return [
                 'processed' => 0,
                 'skipped' => true,
@@ -491,7 +491,7 @@ class WebhookService {
             throw new \RuntimeException($this->lastError ?? "Webhook event #{$eventId} has invalid payload.");
         }
 
-        if ((string)$event['store_hash'] !== $metadata['store_hash']) {
+        if ((string)$event['store_hash'] !== $expectedStore || $metadata['store_hash'] !== $expectedStore) {
             throw new \RuntimeException("Webhook event #{$eventId} store hash does not match payload.");
         }
 
@@ -608,6 +608,12 @@ class WebhookService {
             throw new \RuntimeException("Store context not set for product inventory update.");
         }
 
+        if ($variantId === null) {
+            // A parent quantity cannot be assigned to all variants.
+            $this->updateProductCache($productId);
+            return;
+        }
+
         if ($newInventory === null) {
             $endpoint = $variantId
                 ? "catalog/products/{$productId}/variants/{$variantId}"
@@ -622,21 +628,12 @@ class WebhookService {
             $newInventory = $resource['inventory_level'] ?? 0;
         }
 
-        if ($variantId !== null) {
-            $this->db->query(
-                "UPDATE products_cache
-                 SET inventory_level = ?, cached_at = NOW()
-                 WHERE product_id = ? AND variant_id = ? AND store_hash = ?",
-                [(int)$newInventory, $productId, $variantId, $storeHash]
-            );
-        } else {
-            $this->db->query(
-                "UPDATE products_cache
-                 SET inventory_level = ?, cached_at = NOW()
-                 WHERE product_id = ? AND store_hash = ?",
-                [(int)$newInventory, $productId, $storeHash]
-            );
-        }
+        $this->db->query(
+            "UPDATE products_cache
+             SET inventory_level = ?, cached_at = NOW()
+             WHERE product_id = ? AND variant_id = ? AND store_hash = ?",
+            [(int)$newInventory, $productId, $variantId, $storeHash]
+        );
 
         $this->reEvaluatePromotionsForProduct($productId);
     }
@@ -663,7 +660,10 @@ class WebhookService {
 
     protected function reEvaluatePromotionsForProduct($productId) {
         $promotionService = $this->createPromotionService();
-        $promotionService->syncProduct($productId);
+        $result = $promotionService->syncProduct($productId);
+        if (!empty($result['errors'])) {
+            throw new \RuntimeException("Promotion reconciliation failed for product {$productId}.");
+        }
     }
 
     protected function createBigCommerceAPI($storeHash, $accessToken) {
@@ -754,7 +754,7 @@ class WebhookService {
             }
         }
 
-        if ($authHeader !== \Config::$SECRET_CRON_KEY) {
+        if (!is_string($authHeader) || $authHeader === '' || !hash_equals((string)\Config::$SECRET_CRON_KEY,$authHeader)) {
             $this->fail(403, "Webhook validation failed: invalid X-Custom-Auth header.");
             return false;
         }
@@ -1025,8 +1025,8 @@ class WebhookService {
         }
 
         $this->db->query(
-            "UPDATE webhook_events SET processed = TRUE, processed_at = NOW() WHERE id = ?",
-            [$eventId]
+            "UPDATE webhook_events SET processed = TRUE, processed_at = NOW() WHERE id = ? AND store_hash = ?",
+            [$eventId, $this->db->getStoreContext()]
         );
     }
 

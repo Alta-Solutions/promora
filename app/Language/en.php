@@ -1,6 +1,19 @@
 <?php
 
 return [
+    'price_conflicts' => [
+        'title' => 'Price conflicts',
+        'intro' => 'The current sale price is preserved until you choose. Keeping it excludes this item from the promotion. Approval allows the next sync to apply the promotion or restore a known prior price if the observed value still matches.',
+        'empty' => 'No open price conflicts.',
+        'item' => 'Product / variant',
+        'promotion' => 'Promotion',
+        'expected' => 'Expected sale price',
+        'observed' => 'Observed sale price',
+        'decision' => 'Decision',
+        'keep' => 'Keep current price',
+        'apply' => 'Approve sync',
+        'stale' => 'The conflict has changed. Refresh before deciding.',
+    ],
     '_meta' => [
         'name' => 'English',
         'native_name' => 'English',
@@ -74,6 +87,7 @@ return [
         'hash' => 'Hash',
     ],
     'dashboard' => [
+        'status_partial' => 'Completed with errors',
         'title' => 'Dashboard',
         'subtitle' => 'Store overview and active promotion status',
         'stats_total_promotions' => 'Total promotions',

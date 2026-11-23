@@ -43,6 +43,38 @@ class LogsController {
         include __DIR__ . '/../Views/layouts/footer.php';
     }
 
+    public function conflicts() {
+        $db = Database::getInstance();
+        $store = $db->getStoreContext();
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            $actor = (string)($_SESSION['user_id'] ?? $_SESSION['username'] ?? '');
+            if (!\App\Support\Csrf::validateRequest() || $actor === '') {
+                http_response_code(403);
+                return;
+            }
+            $decision = $_POST['decision'] ?? '';
+            if (!in_array($decision, ['keep', 'apply'], true)) {
+                http_response_code(400);
+                return;
+            }
+            $changed = (new \App\Services\PromotionService($db))->decidePriceConflict(
+                (int)($_POST['id'] ?? 0), (int)($_POST['revision'] ?? 0), $decision, $actor
+            );
+            if (!$changed) {
+                http_response_code(409);
+                echo \trans_e('price_conflicts.stale');
+                return;
+            }
+            header('Location: ?route=logs&action=conflicts', true, 303);
+            return;
+        }
+        $rows = $db->fetchAll("SELECT * FROM price_conflicts WHERE store_hash=? AND decision='open'
+            ORDER BY id LIMIT 100", [$store]);
+        include __DIR__ . '/../Views/layouts/header.php';
+        include __DIR__ . '/../Views/logs/conflicts.php';
+        include __DIR__ . '/../Views/layouts/footer.php';
+    }
+
     public function corrections() {
         $db = Database::getInstance();
         $storeHash = $db->getStoreContext();
@@ -180,24 +212,8 @@ class LogsController {
     }
 
     private function getWebhookEventsTimestampColumn(Database $db): array {
-        if ($this->tableHasColumn($db, 'webhook_events', 'created_at')) {
-            return [
-                'select' => 'created_at',
-                'order' => 'created_at',
-            ];
-        }
-
-        if ($this->tableHasColumn($db, 'webhook_events', 'received_at')) {
-            return [
-                'select' => 'received_at',
-                'order' => 'received_at',
-            ];
-        }
-
-        return [
-            'select' => 'NULL',
-            'order' => 'id',
-        ];
+        $column = \App\Services\OperationalRetention::webhookTimeColumn($db);
+        return ['select' => $column, 'order' => $column];
     }
 
     private function tableHasColumn(Database $db, string $tableName, string $columnName): bool {

@@ -84,6 +84,10 @@ class PromotionApplicationCorrectionServiceTest extends TestCase {
                 };
             }
 
+            public function beginTransaction() {}
+            public function commit() {}
+            public function rollback() {}
+
             public function lastInsertId() {
                 return $this->lastId;
             }

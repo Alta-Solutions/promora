@@ -6,6 +6,7 @@ use App\Support\StoreSettings;
 
 class CustomFieldService {
     private $api;
+    private $db;
     private $fieldName;
     
     public function __construct($api, Database $db = null) {
@@ -13,6 +14,7 @@ class CustomFieldService {
         $this->fieldName = \Config::$CUSTOM_FIELD_NAME;
 
         $db = $db ?? Database::getInstance();
+        $this->db = $db;
         $storeHash = $db->getStoreContext();
 
         if ($storeHash) {
@@ -149,16 +151,29 @@ class CustomFieldService {
                 $results[$productId]['success'] = $success;
                 $results[$productId]['message'] = $success ? 'Updated/Created successfully' : 'Update/Create failed';
                 
-                if ($success && $data && isset($data['id'])) {
-                     $results[$productId]['custom_field_id'] = $data['id'];
-                } else if (!$success) {
-                    // Ignorišemo 422 grešku ako polje već postoji (BigCommerce vraća grešku umesto da ignoriše duplikat)
-                    $errorTitle = $response['body']['title'] ?? '';
-                    if ($status === 422 && strpos($errorTitle, 'already exists') !== false) {
-                        $results[$productId]['success'] = true;
-                        $results[$productId]['message'] = 'Field already exists (422 handled as success)';
-                    } else {
-                        $this->logError("Batch upsert failed for {$productId}", ["response" => $response]);
+                $id = (int)($data['id'] ?? $results[$productId]['custom_field_id'] ?? $knownFieldIds[$productId] ?? 0);
+                if ($success && $id > 0) {
+                    $results[$productId]['custom_field_id'] = $id;
+                    CachedCustomField::save($this->db,$productId,$this->fieldName,
+                        ['id'=>$id,'value'=>(string)$productMap[$productId]['field_value']]);
+                } else {
+                    $results[$productId]['success'] = false;
+                    if ($status === 404 || $status === 422) {
+                        // Refresh an obsolete cached ID before the next reconciliation.
+                        $live = $this->api->call('GET',"catalog/products/$productId/custom-fields");
+                        $fields = $live['body']['data'] ?? null;
+                        if (is_array($fields)) {
+                            $match = null;
+                            foreach ($fields as $field) {
+                                if (($field['name'] ?? '') === $this->fieldName) {
+                                    $match = $field;
+                                    break;
+                                }
+                            }
+                            CachedCustomField::save($this->db,$productId,$this->fieldName,$match);
+                            $results[$productId]['custom_field_id'] = $match['id'] ?? null;
+                            $results[$productId]['success'] = $match && (string)$match['value'] === (string)$productMap[$productId]['field_value'];
+                        }
                     }
                 }
             }
@@ -253,11 +268,14 @@ class CustomFieldService {
             foreach ($deleteResponses as $i => $response) {
                 $status = $response['status'];
                 // BigCommerce DELETE vraća 204 No Content za uspeh
-                $success = $status === 204; 
+                $success = $status === 204 || $status === 404;
                 $productId = $deleteRequests[$i]['product_id'];
 
                 $results[$productId]['success'] = $success;
                 $results[$productId]['message'] = $success ? 'Deleted successfully' : 'Delete failed';
+                if ($success) {
+                    CachedCustomField::save($this->db,$productId,$this->fieldName,null);
+                }
                 
                 if (!$success) {
                     $this->logError("Batch delete failed for {$productId}", ["response" => $response]);
@@ -427,10 +445,9 @@ class CustomFieldService {
      */
     private function logError($message, $data = []) {
 
-        $logFile = __DIR__ . '/../logs/custom_fields.log';
-
-        $entry = date('Y-m-d H:i:s') . " - {$message} - " . json_encode($data) . "\n";
-
-        error_log($entry, 3, $logFile);
+        \App\Support\OperationalLog::write('error', [
+            'operation' => $message, 'product_id' => $data['product_id'] ?? null,
+            'status' => $data['response']['status'] ?? null,
+        ]);
     }
 }

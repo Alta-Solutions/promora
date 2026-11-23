@@ -57,6 +57,9 @@
                             <div style="font-size: 0.7rem; color: #10b981; margin-top: 2px;">
                                 <?= $log['processed_at'] ? date('H:i:s', strtotime($log['processed_at'])) : '' ?>
                             </div>
+                        <?php elseif (!empty($log['terminal_at'])): ?>
+                            <span class="badge badge-warning"><?= trans_e('common.error') ?></span>
+                            <?= htmlspecialchars($log['terminal_at']) ?>
                         <?php else: ?>
                             <span class="badge badge-warning"><?= trans_e('logs.pending') ?></span>
                         <?php endif; ?>

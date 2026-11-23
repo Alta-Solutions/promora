@@ -4,6 +4,21 @@ namespace App\Services;
 use App\Models\Database;
 
 class BigCommerceAPI {
+    private static ?\Closure $leaseHeartbeat = null;
+    private static int $renewAfter = 0;
+
+    public static function setLeaseHeartbeat(?\Closure $heartbeat): void {
+        self::$leaseHeartbeat = $heartbeat;
+        self::$renewAfter = 0;
+    }
+
+    private function checkLease(): void {
+        if (self::$leaseHeartbeat && time() >= self::$renewAfter) {
+            (self::$leaseHeartbeat)();
+            self::$renewAfter = time() + 30;
+        }
+    }
+
     private $baseUrl;
     private $headers;
     private $requestCount = 0;
@@ -29,7 +44,7 @@ class BigCommerceAPI {
         $this->storeHash = $storeHash ?? $db->getStoreContext();
         
         // 2. Pokušaj da nađeš token (Prioritet: Argument > Sesija > Config)
-        $accessToken = $accessToken ?? $_SESSION['access_token'] ?? (\Config::$BC_ACCESS_TOKEN ?? null);
+        $accessToken ??= ($_SESSION['store_hash'] ?? null) === $this->storeHash ? ($_SESSION['access_token'] ?? null) : null;
         
         // --- NOVO: Fallback na bazu podataka (Za Worker/CLI) ---
         // Ako nemamo token, ali znamo za koju je prodavnicu, vadimo ga iz baze
@@ -49,6 +64,9 @@ class BigCommerceAPI {
         // -------------------------------------------------------
 
         // Provera da li su parametri postavljeni
+        if (!$accessToken && (\Config::$BC_STORE_HASH ?? null) === $this->storeHash) {
+            $accessToken = \Config::$BC_ACCESS_TOKEN ?? null;
+        }
         if (!$this->storeHash || !$accessToken) {
             throw new \Exception("BigCommerceAPI Error: Store hash or access token missing. \nContext: " . 
                 ($this->storeHash ? "StoreHash: {$this->storeHash}" : "No StoreHash") . 
@@ -102,13 +120,6 @@ class BigCommerceAPI {
             $sleepTimeMs += 100; 
 
             // Logujemo pauzu (korisno za debug worker-a)
-            if (php_sapi_name() === 'cli') {
-                echo "⏳ Rate limit hit! Waiting " . round($sleepTimeMs/1000, 2) . "s... \n";
-            } else {
-                error_log("Rate limit hit. Sleeping {$sleepTimeMs}ms");
-            }
-
-            // usleep prima mikrosekunde, pa množimo sa 1000
             usleep($sleepTimeMs * 1000);
             
             // Resetujemo brojčanik nakon spavanja (pretpostavka da je pun)
@@ -126,6 +137,7 @@ class BigCommerceAPI {
         do {
             // --- NOVO: Provjeri limit PRIJE svakog poziva ---
             $this->checkRateLimit();
+            $this->checkLease();
             
             $this->requestCount++;
 
@@ -161,7 +173,7 @@ class BigCommerceAPI {
             $parsedHeaders = $this->parseHeaders($headerContent);
 
             $durationMs = round((microtime(true) - $startedAt) * 1000, 2);
-            $this->logResponse($method, $endpoint, $status, strlen((string)$body), $error, $durationMs, $retries, $parsedHeaders);
+            \App\Support\OperationalLog::api((string)$this->storeHash, $method, $endpoint, $status, strlen((string)$body), $durationMs, $retries);
 
             if ($status >= 200 && $status < 300 && !$error) {
                 return [
@@ -176,8 +188,7 @@ class BigCommerceAPI {
                 $retries++;
                 $wait = $parsedHeaders['X-Rate-Limit-Time-Reset-Ms'] ?? 2000; // Default 2s ako fali header
                 $wait += 100; // mali buffer
-                
-                if (php_sapi_name() === 'cli') echo "🛑 429 Hit! Force sleep {$wait}ms...\n";
+
                 usleep($wait * 1000);
                 
                 // Ažuriraj interni brojač
@@ -186,7 +197,6 @@ class BigCommerceAPI {
             } else if ($status >= 500) {
                 $retries++;
                 $delay = $retries * 2;
-                error_log("Server error. Retrying in {$delay} seconds...");
                 sleep($delay);
             } else {
                 break;
@@ -194,7 +204,7 @@ class BigCommerceAPI {
 
         } while ($retries < self::MAX_RETRIES);
 
-        throw new \Exception("BigCommerce API Error (Status: {$status}, Endpoint: {$endpoint}): " . $error . " Body: " . $body);
+        throw new BigCommerceRequestException((int)$status, $endpoint, (string)$body);
     }
 
     /**
@@ -225,6 +235,7 @@ class BigCommerceAPI {
 
             // Provera rate limita pre slanja batch-a
             $this->checkRateLimit();
+            $this->checkLease();
 
             $mh = curl_multi_init();
             $handles = [];
@@ -276,6 +287,9 @@ class BigCommerceAPI {
                 $status = $info['http_code'];
                 $parsedHeaders = $this->parseHeaders($headerContent);
 
+                \App\Support\OperationalLog::api((string)$this->storeHash, $batch[$index]['method'], $batch[$index]['endpoint'],
+                    $status, strlen((string)$body), $info['total_time'] * 1000, 0);
+
                 $results[$index] = [
                     'status'  => $status,
                     'body'    => json_decode($body, true) ?? $body,
@@ -313,45 +327,35 @@ class BigCommerceAPI {
     }
 
     public function eachProductPage(array $filters, callable $callback): void {
-        $validFilters = $this->validateFilters($filters);
-        $validFilters['limit'] = 250;
-        $page = 1;
-        $maxPages = 200;
-        
-        do {
-            try {
-                $validFilters['page'] = $page; 
-                $queryString = http_build_query($validFilters);
-                $endpoint = 'catalog/products?' . $queryString;
-                
-                $response = $this->request('GET', $endpoint);
-                
-                // Uklonjen print_r($response);
-                $products = $response['body']['data'] ?? [];
-                
-                $meta = $response['body']['meta'] ?? [];
-                $pagination = $meta['pagination'] ?? [];
-                $totalPages = $pagination['total_pages'] ?? 1;
-                $currentPage = $pagination['current_page'] ?? $page;
-
-                $callback($products, $pagination);
-                
-                $page++;
-
-                if ($currentPage >= $totalPages) {
-                    break;
-                }
-
-                if ($page > $maxPages) {
-                    throw new \RuntimeException("BigCommerce product page safety limit reached at {$maxPages} pages.");
-                }
-                
-            } catch (\Exception $e) {
-                error_log("Error fetching products page {$page}: " . $e->getMessage());
-                throw $e;
+        $filters = $this->validateFilters($filters);
+        $filters['limit'] = 250;
+        $expectedPages = null;
+        $expectedCount = null;
+        $visited = 0;
+        for ($page = 1; ; $page++) {
+            $filters['page'] = $page;
+            $response = $this->request('GET','catalog/products?' . http_build_query($filters));
+            $products = $response['body']['data'] ?? null;
+            $pagination = $response['body']['meta']['pagination'] ?? [];
+            $pages = filter_var($pagination['total_pages'] ?? null,FILTER_VALIDATE_INT);
+            $current = filter_var($pagination['current_page'] ?? null,FILTER_VALIDATE_INT);
+            if (!is_array($products) || $current !== $page || $pages === false || $pages < 0
+                || ($page > max(1,$pages)) || ($page < $pages && !$products)) {
+                throw new \RuntimeException('Invalid catalog pagination');
             }
-            
-        } while (count($products) > 0);
+            $expectedPages ??= $pages;
+            $visited += count($products);
+            $total = isset($pagination['total']) ? (int)$pagination['total'] : null;
+            $expectedCount ??= $total;
+            if ($pages !== $expectedPages || $total !== $expectedCount
+                || ($page >= $pages && $total !== null && $visited !== $total)) {
+                throw new \RuntimeException('Catalog changed during pagination. Refresh will resume from the previous window.');
+            }
+            $callback($products,$pagination);
+            if ($page >= $pages) {
+                return;
+            }
+        }
     }
 
     public function getTaxSettings(): array {
@@ -457,7 +461,7 @@ class BigCommerceAPI {
     }
 
     private function retryProductUpdateBatchWithoutIndexedFailures(array $batch, \Exception $exception): array {
-        $indexedErrors = $this->extractBulkOperationIndexedErrors($exception->getMessage());
+        $indexedErrors = $this->extractBulkOperationIndexedErrors($exception instanceof BigCommerceRequestException ? $exception->batchDiagnostic() : $exception->getMessage());
         if (empty($indexedErrors)) {
             return $this->buildFailedProductUpdateResults($batch, $exception->getMessage());
         }
@@ -523,7 +527,7 @@ class BigCommerceAPI {
                 try {
                     $response = $this->request('PUT', 'catalog/variants', $payload);
                 } catch (\Exception $exception) {
-                    $missing = $this->missingVariantErrors($exception->getMessage(), $batch);
+                    $missing = $this->missingVariantErrors($exception instanceof BigCommerceRequestException ? $exception->batchDiagnostic() : $exception->getMessage(), $batch);
                     $remaining = [];
                     foreach ($batch as $index => $update) {
                         if ($missing && !isset($missing[$index])) {
@@ -666,8 +670,7 @@ class BigCommerceAPI {
                 return (string)$error['message'];
             }
 
-            $encoded = json_encode($error);
-            return $encoded !== false ? $encoded : 'Unknown batch error';
+            return 'BigCommerce rejected the batch item';
         }
 
         return 'Unknown batch error';
@@ -801,7 +804,7 @@ class BigCommerceAPI {
     
     private function validateFilters($filters) {
         $supportedFilters = [
-            'categories:in', 'brand_id', 'brand_id:in', 'price:min', 'price:max', 'date_modified:min',
+            'categories:in', 'brand_id', 'brand_id:in', 'price:min', 'price:max', 'date_modified:min', 'date_modified:max',
             'is_visible', 'is_featured', 'inventory_level:min',
             'include', // 🚀 FIX: Omogućava prosleđivanje 'include' parametra (npr. 'variants,images')
             'inventory_level:max', 'sku:in', 'name:like'
@@ -994,82 +997,4 @@ class BigCommerceAPI {
         }
     }
 
-    /**
-     * Loguje kompletan odgovor sa BC API poziva.
-     */
-    private function logResponse($method, $endpoint, $status, int $responseBytes, $error, float $durationMs = 0.0, int $retry = 0, array $headers = []) {
-        $logFile = __DIR__ . '/../logs/bc_api_requests.log'; 
-        $this->rotateLogFile($logFile);
-
-        $logEntry = [
-            'timestamp' => date('Y-m-d H:i:s'),
-            'method' => $method,
-            'endpoint' => $this->sanitizeEndpoint($endpoint),
-            'status' => $status,
-            'duration_ms' => $durationMs,
-            'response_bytes' => $responseBytes,
-            'retry' => $retry,
-            'rate_limit_left' => $headers['X-Rate-Limit-Requests-Left'] ?? null,
-            'rate_limit_reset_ms' => $headers['X-Rate-Limit-Time-Reset-Ms'] ?? null,
-            'error_msg' => $error,
-        ];
-
-        $logString = "Request: {$method} {$endpoint} | Status: {$status}\n";
-        $logString .= print_r($logEntry, true) . "\n----------------------------------------\n";
-        file_put_contents($logFile, $logString, FILE_APPEND);
-        return;
-
-        $logEntry = [
-            'timestamp' => date('Y-m-d H:i:s'),
-            'method'    => $method,
-            'endpoint'  => $endpoint,
-            'data'      => $data,
-            'status'    => $status,
-            'error_msg' => $error,
-            // Pokušaj dekodiranja tela odgovora ako je JSON, inače sačuvaj sirovi tekst
-            'response'  => json_decode($responseBody, true) ?? $responseBody 
-        ];
-        
-        $logString = "Request: {$method} {$endpoint} | Status: {$status}\n";
-        $logString .= print_r($logEntry, true) . "\n----------------------------------------\n";
-        
-        file_put_contents($logFile, $logString, FILE_APPEND);
-    }
-
-    private function sanitizeEndpoint(string $endpoint): string {
-        $parts = parse_url($endpoint);
-        if (empty($parts['query'])) {
-            return $endpoint;
-        }
-
-        parse_str($parts['query'], $query);
-        foreach (['access_token', 'token', 'client_secret'] as $secretKey) {
-            if (array_key_exists($secretKey, $query)) {
-                $query[$secretKey] = '[redacted]';
-            }
-        }
-
-        $path = $parts['path'] ?? '';
-        $queryString = http_build_query($query);
-        return $queryString !== '' ? "{$path}?{$queryString}" : $path;
-    }
-
-    private function rotateLogFile(string $logFile): void {
-        $maxBytes = 10 * 1024 * 1024;
-        $maxFiles = 5;
-
-        if (!is_file($logFile) || filesize($logFile) < $maxBytes) {
-            return;
-        }
-
-        for ($i = $maxFiles - 1; $i >= 1; $i--) {
-            $source = "{$logFile}.{$i}";
-            $target = "{$logFile}." . ($i + 1);
-            if (is_file($source)) {
-                @rename($source, $target);
-            }
-        }
-
-        @rename($logFile, "{$logFile}.1");
-    }
 }

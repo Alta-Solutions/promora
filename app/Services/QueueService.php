@@ -11,8 +11,8 @@ class QueueService {
     // Konstanta: Maksimalan broj pokušaja
     private const MAX_RETRIES = 3; 
 
-    public function __construct($storeHash = null) {
-        $this->db = Database::getInstance();
+    public function __construct($storeHash = null, ?Database $db = null) {
+        $this->db = $db ?? Database::getInstance();
         $this->storeHash = $storeHash ?? $this->db->getStoreContext();
     }
 
@@ -53,7 +53,7 @@ class QueueService {
                 ];
             }
 
-            $jobId = $this->createJob($type, $promotionId, $totalItems > 0 ? $totalItems : 1);
+            $jobId = $this->createJob($type, $promotionId, max(0, $totalItems));
 
             return [
                 'created' => true,
@@ -136,7 +136,7 @@ class QueueService {
             $this->ensureSyncJobsPayloadColumn();
 
             $openFullJob = $this->findOpenJobByType('omnibus_sync');
-            if ($openFullJob) {
+            if ($openFullJob && $openFullJob['status'] === 'pending' && empty($openFullJob['checkpoint']) && empty($openFullJob['payload'])) {
                 return [
                     'created' => false,
                     'job_id' => (int)$openFullJob['id'],
@@ -160,20 +160,22 @@ class QueueService {
                     ]
                 );
 
-                $this->db->query(
+                $updated = $this->db->query(
                     "UPDATE sync_jobs
                      SET payload = ?, total_items = ?, updated_at = NOW()
-                     WHERE id = ?",
-                    [json_encode($payload, JSON_UNESCAPED_SLASHES), count($mergedProductIds), (int)$pendingTargetedJob['id']]
+                     WHERE id = ? AND store_hash = ? AND status = 'pending' AND checkpoint IS NULL AND payload <=> ?",
+                    [json_encode($payload, JSON_UNESCAPED_SLASHES), count($mergedProductIds), (int)$pendingTargetedJob['id'], $storeHash, $pendingTargetedJob['payload']]
                 );
 
-                return [
-                    'created' => false,
-                    'job_id' => (int)$pendingTargetedJob['id'],
-                    'reason' => 'merged',
-                    'message' => 'Targeted Omnibus sync products were merged into an existing pending job.',
-                    'product_ids' => $mergedProductIds,
-                ];
+                if ($updated->rowCount()) {
+                    return [
+                        'created' => false,
+                        'job_id' => (int)$pendingTargetedJob['id'],
+                        'reason' => 'merged',
+                        'message' => 'Targeted Omnibus sync products were merged into an existing pending job.',
+                        'product_ids' => $mergedProductIds,
+                    ];
+                }
             }
 
             $payload = $this->buildTargetedOmnibusPayload($productIds, $meta);
@@ -251,13 +253,16 @@ class QueueService {
                     $mergedEventIds = $this->normalizeWebhookEventIds(array_merge($existingEventIds, [$eventId]));
                     $payload = $this->buildWebhookEventPayload($mergedEventIds);
 
-                    $this->db->query(
+                    $updated = $this->db->query(
                         "UPDATE sync_jobs
                          SET payload = ?, total_items = ?, updated_at = NOW()
-                         WHERE id = ?",
-                        [json_encode($payload, JSON_UNESCAPED_SLASHES), count($mergedEventIds), (int)$pendingJob['id']]
+                         WHERE id = ? AND store_hash = ? AND status = 'pending' AND checkpoint IS NULL AND payload <=> ?",
+                        [json_encode($payload, JSON_UNESCAPED_SLASHES), count($mergedEventIds), (int)$pendingJob['id'], $storeHash, $pendingJob['payload']]
                     );
 
+                    if (!$updated->rowCount() && !in_array($eventId, $existingEventIds, true)) {
+                        return $this->insertWebhookEventJob($storeHash, $eventId, 'claimed_during_merge');
+                    }
                     return [
                         'created' => false,
                         'job_id' => (int)$pendingJob['id'],
@@ -287,17 +292,21 @@ class QueueService {
     }
 
     // --- IZMENJENO: Sada gleda i 'next_run_at' ---
-    public function getNextPendingJob() {
+    private function nextReadyRow(bool $lock = false) {
+        $canaries = array_values(array_filter(array_map('trim',explode(',',$_ENV['PROMORA_WORKER_STORES'] ?? ''))));
+        $scope = $canaries ? ' AND store_hash IN (' . implode(',',array_fill(0,count($canaries),'?')) . ')' : '';
         return $this->db->fetchOne(
             "SELECT * FROM sync_jobs
-             WHERE status = 'pending'
-             AND (next_run_at IS NULL OR next_run_at <= NOW())
+             WHERE (status = 'pending' OR (status = 'processing' AND lease_token IS NOT NULL AND lease_until < NOW()))
+             AND (next_run_at IS NULL OR next_run_at <= NOW())$scope
              ORDER BY
                 CASE job_type
                     WHEN 'sync_promotion' THEN 10
                     WHEN 'single_sync' THEN 10
                     WHEN 'cleanup_single' THEN 20
                     WHEN 'cleanup' THEN 20
+                    WHEN 'resume_correction' THEN 11
+                    WHEN 'retry_promotion_product' THEN 21
                     WHEN 'verify_variants' THEN 22
                     WHEN 'cleanup_promotion_field' THEN 23
                     WHEN 'omnibus_sync_products' THEN 25
@@ -307,22 +316,44 @@ class QueueService {
                 END,
                 created_at ASC,
                 id ASC
-             LIMIT 1"
+             LIMIT 1" . ($lock ? " FOR UPDATE" : ""), $canaries
         );
     }
 
-    public function updateProgress($jobId, $processed) {
-        return $this->db->query(
-            "UPDATE sync_jobs SET processed_items = ?, updated_at = NOW() WHERE id = ?",
-            [$processed, $jobId]
-        );
+    public function claim(): ?array {
+        $this->db->beginTransaction();
+        try {
+            $row = $this->nextReadyRow(true);
+            if ($row) {
+                $row['lease_token'] = bin2hex(random_bytes(16));
+                $this->db->query("UPDATE sync_jobs SET status='processing', lease_token=?,
+                    lease_until=DATE_ADD(NOW(), INTERVAL 5 MINUTE), updated_at=NOW()
+                    WHERE store_hash=? AND id=?", [$row['lease_token'], $row['store_hash'], $row['id']]);
+            }
+            $this->db->commit();
+            return $row ?: null;
+        } catch (\Throwable $e) {
+            $this->db->rollback();
+            throw $e;
+        }
     }
 
-    public function updateJobStatus($jobId, $status, $error = null) {
-        return $this->db->query(
-            "UPDATE sync_jobs SET status = ?, error_message = ?, updated_at = NOW() WHERE id = ?",
-            [$status, $error, $jobId]
-        );
+    public function checkpoint(array $job, array $state, string $status = 'processing', ?string $outcome = null): void {
+        $token = $status === 'processing' ? $job['lease_token'] : null;
+        $result = $this->db->query("UPDATE sync_jobs SET checkpoint=?, processed_items=?, status=?,
+            outcome=?, lease_token=?, lease_until=DATE_ADD(NOW(), INTERVAL 5 MINUTE), updated_at=NOW(),
+            next_run_at=IF(?='pending', DATE_ADD(NOW(), INTERVAL 1 SECOND), NULL)
+            WHERE id=? AND store_hash=? AND status='processing' AND lease_token=? AND lease_until>=NOW()",
+            [json_encode($state, JSON_THROW_ON_ERROR), $state['processed'], $status, $outcome, $token, $status,
+                $job['id'], $job['store_hash'], $job['lease_token']]);
+        if (!$result->rowCount()) {
+            // A heartbeat in the same second can leave every column unchanged.
+            $owned = $this->db->fetchOne("SELECT id FROM sync_jobs WHERE id=? AND store_hash=?
+                AND status='processing' AND lease_token=? AND lease_until>=NOW()", [$job['id'],$job['store_hash'],$job['lease_token']]);
+            if (!$owned) {
+                throw new \RuntimeException('Job reservation expired');
+            }
+        }
     }
 
     /**
@@ -333,7 +364,7 @@ class QueueService {
             "SELECT * FROM sync_jobs 
              WHERE store_hash = ? AND (
                 status IN ('processing', 'pending') 
-                OR (status = 'completed' AND updated_at > DATE_SUB(NOW(), INTERVAL 10 SECOND))
+                OR (status IN ('completed','failed') AND updated_at > DATE_SUB(NOW(), INTERVAL 10 SECOND))
              )
              ORDER BY 
                 CASE status 
@@ -346,6 +377,8 @@ class QueueService {
                     WHEN 'single_sync' THEN 10
                     WHEN 'cleanup_single' THEN 20
                     WHEN 'cleanup' THEN 20
+                    WHEN 'resume_correction' THEN 11
+                    WHEN 'retry_promotion_product' THEN 21
                     WHEN 'verify_variants' THEN 22
                     WHEN 'cleanup_promotion_field' THEN 23
                     WHEN 'omnibus_sync_products' THEN 25
@@ -402,35 +435,47 @@ class QueueService {
         return $this->normalizeWebhookEventIds($eventIds);
     }
 
-    public function deferWebhookEventJob(int $jobId, string $storeHash, array $remainingEventIds, int $delaySeconds = 0): void {
-        $remainingEventIds = $this->normalizeWebhookEventIds($remainingEventIds);
-        if (empty($remainingEventIds)) {
-            return;
+    public function renew(array $job): void {
+        $args = [$job['id'],$job['store_hash'],$job['lease_token']];
+        $this->db->query("UPDATE sync_jobs SET lease_until=DATE_ADD(NOW(), INTERVAL 5 MINUTE)
+            WHERE id=? AND store_hash=? AND lease_token=? AND lease_until>=NOW()", $args);
+        if (!$this->db->fetchOne("SELECT id FROM sync_jobs WHERE id=? AND store_hash=? AND lease_token=?
+            AND lease_until>=NOW()", $args)) {
+            throw new \RuntimeException('Job reservation expired');
         }
+    }
 
-        $delaySeconds = max(0, min(300, $delaySeconds));
-        $nextRunAtSql = $delaySeconds > 0
-            ? "DATE_ADD(NOW(), INTERVAL {$delaySeconds} SECOND)"
-            : "NULL";
-        $payload = $this->buildWebhookEventPayload($remainingEventIds);
+    public function scheduleProductRetries(array $job, array $diagnostics): void {
+        foreach ($this->normalizeProductIds(array_column($diagnostics,'product_id')) as $id) {
+            $payload = json_encode(['product_ids'=>[$id]]);
+            $exists = $this->db->fetchOne("SELECT id FROM sync_jobs WHERE store_hash=? AND job_type='retry_promotion_product'
+                AND status='pending' AND payload=? LIMIT 1", [$job['store_hash'],$payload]);
+            if (!$exists) {
+                $this->db->query("INSERT INTO sync_jobs(store_hash,job_type,payload,status,total_items,created_at,next_run_at)
+                    VALUES (?,'retry_promotion_product',?,'pending',1,NOW(),DATE_ADD(NOW(),INTERVAL 1 MINUTE))", [$job['store_hash'],$payload]);
+            }
+        }
+    }
 
-        $this->db->query(
-            "UPDATE sync_jobs
-             SET payload = ?,
-                 total_items = ?,
-                 processed_items = 0,
-                 status = 'pending',
-                 error_message = NULL,
-                 next_run_at = {$nextRunAtSql},
-                 updated_at = NOW()
-             WHERE id = ? AND store_hash = ?",
-            [
-                json_encode($payload, JSON_UNESCAPED_SLASHES),
-                count($remainingEventIds),
-                $jobId,
-                $storeHash,
-            ]
-        );
+    public function retryWebhookOrMarkTerminal(array $job, int $event, array $state): void {
+        $this->db->beginTransaction();
+        try {
+            $this->checkpoint($job,$state);
+            $attempt = (int)$job['attempts'] + 1;
+            if ($attempt < self::MAX_RETRIES) {
+                $delay = 2 ** $attempt;
+                $this->db->query("INSERT INTO sync_jobs(store_hash,job_type,payload,total_items,status,attempts,created_at,next_run_at)
+                    VALUES (?,'webhook_event',?,1,'pending',?,NOW(),DATE_ADD(NOW(), INTERVAL $delay MINUTE))",
+                    [$job['store_hash'],json_encode($this->buildWebhookEventPayload([$event])),$attempt]);
+            } else {
+                $this->db->query('UPDATE webhook_events SET terminal_at=COALESCE(terminal_at,NOW())
+                    WHERE store_hash=? AND id=? AND processed=0', [$job['store_hash'],$event]);
+            }
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollback();
+            throw $e;
+        }
     }
 
     private function buildWebhookEventPayload(array $eventIds): array {
@@ -465,108 +510,15 @@ class QueueService {
         ];
     }
 
-    public function purgeOldJobs(int $completedRetentionDays = 14, int $failedRetentionDays = 90): array {
-        $completedRetentionDays = max(1, $completedRetentionDays);
-        $failedRetentionDays = max(1, $failedRetentionDays);
-
-        $completedStmt = $this->db->query(
-            "DELETE FROM sync_jobs
-             WHERE store_hash = ?
-               AND status = 'completed'
-               AND COALESCE(updated_at, created_at) < DATE_SUB(NOW(), INTERVAL {$completedRetentionDays} DAY)",
-            [$this->storeHash]
-        );
-
-        $failedStmt = $this->db->query(
-            "DELETE FROM sync_jobs
-             WHERE store_hash = ?
-               AND status = 'failed'
-               AND COALESCE(updated_at, created_at) < DATE_SUB(NOW(), INTERVAL {$failedRetentionDays} DAY)",
-            [$this->storeHash]
-        );
-
-        return [
-            'completed_deleted' => $completedStmt->rowCount(),
-            'failed_deleted' => $failedStmt->rowCount(),
-        ];
-    }
-
-    public function purgeOperationalHistory(int $successRetentionDays = 90, int $errorRetentionDays = 180): array {
-        $successRetentionDays = max(1, $successRetentionDays);
-        $errorRetentionDays = max(1, $errorRetentionDays);
-
-        $syncSuccessStmt = $this->db->query(
-            "DELETE FROM sync_log
-             WHERE store_hash = ?
-               AND errors = 0
-               AND synced_at < DATE_SUB(NOW(), INTERVAL {$successRetentionDays} DAY)
-             LIMIT 1000",
-            [$this->storeHash]
-        );
-        $syncErrorStmt = $this->db->query(
-            "DELETE FROM sync_log
-             WHERE store_hash = ?
-               AND errors > 0
-               AND synced_at < DATE_SUB(NOW(), INTERVAL {$errorRetentionDays} DAY)
-             LIMIT 1000",
-            [$this->storeHash]
-        );
-        $webhookSuccessStmt = $this->db->query(
-            "DELETE FROM webhook_events
-             WHERE store_hash = ?
-               AND processed = 1
-               AND created_at < DATE_SUB(NOW(), INTERVAL {$successRetentionDays} DAY)
-             LIMIT 1000",
-            [$this->storeHash]
-        );
-
-        return [
-            'sync_log_success_deleted' => $syncSuccessStmt->rowCount(),
-            'sync_log_error_deleted' => $syncErrorStmt->rowCount(),
-            'webhook_processed_deleted' => $webhookSuccessStmt->rowCount(),
-        ];
-    }
-
-    /**
-     * NOVO: Pametna obrada greške sa Retry logikom
-     */
-    public function handleJobFailure($jobId, $errorMessage) {
-        // 1. Dohvati trenutni broj pokušaja
-        $job = $this->db->fetchOne("SELECT attempts FROM sync_jobs WHERE id = ?", [$jobId]);
-        $attempts = ($job['attempts'] ?? 0) + 1;
-
-        if ($attempts < self::MAX_RETRIES) {
-            // SCENARIO: Ponovni pokušaj (Retry)
-            
-            // Exponential backoff: čeka 2min, pa 4min, pa 8min...
-            $delayMinutes = pow(2, $attempts); 
-            
-            $sql = "UPDATE sync_jobs 
-                    SET status = 'pending', 
-                        attempts = ?, 
-                        error_message = ?, 
-                        next_run_at = DATE_ADD(NOW(), INTERVAL ? MINUTE),
-                        updated_at = NOW() 
-                    WHERE id = ?";
-            
-            $this->db->query($sql, [$attempts, "Retry #{$attempts}: " . $errorMessage, $delayMinutes, $jobId]);
-            
-            echo "⚠️ Job #{$jobId} failed. Scheduling retry #{$attempts} in {$delayMinutes} minutes.\n";
-            
-        } else {
-            // SCENARIO: Trajni neuspeh (Failed)
-            $this->db->query(
-                "UPDATE sync_jobs 
-                 SET status = 'failed', 
-                     attempts = ?, 
-                     error_message = ?, 
-                     updated_at = NOW() 
-                 WHERE id = ?",
-                [$attempts, "Max retries reached. Last error: " . $errorMessage, $jobId]
-            );
-            
-            echo "❌ Job #{$jobId} failed permanently after {$attempts} attempts.\n";
-        }
+    public function failClaim(array $job, string $message): void {
+        $attempts = (int)$job['attempts'] + 1;
+        $terminal = $attempts >= self::MAX_RETRIES;
+        $delay = 2 ** min($attempts, self::MAX_RETRIES);
+        $this->db->query("UPDATE sync_jobs SET attempts=?, status=?, error_message=?, outcome=?,
+            next_run_at=DATE_ADD(NOW(), INTERVAL $delay MINUTE), lease_token=NULL, lease_until=NULL, updated_at=NOW()
+            WHERE id=? AND store_hash=? AND lease_token=? AND lease_until>=NOW()",
+            [$attempts, $terminal ? 'failed' : 'pending', $message, $terminal ? 'failed' : null,
+                $job['id'], $job['store_hash'], $job['lease_token']]);
     }
 
     private function findOpenJobByType(string $jobType) {
@@ -588,7 +540,7 @@ class QueueService {
              FROM sync_jobs
              WHERE store_hash = ?
                AND job_type = ?
-               AND status = ?
+               AND status = ? AND checkpoint IS NULL AND attempts=0
              ORDER BY created_at ASC, id ASC
              LIMIT 1",
             [$this->storeHash, $jobType, $status]

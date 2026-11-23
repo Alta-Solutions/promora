@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../config.php';
+\App\Support\CronAuth::enforce();
 
 function respond(int $statusCode, string $message): void {
     if (!headers_sent()) {
@@ -13,21 +14,11 @@ function respond(int $statusCode, string $message): void {
     exit;
 }
 
-function getProvidedKey(): string {
-    if (PHP_SAPI === 'cli') {
-        global $argv;
-        return $argv[1] ?? '';
+function buildBackgroundCommand(string $phpPath, string $scriptPath): string {
+    if (PHP_OS_FAMILY === 'Windows') {
+        return 'start /B "" "' . $phpPath . '" -f "' . $scriptPath . '" -- --background > NUL 2>&1';
     }
-
-    return (string)($_GET['key'] ?? $_POST['key'] ?? '');
-}
-
-function buildBackgroundCommand(string $phpPath, string $scriptPath, string $logFilePath): string {
-    if (DIRECTORY_SEPARATOR === '\\') {
-        return 'start /B "" "' . $phpPath . '" -f "' . $scriptPath . '" >> "' . $logFilePath . '" 2>&1';
-    }
-
-    return '"' . $phpPath . '" "' . $scriptPath . '" >> "' . $logFilePath . '" 2>&1 &';
+    return escapeshellarg($phpPath) . ' ' . escapeshellarg($scriptPath) . ' --background > /dev/null 2>&1 &';
 }
 
 function triggerInBackground(string $command): bool {
@@ -37,11 +28,6 @@ function triggerInBackground(string $command): bool {
 
     shell_exec($command);
     return true;
-}
-
-$providedKey = getProvidedKey();
-if ($providedKey === '' || $providedKey !== \Config::$SECRET_CRON_KEY) {
-    respond(403, 'Unauthorized access.');
 }
 
 $schedulerPath = __DIR__ . '/scheduler.php';
@@ -54,20 +40,10 @@ if ($phpPath === '' || !is_file($phpPath)) {
     respond(500, 'PHP CLI executable not configured correctly.');
 }
 
-$logDir = __DIR__ . '/../logs';
-if (!is_dir($logDir)) {
-    @mkdir($logDir, 0777, true);
-}
-
-$logFilePath = $logDir . '/scheduler.log';
-$command = buildBackgroundCommand($phpPath, $schedulerPath, $logFilePath);
+$command = buildBackgroundCommand($phpPath, $schedulerPath);
 
 if (!triggerInBackground($command)) {
     respond(500, 'Unable to trigger scheduler. shell_exec is disabled on this server.');
 }
 
-$message = "Scheduler process triggered successfully.\n";
-$message .= "Command: {$command}\n";
-$message .= "Log: {$logFilePath}\n";
-
-respond(200, $message);
+respond(200, 'Scheduler process triggered.');

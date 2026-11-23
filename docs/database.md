@@ -73,9 +73,10 @@ Key fields:
 
 ### `promotion_products`
 
-Tracks products currently affected by a promotion. It has a unique key across
-`store_hash`, `product_id`, and `variant_id`, so only one promotion can own a
-given product/variant at a time.
+One row owns a store, product and variant. Migration 202611230004 maps a parent
+to variant key zero in a generated column and enforces uniqueness on that key.
+The price snapshot includes the last applied price and the previous sale price.
+The prior_price_known flag distinguishes a verified empty sale price from a missing legacy snapshot.
 
 Lifecycle fields:
 
@@ -150,9 +151,11 @@ Key fields:
 - `created_at`
 - `applied_at`
 
-Rows are inserted before the high-risk write as `pending`, then marked
-`applied` only after the BigCommerce price/custom-field update succeeds. Failed
-writes are recorded without adding an exclusion or ignoring price-history rows.
+A pending correction and its recovery job are created together. The recorded
+remote result, ownership change and exclusion commit together. History adjustments,
+the Omnibus job and the final applied status share a second transaction. Recovery
+can resume either stage. An operator decision to keep a manual price can close a
+pending correction that has yet to commit its remote result.
 
 ### `promotion_archives`
 

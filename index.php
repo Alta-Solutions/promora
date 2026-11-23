@@ -1,6 +1,20 @@
 <?php
 define('ROOT_PATH', __DIR__ . '/');
 require_once ROOT_PATH . 'config.php';
+if (($_GET['route'] ?? '') === 'cron') {
+    \App\Support\CronAuth::enforce();
+    $store = $_GET['store_hash'] ?? '';
+    $db = \App\Models\Database::getInstance();
+    if (!is_string($store) || $store === '' || !$db->fetchOne(
+        'SELECT 1 FROM bigcommerce_stores WHERE store_hash=? AND is_active=1', [$store]
+    )) {
+        http_response_code(400);
+        exit('An active store_hash is required.');
+    }
+    $db->setStoreContext($store);
+    (new \App\Controllers\SyncController())->cronJob();
+    exit;
+}
 require_once ROOT_PATH . 'app/Support/session.php';
 
 appStartSession();
@@ -68,7 +82,7 @@ $controllerMap = [
     ],
     'logs' => [
         'class' => \App\Controllers\LogsController::class,
-        'actions' => ['index', 'webhooks', 'corrections', 'promotions', 'promotionArchive'],
+        'actions' => ['index', 'webhooks', 'corrections', 'conflicts', 'promotions', 'promotionArchive'],
     ],
     'corrections' => [
         'class' => \App\Controllers\CorrectionController::class,

@@ -6,6 +6,8 @@ namespace App\Services;
 use App\Models\Database;
 
 class OmnibusPricingService {
+    private array $historyPage = [];
+    private ?string $historyStore = null;
     private $db;
     private $timeZone;
 
@@ -182,6 +184,28 @@ class OmnibusPricingService {
         ];
     }
 
+    /** Fall back to item-level queries when a page has an unusually long history. */
+    public function prefetchHistory(string $store, array $ids): void {
+        $this->historyPage = [];
+        $this->historyStore = null;
+        if (!$ids || ($_ENV['PROMORA_GROUP_HISTORY'] ?? '1') === '0') {
+            return;
+        }
+        $ids = array_values(array_unique(array_map('intval', $ids)));
+        $marks = implode(',', array_fill(0,count($ids),'?'));
+        $rows = $this->db->fetchAll("SELECT product_id,variant_id,price,currency,recorded_at
+            FROM product_price_history WHERE store_hash=? AND ignored_at IS NULL AND product_id IN ($marks)
+            ORDER BY product_id,variant_id,recorded_at,id LIMIT 5001", [$store,...$ids]);
+        if (count($rows) > 5000) {
+            return;
+        }
+        $this->historyStore = $store;
+        $this->historyPage = array_fill_keys($ids, []);
+        foreach ($rows as $row) {
+            $this->historyPage[$row['product_id']][$row['variant_id'] ?? 0][] = $row;
+        }
+    }
+
     private function fetchHistoryContext(
         string $storeHash,
         int $productId,
@@ -196,17 +220,22 @@ class OmnibusPricingService {
         }
         $params[] = $referenceAt;
 
-        $rows = $this->db->fetchAll(
-            "SELECT price, currency, recorded_at
-             FROM product_price_history
-             WHERE store_hash = ?
-               AND product_id = ?
-               AND {$variantSql}
-               AND ignored_at IS NULL
-               AND recorded_at <= ?
-             ORDER BY recorded_at ASC, id ASC",
-            $params
-        );
+        if ($this->historyStore === $storeHash && isset($this->historyPage[$productId])) {
+            $rows = array_filter($this->historyPage[$productId][$variantId ?? 0] ?? [],
+                static fn($row) => $row['recorded_at'] <= $referenceAt);
+        } else {
+            $rows = $this->db->fetchAll(
+                "SELECT price, currency, recorded_at
+                 FROM product_price_history
+                 WHERE store_hash = ?
+                   AND product_id = ?
+                   AND {$variantSql}
+                   AND ignored_at IS NULL
+                   AND recorded_at <= ?
+                 ORDER BY recorded_at ASC, id ASC",
+                $params
+            );
+        }
 
         if (empty($rows)) {
             return [

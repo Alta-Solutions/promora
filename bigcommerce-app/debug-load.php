@@ -45,9 +45,9 @@ try {
     if (!hash_equals($expectedSignature, $signature)) {
         // Log za debug
         error_log("Signature mismatch:");
-        error_log("Expected (base64): " . base64_encode($expectedSignature));
-        error_log("Received (base64): " . $encodedSignature);
-        error_log("Received decoded: " . bin2hex($signature));
+
+
+
         
         throw new Exception('Invalid signature');
     }

@@ -223,7 +223,7 @@ async function checkSyncStatus() {
             );
 
             document.getElementById('sync-bar').style.width = percent + '%';
-            document.getElementById('sync-stats').textContent = `${processed} / ${total} (${percent}%)`;
+            document.getElementById('sync-stats').textContent = total ? `${processed} / ${total} (${percent}%)` : String(processed);
 
             let statusText = appT('dashboard.sync_in_progress');
             let barColor = '#3b82f6';
@@ -234,9 +234,12 @@ async function checkSyncStatus() {
             } else if (data.status === 'processing') {
                 statusText = appT('dashboard.status_processing');
                 barColor = '#3b82f6';
+            } else if (data.status === 'failed') {
+                statusText = appT('common.error');
+                barColor = '#b91c1c';
             } else if (data.status === 'completed') {
-                statusText = appT('dashboard.status_completed');
-                barColor = '#10b981';
+                statusText = appT(data.outcome === 'partial' ? 'dashboard.status_partial' : 'dashboard.status_completed');
+                barColor = data.outcome === 'partial' ? '#b45309' : '#10b981';
             }
 
             document.getElementById('sync-title').textContent = `${statusText} · ${getSyncJobTypeLabel(data.type)}`;

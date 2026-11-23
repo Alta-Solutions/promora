@@ -131,7 +131,8 @@ class VariantRecoveryTest extends TestCase {
 
     public function testPromotionSyncAppliesThreePricesAndQueuesOneCheckForTheRejectedVariant(): void {
         $this->db->query("DELETE FROM promotion_products WHERE store_hash = 'store'");
-        foreach (['custom_field_id INT', 'first_applied_at TEXT', 'synced_at TEXT', 'omnibus_reference_at TEXT'] as $column) {
+        foreach (['custom_field_id INT', 'first_applied_at TEXT', 'synced_at TEXT', 'omnibus_reference_at TEXT',
+            'product_name TEXT', 'original_price REAL', 'promo_price REAL', 'previous_sale_price REAL', 'prior_price_known INT'] as $column) {
             $this->db->query("ALTER TABLE promotion_products ADD COLUMN {$column}");
         }
         $this->db->query('CREATE TABLE promotion_product_exclusions (store_hash TEXT, promotion_id INT, product_id INT, variant_id INT)');
@@ -179,8 +180,7 @@ class VariantRecoveryTest extends TestCase {
 
     public function testCursorContinuesAfterDeletedPreviousPageAndReportsRuleSkips(): void {
         $this->db->query('ALTER TABLE products_cache ADD COLUMN variant_sort_id INT GENERATED ALWAYS AS (coalesce(variant_id,0))');
-        $cache = $this->getMockBuilder(ProductCacheService::class)->disableOriginalConstructor()
-            ->onlyMethods(['logResponse'])->getMock();
+        $cache = (new ReflectionClass(ProductCacheService::class))->newInstanceWithoutConstructor();
         $reflection = new ReflectionClass(ProductCacheService::class);
         foreach (['db' => $this->db, 'storeHash' => 'store', 'productsCacheHasVariantSortId' => true] as $name => $value) {
             $reflection->getProperty($name)->setValue($cache, $value);

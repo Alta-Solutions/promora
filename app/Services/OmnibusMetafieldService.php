@@ -394,21 +394,10 @@ class OmnibusMetafieldService {
     }
 
     protected function logWriteFailure(array $meta, array $result): void {
-        $entry = [
-            'timestamp' => date('Y-m-d H:i:s'),
-            'product_id' => $meta['product_id'] ?? null,
-            'variant_id' => $meta['variant_id'] ?? null,
+        \App\Support\OperationalLog::write('error', [
+            'operation' => 'omnibus_metafield', 'product_id' => $meta['product_id'] ?? null,
+            'variant_id' => $meta['variant_id'] ?? null, 'status' => $result['status'] ?? 0,
             'action' => $meta['action'] ?? null,
-            'endpoint' => $meta['endpoint'] ?? null,
-            'status' => $result['status'] ?? null,
-            'error' => $result['error'] ?? null,
-            'value' => $meta['value'] ?? null,
-            'value_length' => isset($meta['value']) ? strlen((string)$meta['value']) : 0,
-            'response' => $result['body'] ?? null,
-        ];
-
-        $line = json_encode($entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL;
-        @file_put_contents(__DIR__ . '/../logs/omnibus_metafields.log', $line, FILE_APPEND);
-        error_log('Omnibus metafield write failed: ' . $line);
+        ]);
     }
 }

@@ -17,7 +17,7 @@ class ProductCacheService {
     private const DB_BATCH_SIZE = 100;
     private const CUSTOM_FIELD_INDEX_BACKFILL_BATCH_SIZE = 500;
     
-    public function __construct(Database $db = null) {
+    public function __construct(Database $db = null, ?BigCommerceAPI $api = null) {
         $this->db = $db ?? Database::getInstance();
         
         // Store hash se sada dobija iz deljene DB instance
@@ -31,99 +31,16 @@ class ProductCacheService {
         $this->ensureProductCategoryIndexSchema();
         $this->ensureCustomFieldFilterIndexData();
         $this->ensureProductCategoryIndexData();
-        $this->api = new BigCommerceAPI();
+        $this->api = $api ?? new BigCommerceAPI();
     }
     
     public function fullSync() {
-        $startTime = microtime(true);
-        echo "\n=== Starting Full Product Cache Sync for Store: {$this->storeHash} ===\n";
-
-        if (method_exists($this->api, 'eachProductPage')) {
-            $totalProducts = 0;
-            $successCount = 0;
-            $errorCount = 0;
-            $pageCount = 0;
-
-            $this->api->eachProductPage([
-                'include' => 'variants,images,custom_fields'
-            ], function (array $products, array $pagination = []) use (&$totalProducts, &$successCount, &$errorCount, &$pageCount): void {
-                $pageCount++;
-                $totalProducts = max($totalProducts, (int)($pagination['total'] ?? 0));
-                if ($totalProducts <= 0) {
-                    $totalProducts += count($products);
-                }
-
-                foreach (array_chunk($products, self::DB_BATCH_SIZE) as $batch) {
-                    try {
-                        $this->batchCacheProducts($batch);
-                        $successCount += count($batch);
-                        $progress = $totalProducts > 0 ? round(($successCount / $totalProducts) * 100) : 0;
-                        echo "Progress: {$successCount}/{$totalProducts} (Page {$pageCount}, {$progress}%)\n";
-                    } catch (\Exception $e) {
-                        $errorCount += count($batch);
-                        error_log("Error caching product cache page {$pageCount}: " . $e->getMessage());
-                    }
-                }
-            });
-
-            $duration = round(microtime(true) - $startTime, 2);
-
-            echo "\n=== Full Sync Complete ===\n";
-            echo "Success: {$successCount}, Errors: {$errorCount}, Duration: {$duration}s\n\n";
-
-            return [
-                'total' => $totalProducts,
-                'success' => $successCount,
-                'errors' => $errorCount,
-                'duration' => $duration
-            ];
-        }
-        
-        // IZMENA: Uključujemo varijante, slike i custom polja u API poziv
-        $allProducts = $this->api->getProducts([
-            'include' => 'variants,images,custom_fields'
-        ]);
-
-        $totalProducts = count($allProducts);
-        
-        echo "Fetched {$totalProducts} products from BigCommerce\n";
-        
-        $successCount = 0;
-        $errorCount = 0;
-        
-        // 🚀 KLJUČNA PROMENA: Razbijanje svih proizvoda u batch-eve (pakete) za brži unos u bazu
-        $batches = array_chunk($allProducts, self::DB_BATCH_SIZE);
-        $totalBatches = count($batches);
-        
-        foreach ($batches as $index => $batch) {
-            try {
-                // Koristimo novu batch metodu
-                $this->batchCacheProducts($batch); 
-                $successCount += count($batch);
-                
-                $progress = round(($successCount / $totalProducts) * 100);
-                echo "Progress: " . $successCount . "/{$totalProducts} (Batch " . ($index + 1) . "/{$totalBatches} - {$progress}%)\n";
-                
-            } catch (\Exception $e) {
-                // U slučaju greške, logujemo i računamo greške
-                $errorCount += count($batch);
-                error_log("Error caching batch (Batch " . ($index + 1) . "): " . $e->getMessage());
-            }
-        }
-        
-        $duration = round(microtime(true) - $startTime, 2);
-        
-        echo "\n=== Full Sync Complete ===\n";
-        echo "Success: {$successCount}, Errors: {$errorCount}, Duration: {$duration}s\n\n";
-        
-        return [
-            'total' => $totalProducts,
-            'success' => $successCount,
-            'errors' => $errorCount,
-            'duration' => $duration
-        ];
+        $started = microtime(true);
+        $report = $this->refreshCatalog(true);
+        echo "Catalog refresh complete. Updated {$report['updated']} items in {$report['pages_fetched']} pages.\n";
+        return ['total'=>$report['updated'],'success'=>$report['updated'],'errors'=>0,'duration'=>round(microtime(true)-$started,2)];
     }
-    
+
     /**
      * Keširanje proizvoda masovnim unosom (Batch Insertion)
      * * @param array $products Array proizvoda iz BigCommerce API-ja
@@ -140,7 +57,7 @@ class ProductCacheService {
              option_values, date_created, date_modified, custom_fields, images, cached_at)
              VALUES ";
              
-        $valuePlaceholders = [];
+        $rowPlaceholders = '(' . implode(',',array_fill(0,29,'?')) . ')';
         $params = [];
         $now = date('Y-m-d H:i:s');
         
@@ -158,10 +75,10 @@ class ProductCacheService {
             $compositeId = $this->generateCompositeId($product['id'], null);
             $taxClassId = $this->normalizeTaxClassId($product['tax_class_id'] ?? null);
             $taxRate = $this->resolveProductTaxRate($taxRatesByClass, $taxClassId);
-            $valuePlaceholders[] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+
             
             // Priprema parametara za jedan red (mora biti striktan redosled)
-            $params = array_merge($params, [
+            $paramsRow = [
                 $compositeId,
                 $this->storeHash,
                 $product['id'],
@@ -181,17 +98,18 @@ class ProductCacheService {
                 $product['brand_id'] ?? null,
                 $product['brand_name'] ?? null,
                 json_encode($product['categories'] ?? []),
-                $product['is_visible'] ?? false,
-                $product['is_featured'] ?? false,
+                (int)($product['is_visible'] ?? false),
+                (int)($product['is_featured'] ?? false),
                 $product['availability'] ?? 'available',
                 $product['condition'] ?? 'new',
                 null, // option_values su samo za varijante
-                $product['date_created'] ?? null,
-                $product['date_modified'] ?? null,
+                $this->catalogTimestamp($product['date_created'] ?? null),
+                $this->catalogTimestamp($product['date_modified'] ?? null),
                 json_encode($product['custom_fields'] ?? []),
                 json_encode($product['images'] ?? []),
                 $now // Postavljamo cached_at na trenutno vreme
-            ]);
+            ];
+            array_push($params, ...$paramsRow);
 
             // Priprema cene osnovnog proizvoda za grupno logovanje
             $effectiveProductPrice = $this->getEffectivePrice($product['price'] ?? null, $product['sale_price'] ?? null);
@@ -227,7 +145,7 @@ class ProductCacheService {
                 if (!$isSimpleProduct) {
                     foreach ($product['variants'] as $variant) {
                         $compositeId = $this->generateCompositeId($product['id'], $variant['id']);
-                        $valuePlaceholders[] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+
                         
                         // Varijanta može imati svoju cenu, ili nasleđuje cenu od osnovnog proizvoda
                         $variantPrice = $variant['price'] ?? $product['price'];
@@ -245,7 +163,7 @@ class ProductCacheService {
                             $variantName .= ' (' . implode(', ', $optionStrings) . ')';
                         }
 
-                        $params = array_merge($params, [
+                        $paramsRow = [
                             $compositeId,
                             $this->storeHash,
                             $product['id'],
@@ -265,17 +183,18 @@ class ProductCacheService {
                             $product['brand_id'] ?? null,
                             $product['brand_name'] ?? null,
                             json_encode($product['categories'] ?? []),
-                            $product['is_visible'] ?? false,
-                            $product['is_featured'] ?? false,
+                            (int)($product['is_visible'] ?? false),
+                            (int)($product['is_featured'] ?? false),
                             $product['availability'] ?? 'available',
                             $product['condition'] ?? 'new',
                             json_encode($variant['option_values'] ?? []),
-                            $product['date_created'] ?? null,
-                            $product['date_modified'] ?? null,
+                            $this->catalogTimestamp($product['date_created'] ?? null),
+                            $this->catalogTimestamp($product['date_modified'] ?? null),
                             json_encode($product['custom_fields'] ?? []), // Varijante dele custom fields sa parentom
                             json_encode(isset($variant['image_url']) && !empty($variant['image_url']) ? [['url_standard' => $variant['image_url']]] : $product['images'] ?? []),
                             $now
-                        ]);
+                        ];
+                        array_push($params, ...$paramsRow);
 
                         // Priprema cene varijante za grupno logovanje
                         if ($storeConfig && $storeConfig['enable_omnibus'] && $effectiveVariantPrice !== null && $effectiveVariantPrice > 0) {
@@ -302,7 +221,9 @@ class ProductCacheService {
             }
         }
 
-        $sql = $sqlTemplate . implode(', ', $valuePlaceholders) . "
+        foreach (array_chunk($params, 250 * 29) as $chunk) {
+            $rows = intdiv(count($chunk), 29);
+            $sql = $sqlTemplate . implode(', ', array_fill(0, $rows, $rowPlaceholders)) . "
              ON DUPLICATE KEY UPDATE
              name = VALUES(name),
              sku = VALUES(sku),
@@ -327,45 +248,35 @@ class ProductCacheService {
              date_modified = VALUES(date_modified),
              custom_fields = VALUES(custom_fields),
              images = VALUES(images),
-             cached_at = NOW()"; // Koristimo NOW() za finalni upis/update
-
-        // --- DEBUGGING: Hvatanje greške iz baze ---
-        try {
-            // Prvo, proverimo da li imamo prazan batch.
-            if (empty($params)) {
-                return; // Ništa za upis, izlazimo iz metode.
-            }
-            $this->db->query($sql, $params);
-            $this->syncCustomFieldFilterIndex($products);
-            $this->syncProductCategoryIndex($products);
-        } catch (\PDOException $e) {
-            // Ako dođe do greške prilikom izvršavanja upita, ispisujemo sve detalje.
-            header('Content-Type: text/plain; charset=utf-8'); // Osigurava ispravan prikaz
-            echo "!!! GREŠKA PRILIKOM UPISA U BAZU !!!\n\n";
-            echo "Poruka greške: " . $e->getMessage() . "\n\n";
-            
-            echo "--- SQL UPIT --- (Broj redova za unos: " . count($valuePlaceholders) . ")\n";
-            echo $sql . "\n\n";
-            
-            echo "--- PARAMETRI (" . count($params) . " komada) ---\n";
-            print_r($params);
-            
-            // Zaustavljamo izvršavanje da bismo mogli da analiziramo grešku.
-            die();
+             cached_at = NOW()";
+            $this->db->query($sql, $chunk);
         }
-        // --- KRAJ DEBUGGING KODA ---
-        
+        $this->syncCustomFieldFilterIndex($products);
+        $this->syncProductCategoryIndex($products);
+
         if ($storeConfig && $storeConfig['enable_omnibus'] && !empty($initialPricesToSeed)) {
-            $priceLogger->seedInitialPriceHistoryBatch($this->storeHash, $initialPricesToSeed);
+            foreach (array_chunk($initialPricesToSeed, 250) as $chunk) {
+                $priceLogger->seedInitialPriceHistoryBatch($this->storeHash, $chunk);
+            }
         }
 
         // --- 3. Grupni upis svih prikupljenih cena ---
         if ($storeConfig && $storeConfig['enable_omnibus'] && !empty($pricesToLog)) {
-            $priceLogger->logPricesBatch($this->storeHash, $pricesToLog);
+            foreach (array_chunk($pricesToLog, 250) as $chunk) {
+                $priceLogger->logPricesBatch($this->storeHash, $chunk);
+            }
         }
         $this->queueMissingVariantChecks($products);
     }
     
+    private function catalogTimestamp(?string $value): ?string {
+        if (!$value) {
+            return null;
+        }
+        $utc = new \DateTimeZone('UTC');
+        return (new \DateTimeImmutable($value,$utc))->setTimezone($utc)->format('Y-m-d H:i:s');
+    }
+
     private function queueMissingVariantChecks(array $products): void {
         $observed = [];
         foreach ($products as $product) {
@@ -584,26 +495,19 @@ class ProductCacheService {
             }
         }
         
-        $this->logResponse($sql, $params);
-
-        return $this->db->fetchAll($sql, $params);
+        $started = microtime(true);
+        $rows = $this->db->fetchAll($sql, $params);
+        $elapsed = microtime(true) - $started;
+        if ($elapsed >= 2) {
+            \App\Support\OperationalLog::write('slow', [
+                'operation' => 'product_filters', 'store_hash' => $this->storeHash,
+                'duration_ms' => round($elapsed * 1000), 'rows' => count($rows),
+                'filters' => count((array)$filters),
+            ]);
+        }
+        return $rows;
     }
 
-    public function logResponse($query, $params) {
-        $logFile = __DIR__ . '/../logs/filter-query.log'; 
-
-        $logEntry = [
-            'timestamp' => date('Y-m-d H:i:s'),
-            'query'    => $query,
-            'params'    => $params,
-        ];
-        
-        $logString = "Query: {$query} \n";
-        $logString .= print_r($logEntry, true) . "\n----------------------------------------\n";
-        
-        file_put_contents($logFile, $logString, FILE_APPEND);
-    }
-    
     public function getCacheStats() {
         return [
             'total_products' => $this->db->fetchOne(
@@ -646,25 +550,71 @@ class ProductCacheService {
         ];
     }
     
-    public function syncModifiedProducts() {
-        $yesterday = date('Y-m-d H:i:s', strtotime('-24 hours'));
-        
-        $products = $this->api->getProducts([
-            'date_modified:min' => $yesterday,
-            'include' => 'variants,images,custom_fields'
-        ]);
-        
-        // Podesite da i ova metoda koristi batch unos
-        $this->batchCacheProducts($products);
-        
-        return count($products);
+    public function syncModifiedProducts(): array {
+        return $this->refreshCatalog(false);
     }
-    
+
+    private function refreshCatalog(bool $full): array {
+        $lock = 'catalog:' . sha1($this->storeHash);
+        if (empty($this->db->fetchOne("SELECT GET_LOCK(?, 0) AS acquired", [$lock])['acquired'])) {
+            throw new \RuntimeException('Catalog refresh already running.');
+        }
+        try {
+            $state = $this->db->fetchOne("SELECT catalog_synced_until, UTC_TIMESTAMP() AS upper_bound
+                FROM bigcommerce_stores WHERE store_hash=?", [$this->storeHash]);
+            if (!$state) {
+                throw new \RuntimeException('Store not found');
+            }
+            $utc = new \DateTimeZone('UTC');
+            $end = new \DateTimeImmutable($state['upper_bound'], $utc);
+            $start = !$full && $state['catalog_synced_until']
+                ? (new \DateTimeImmutable($state['catalog_synced_until'], $utc))->modify('-10 minutes') : null;
+            $filters = ['include' => 'variants,images,custom_fields', 'date_modified:max' => $end->format(DATE_ATOM)];
+            if ($start) {
+                $filters['date_modified:min'] = $start->format(DATE_ATOM);
+            }
+            $pages = $count = 0;
+            $this->api->eachProductPage($filters, function (array $products) use (&$pages, &$count, $full) {
+                $pages++;
+                foreach (array_chunk($products, self::DB_BATCH_SIZE) as $chunk) {
+                    $this->batchCacheProducts($chunk);
+                    $count += count($chunk);
+                }
+                if ($full) {
+                    echo "Page {$pages} complete. Cached {$count} products.\n";
+                }
+            });
+            $this->db->query('UPDATE bigcommerce_stores SET catalog_synced_until=? WHERE store_hash=?',
+                [$state['upper_bound'], $this->storeHash]);
+            return ['updated' => $count, 'pages_fetched' => $pages, 'errors' => 0,
+                'window_start' => $start?->format(DATE_ATOM), 'window_end' => $end->format(DATE_ATOM)];
+        } finally {
+            $this->db->query('SELECT RELEASE_LOCK(?)', [$lock]);
+        }
+    }
+
     public function clearCache() {
-        $this->db->query("DELETE FROM products_cache WHERE store_hash = ?", [$this->storeHash]);
-        $this->db->query("DELETE FROM product_custom_field_index WHERE store_hash = ?", [$this->storeHash]);
-        if ($this->productCategoryIndexAvailable()) {
-            $this->db->query("DELETE FROM product_category_index WHERE store_hash = ?", [$this->storeHash]);
+        $lock = 'catalog:' . sha1($this->storeHash);
+        if (empty($this->db->fetchOne('SELECT GET_LOCK(?,0) AS acquired',[$lock])['acquired'])) {
+            throw new \RuntimeException('Catalog refresh already running.');
+        }
+        try {
+            $categoryIndex = $this->productCategoryIndexAvailable();
+            $this->db->beginTransaction();
+            try {
+                $this->db->query('UPDATE bigcommerce_stores SET catalog_synced_until=NULL WHERE store_hash=?', [$this->storeHash]);
+                $this->db->query("DELETE FROM products_cache WHERE store_hash = ?", [$this->storeHash]);
+                $this->db->query("DELETE FROM product_custom_field_index WHERE store_hash = ?", [$this->storeHash]);
+                if ($categoryIndex) {
+                    $this->db->query("DELETE FROM product_category_index WHERE store_hash = ?", [$this->storeHash]);
+                }
+                $this->db->commit();
+            } catch (\Throwable $e) {
+                $this->db->rollback();
+                throw $e;
+            }
+        } finally {
+            $this->db->query('SELECT RELEASE_LOCK(?)',[$lock]);
         }
         return true;
     }
@@ -939,12 +889,12 @@ class ProductCacheService {
             }
         }
 
-        if (!empty($cacheIds)) {
-            $placeholders = implode(',', array_fill(0, count($cacheIds), '?'));
+        foreach (array_chunk($cacheIds,500) as $deleteIds) {
+            $placeholders = implode(',', array_fill(0, count($deleteIds), '?'));
             $this->db->query(
                 "DELETE FROM product_category_index
                  WHERE store_hash = ? AND cache_row_id IN ($placeholders)",
-                array_merge([$this->storeHash], array_values($cacheIds))
+                array_merge([$this->storeHash], $deleteIds)
             );
         }
 

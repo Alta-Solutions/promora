@@ -10,9 +10,9 @@ appStartSession();
  */
 
 // Log request za debugging
-error_log("OAuth callback received");
-error_log("GET params: " . json_encode($_GET));
-error_log("Redirect URI configured: " . Config::$APP_URL . '/bigcommerce-app/auth.php');
+
+
+
 
 // Verify required parameters
 if (!isset($_GET['code']) || !isset($_GET['scope']) || !isset($_GET['context'])) {
@@ -35,11 +35,10 @@ $context = $_GET['context']; // Format: stores/{store_hash}
 $storeHash = str_replace('stores/', '', $context);
 
 if (empty($storeHash)) {
-    error_log("OAuth error: Invalid store hash. Context: {$context}");
+    error_log("OAuth error: invalid store context");
     die('Invalid store hash in context');
 }
 
-error_log("Processing OAuth for store: {$storeHash}");
 
 // Exchange authorization code for access token
 $tokenUrl = 'https://login.bigcommerce.com/oauth2/token';
@@ -57,8 +56,7 @@ $data = [
     'context' => $context
 ];
 
-error_log("Requesting access token with redirect_uri: {$redirectUri}");
-error_log("Token request data: " . json_encode(array_merge($data, ['client_secret' => '***HIDDEN***'])));
+
 
 $ch = curl_init($tokenUrl);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -75,7 +73,7 @@ curl_close($ch);
 
 if ($httpCode !== 200) {
     error_log("OAuth token exchange failed: HTTP {$httpCode}");
-    error_log("Response: {$response}");
+
     
     $errorData = json_decode($response, true);
     $errorMessage = $errorData['error_description'] ?? $response;
@@ -214,11 +212,10 @@ $tokenData = json_decode($response, true);
 
 if (!isset($tokenData['access_token'])) {
     error_log("OAuth error: No access token in response");
-    error_log("Response: {$response}");
+
     die('Failed to obtain access token. Response: ' . htmlspecialchars($response));
 }
 
-error_log("Access token obtained successfully for store: {$storeHash}");
 
 // Store credentials in database
 try {
@@ -243,8 +240,7 @@ try {
             $context
         ]
     );
-    
-    error_log("Store credentials saved to database: {$storeHash}");
+
     
     // Set session
     $_SESSION['store_hash'] = $storeHash;

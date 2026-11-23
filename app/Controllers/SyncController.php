@@ -31,12 +31,7 @@ class SyncController {
     }
     
     public function cronJob() {
-        // Verify cron key
-        if (!isset($_GET['key']) || $_GET['key'] !== \Config::$SECRET_CRON_KEY) {
-            http_response_code(401);
-            die('Unauthorized');
-        }
-        
+        \App\Support\CronAuth::enforce();
         header('Content-Type: application/json');
         
         try {
@@ -136,10 +131,9 @@ class SyncController {
         $total = max(0, (int)($job['total_items'] ?? 0));
         $processed = max(0, (int)($job['processed_items'] ?? 0));
 
-        if ($job['status'] === 'completed' && $total > 0) {
+        if ($job['status'] === 'completed' && !isset($job['outcome']) && $total > 0) {
             $processed = $total;
-        } elseif ($total > 0) {
-            $processed = min($processed, $total);
+
         }
 
         $percentage = ($total > 0)
@@ -151,6 +145,7 @@ class SyncController {
             'job_id' => (int)$job['id'],
             'type' => (string)$job['job_type'],
             'status' => (string)$job['status'],
+            'outcome' => $job['outcome'] ?? null,
             'processed' => $processed,
             'total' => $total,
             'percentage' => $percentage

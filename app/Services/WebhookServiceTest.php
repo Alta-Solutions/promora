@@ -167,7 +167,7 @@ class WebhookServiceTest extends TestCase {
                      ->method('query')
                      ->with($this->stringContains('UPDATE webhook_events SET processed'));
 
-        $result = $service->processQueuedWebhookEvent(1);
+        $result = $service->processQueuedWebhookEvent(1, 'test_hash');
 
         $this->assertSame(1, $result['processed']);
         $this->assertSame('store/product/updated', $result['scope']);

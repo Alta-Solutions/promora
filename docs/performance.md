@@ -37,3 +37,5 @@ php bin\backfill_promotion_archives.php --store-hash=STORE_HASH --apply
 
 The default mode is dry-run. Add `--apply` only when local archive rows should be
 written.
+
+The [rollout and maintenance guide](operations-rollout.md) covers operational logs, retention, canary workers and measurement.

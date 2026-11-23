@@ -28,7 +28,7 @@
         <div class="sidebar-section">
             <div class="sidebar-section-title"><?= trans_e('sidebar.quick_actions') ?></div>
             
-            <button onclick="quickSync()" class="sidebar-action-btn">
+            <button onclick="syncAllPromotions(this)" class="sidebar-action-btn">
                 <span class="icon">🔄</span>
                 <span class="text"><?= trans_e('common.sync') ?></span>
             </button>
@@ -71,8 +71,7 @@
 
 <script>
 // Quick sync function
-async function quickSync() {
-    const btn = event.target.closest('button');
+async function syncAllPromotions(btn) {
     const originalText = btn.innerHTML;
     
     btn.disabled = true;

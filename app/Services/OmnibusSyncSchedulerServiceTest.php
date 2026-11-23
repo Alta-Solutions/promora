@@ -12,18 +12,9 @@ class OmnibusSyncSchedulerServiceTest extends TestCase {
                 $normalizedSql = preg_replace('/\s+/', ' ', trim($sql));
                 $this->fetchAllCalls[] = ['sql' => $normalizedSql, 'params' => $params];
 
-                if (strpos($normalizedSql, 'FROM products_cache') !== false) {
-                    return [['product_id' => '3'], ['product_id' => '2']];
+                if (strpos($normalizedSql, 'FROM omnibus_changes') !== false) {
+                    return array_map(fn($id) => ['product_id' => $id], [2,3,4,5]);
                 }
-
-                if (strpos($normalizedSql, 'recorded_at >=') !== false) {
-                    return [['product_id' => '3'], ['product_id' => '4']];
-                }
-
-                if (strpos($normalizedSql, 'ignored_at >=') !== false) {
-                    return [['product_id' => '5']];
-                }
-
                 return [];
             }
 
@@ -66,9 +57,6 @@ class OmnibusSyncSchedulerServiceTest extends TestCase {
         $this->assertSame([2, 3, 4, 5], $queues['store-a']->targetedIds);
         $this->assertSame('scheduler_incremental', $queues['store-a']->targetedMeta['source']);
         $this->assertSame('2026-06-16 00:00:00', $queues['store-a']->targetedMeta['day_start']);
-        $this->assertSame(2, $queues['store-a']->targetedMeta['cache_dirty_count']);
-        $this->assertSame(2, $queues['store-a']->targetedMeta['history_dirty_count']);
-        $this->assertSame(1, $queues['store-a']->targetedMeta['ignored_history_dirty_count']);
         $this->assertSame(4, $queues['store-a']->targetedMeta['total_dirty_count']);
 
         foreach ($db->fetchAllCalls as $call) {
@@ -143,7 +131,7 @@ class OmnibusSyncSchedulerServiceTest extends TestCase {
             public function fetchAll($sql, $params = []) {
                 $normalizedSql = preg_replace('/\s+/', ' ', trim($sql));
 
-                if (strpos($normalizedSql, 'FROM products_cache') !== false) {
+                if (strpos($normalizedSql, 'FROM omnibus_changes') !== false) {
                     return [['product_id' => 7]];
                 }
 
@@ -209,7 +197,7 @@ class OmnibusSyncSchedulerServiceTest extends TestCase {
                     return [['store_hash' => 'store-a'], ['store_hash' => 'store-b']];
                 }
 
-                if (strpos($normalizedSql, 'FROM products_cache') !== false) {
+                if (strpos($normalizedSql, 'FROM omnibus_changes') !== false) {
                     return [['product_id' => $params[0] === 'store-a' ? 1 : 2]];
                 }
 

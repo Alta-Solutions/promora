@@ -111,7 +111,108 @@ class MigrationRunner {
             '202609150002_filter_stats_covering_index' => function (): void {
                 $this->addIndex('products_cache', 'idx_store_filter_stats', ['store_hash', 'is_visible', 'is_featured', 'inventory_level', 'price']);
             },
+            '202611230001_operations' => function (): void {
+                foreach ([
+                    'payload' => 'LONGTEXT NULL', 'lease_token' => 'CHAR(32) NULL', 'lease_until' => 'DATETIME NULL',
+                    'checkpoint' => 'LONGTEXT NULL', 'outcome' => 'VARCHAR(24) NULL',
+                ] as $column => $type) {
+                    $this->addColumn('sync_jobs', $column, $type);
+                }
+                $this->addColumn('webhook_events', 'terminal_at', 'DATETIME NULL');
+                $this->addIndex('webhook_events','idx_terminal_retention',['store_hash','processed','terminal_at','id']);
+                $time = \App\Services\OperationalRetention::webhookTimeColumn($this->db);
+                $this->addIndex('webhook_events', 'idx_retention_events', ['store_hash','processed',$time,'id']);
+                $this->addIndex('sync_jobs', 'idx_lease_expiry', ['status','lease_until']);
+                $this->addColumn('bigcommerce_stores', 'catalog_synced_until', 'DATETIME NULL');
+            },
+            '202611230002_price_ownership' => function (): void {
+                if (!$this->columnExists('promotion_application_corrections','id')) {
+                    new \App\Services\PromotionApplicationCorrectionService($this->db);
+                }
+                foreach (['start_date','end_date'] as $column) {
+                    $row = $this->db->fetchOne("SHOW COLUMNS FROM promotions LIKE '$column'");
+                    if (strtolower($row['Type']) === 'date') {
+                        $this->db->query("ALTER TABLE promotions MODIFY $column DATETIME NOT NULL");
+                    }
+                }
+                foreach (['product_name' => 'VARCHAR(255)', 'original_price' => 'DECIMAL(20,4)',
+                    'promo_price' => 'DECIMAL(20,4)', 'previous_sale_price' => 'DECIMAL(20,4)',
+                    'prior_price_known' => 'TINYINT(1) NOT NULL DEFAULT 0'] as $column => $type) {
+                    $this->addColumn('promotion_products', $column, $type);
+                }
+                $this->db->query("CREATE TABLE IF NOT EXISTS price_write_intents (
+                    store_hash VARCHAR(255) NOT NULL, product_id INT UNSIGNED NOT NULL, variant_key INT UNSIGNED NOT NULL,
+                    promotion_id INT NOT NULL, restoring TINYINT(1) NOT NULL, target_price DECIMAL(20,4),
+                    prior_price DECIMAL(20,4), PRIMARY KEY(store_hash,product_id,variant_key)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+                $this->db->query("CREATE TABLE IF NOT EXISTS price_conflicts (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, store_hash VARCHAR(255) NOT NULL,
+                    product_id INT UNSIGNED NOT NULL, variant_key INT UNSIGNED NOT NULL,
+                    promotion_id INT NOT NULL, lifecycle VARCHAR(64) NOT NULL,
+                    expected_price DECIMAL(20,4), observed_price DECIMAL(20,4),
+                    decision VARCHAR(20) NOT NULL DEFAULT 'open', actor VARCHAR(255), decided_at DATETIME,
+                    updated_at DATETIME NOT NULL, revision INT UNSIGNED NOT NULL DEFAULT 1,
+                    UNIQUE KEY uniq_conflict(store_hash,product_id,variant_key,promotion_id,lifecycle)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            },
+            '202611230003_omnibus_changes' => function (): void {
+                $this->addColumn('product_price_history','ignored_at','DATETIME NULL');
+                $this->addColumn('promotion_products','omnibus_reference_at','DATETIME NULL');
+                $this->db->query("CREATE TABLE IF NOT EXISTS omnibus_changes (
+                    store_hash VARCHAR(255) NOT NULL, product_id INT UNSIGNED NOT NULL,
+                    version BIGINT UNSIGNED NOT NULL DEFAULT 1, acknowledged BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                    last_failure_at DATETIME NULL,
+                    PRIMARY KEY(store_hash,product_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+                foreach ([
+                    'products_cache' => ['INSERT' => '', 'DELETE' => '', 'UPDATE' => 'NOT (OLD.price <=> NEW.price AND OLD.sale_price <=> NEW.sale_price)'],
+                    'product_price_history' => ['INSERT' => '', 'DELETE' => '', 'UPDATE' => 'NOT (OLD.ignored_at <=> NEW.ignored_at AND OLD.price <=> NEW.price AND OLD.currency <=> NEW.currency AND OLD.recorded_at <=> NEW.recorded_at)'],
+                    'promotion_products' => ['INSERT' => '', 'DELETE' => '', 'UPDATE' => 'NOT (OLD.promotion_id <=> NEW.promotion_id AND OLD.omnibus_reference_at <=> NEW.omnibus_reference_at)'],
+                ] as $table => $events) {
+                    foreach ($events as $event => $condition) {
+                        $row = $event === 'DELETE' ? 'OLD' : 'NEW';
+                        $name = 'promora_dirty_' . $table . '_' . strtolower($event);
+                        if ($this->db->fetchOne("SELECT 1 FROM information_schema.triggers WHERE trigger_schema=DATABASE()
+                            AND trigger_name=?", [$name])) {
+                            continue;
+                        }
+                        $insert = "INSERT INTO omnibus_changes(store_hash,product_id) VALUES ($row.store_hash,$row.product_id)
+                            ON DUPLICATE KEY UPDATE version=version+1";
+                        $body = $condition ? "BEGIN IF $condition THEN $insert; END IF; END" : $insert;
+                        $this->db->query("CREATE TRIGGER $name AFTER $event ON $table FOR EACH ROW $body");
+                    }
+                }
+            },
+            '202611230004_unique_price_owner' => function (): void {
+                $this->addColumn('price_conflicts','allow_apply','TINYINT(1) NOT NULL DEFAULT 1');
+                $this->addColumn('promotion_products','verified_at','DATETIME NULL');
+                if ($this->indexExists('promotion_products', 'uniq_store_item_owner')) {
+                    return;
+                }
+                $duplicates = $this->db->fetchOne("SELECT COUNT(*) AS groups_found FROM (
+                    SELECT 1 FROM promotion_products GROUP BY store_hash, product_id, IFNULL(variant_id, 0)
+                    HAVING COUNT(*) > 1) AS duplicates");
+                if ($duplicates['groups_found'] > 0) {
+                    throw new \RuntimeException('Resolve duplicate ownership groups before continuing migration: ' . $duplicates['groups_found']);
+                }
+                $this->addColumn('promotion_products', 'variant_key',
+                    'INT UNSIGNED GENERATED ALWAYS AS (IFNULL(variant_id, 0)) STORED');
+                $this->db->query('ALTER TABLE promotion_products ADD UNIQUE INDEX uniq_store_item_owner(store_hash,product_id,variant_key)');
+            },
+            '202611230005_conflict_decisions' => function (): void {
+                $this->db->query("CREATE TABLE IF NOT EXISTS price_conflict_decisions (
+                    store_hash VARCHAR(255) NOT NULL, conflict_id BIGINT UNSIGNED NOT NULL, revision INT UNSIGNED NOT NULL,
+                    expected_price DECIMAL(20,4), observed_price DECIMAL(20,4), decision VARCHAR(20) NOT NULL,
+                    actor VARCHAR(255) NOT NULL, decided_at DATETIME NOT NULL, PRIMARY KEY(store_hash,conflict_id,revision)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            },
         ];
+    }
+
+    private function addColumn(string $table, string $column, string $type): void {
+        if (!$this->columnExists($table, $column)) {
+            $this->db->query("ALTER TABLE $table ADD COLUMN $column $type");
+        }
     }
 
     private function addIndex(string $table, string $index, array $columns): void {

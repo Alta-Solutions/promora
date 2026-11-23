@@ -1,6 +1,19 @@
 <?php
 
 return [
+    'price_conflicts' => [
+        'title' => 'Sukobi cijena',
+        'intro' => 'Trenutna akcijska cijena ostaje do odluke. Zadržavanje izuzima stavku iz promocije. Odobrenje dopušta primjenu promocije ili vraćanje poznate prethodne cijene pri sljedećoj sinkronizaciji ako je zatečena cijena ista.',
+        'empty' => 'Nema otvorenih sukoba cijena.',
+        'item' => 'Proizvod / varijanta',
+        'promotion' => 'Promocija',
+        'expected' => 'Očekivana cijena',
+        'observed' => 'Zatečena cijena',
+        'decision' => 'Odluka',
+        'keep' => 'Zadrži cijenu',
+        'apply' => 'Odobri sinkronizaciju',
+        'stale' => 'Podaci su promijenjeni. Osvježite stranicu.',
+    ],
     '_meta' => [
         'name' => 'Croatian',
         'native_name' => 'Hrvatski',
@@ -74,6 +87,7 @@ return [
         'hash' => 'Hash',
     ],
     'dashboard' => [
+        'status_partial' => 'Dovršeno s pogreškama',
         'title' => 'Nadzorna ploča',
         'subtitle' => 'Pregled stanja trgovine i aktivnih promocija',
         'stats_total_promotions' => 'Ukupno promocija',

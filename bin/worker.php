@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/../config.php';
+\App\Support\CronAuth::enforce();
 
 use App\Models\Database;
 use App\Services\PromotionService;
@@ -10,6 +11,9 @@ $db = Database::getInstance();
 $queue = new QueueService();
 
 function logMsg($msg) {
+    if (in_array('--background', $_SERVER['argv'] ?? [], true)) {
+        return;
+    }
     echo "[" . date('Y-m-d H:i:s') . "] " . $msg . "\n";
 }
 
@@ -41,15 +45,6 @@ function decodeWorkerPayload($payload): array {
 
     $decoded = json_decode($payload, true);
     return is_array($decoded) ? $decoded : [];
-}
-
-function updateWorkerJobPayload(Database $db, int $jobId, array $payload): void {
-    $db->query(
-        "UPDATE sync_jobs
-         SET payload = ?, updated_at = NOW()
-         WHERE id = ?",
-        [json_encode($payload, JSON_UNESCAPED_SLASHES), $jobId]
-    );
 }
 
 function normalizeWorkerProductIds(array $productIds): array {
@@ -108,6 +103,9 @@ function mergeWorkerDiagnostics(array ...$lists): array {
 
             $seen[$key] = true;
             $merged[] = $item;
+            if (count($merged) === 25) {
+                return $merged;
+            }
         }
     }
 
@@ -137,16 +135,18 @@ function queueTargetedOmnibusSyncIfNeeded(Database $db, array $job, array $produ
             'source_job_id' => $job['id'] ?? null,
         ]);
 
+        if (empty($result['job_id'])) {
+            throw new \RuntimeException('Targeted Omnibus scheduling incomplete');
+        }
         logMsg(
             "Targeted Omnibus sync {$result['reason']} for " . count($productIds) .
             " product(s). Job ID: " . ($result['job_id'] ?? 'n/a')
         );
     } catch (\Throwable $e) {
-        logMsg("Unable to queue targeted Omnibus sync: " . $e->getMessage());
+        throw $e;
     }
 }
 
-logMsg("--- Worker started ---");
 
 $maxExecutionTime = 55;
 $webhookEventBatchLimit = max(1, min(100, (int)(getenv('WEBHOOK_EVENT_BATCH_LIMIT') ?: 25)));
@@ -158,13 +158,15 @@ do {
         break;
     }
 
-    $job = $queue->getNextPendingJob();
+    $job = $queue->claim();
 
     if (!$job) {
-        logMsg("No pending jobs found. Exiting.");
+
         break;
     }
 
+    \App\Support\OperationalLog::begin('job-' . $job['id']);
+    $promotionService = null;
     $jobStartTime = microtime(true);
     $processedCount = 0;
     $successCount = 0;
@@ -178,12 +180,51 @@ do {
         logMsg("Processing Job #{$job['id']} (Type: {$job['job_type']}) for Store: {$job['store_hash']}");
 
         $db->setStoreContext($job['store_hash']);
-        $queue->updateJobStatus($job['id'], 'processing');
+        $state = decodeWorkerPayload($job['checkpoint'] ?? null);
+        $priorDuration = (float)($state['duration'] ?? 0);
+        $diagnostics = $state['diagnostics'] ?? [];
+        $processedCount = (int)($state['processed'] ?? 0);
+        $successCount = (int)($state['success'] ?? 0);
+        $errorCount = (int)($state['errors'] ?? 0);
+        $skippedCount = (int)($state['skipped'] ?? 0);
 
+        \App\Services\BigCommerceAPI::setLeaseHeartbeat(fn() => $queue->renew($job));
         $promotionService = new PromotionService();
         $batchSize = 50;
+        $save = function (bool $more, bool $yield = false) use ($queue, $job, &$state, &$jobCompleted,
+            &$processedCount, &$successCount, &$errorCount, &$skippedCount, &$omnibusProductIds,
+            $db, $scriptStartTime, $maxExecutionTime, &$diagnostics, $priorDuration, $jobStartTime): bool {
+            queueTargetedOmnibusSyncIfNeeded($db, $job, $omnibusProductIds);
+            $omnibusProductIds = [];
+            $defer = $more && ($yield || time() - $scriptStartTime >= $maxExecutionTime);
+            $state['duration'] = $priorDuration + microtime(true) - $jobStartTime;
+            $state['api'] = \App\Support\OperationalLog::takeSummary($state['api'] ?? []);
+            $state['diagnostics'] = array_slice($diagnostics,0,25);
+            $state['finished_pages'] = !$more;
+            $state['processed'] = $processedCount;
+            $state['success'] = $successCount;
+            $state['errors'] = $errorCount;
+            $state['skipped'] = $skippedCount;
+            $queue->checkpoint($job, $state, $defer ? 'pending' : 'processing');
+            $jobCompleted = !$defer;
+            return !$defer;
+        };
 
-        if ($job['job_type'] === 'verify_variants') {
+        if (!empty($state['finished_pages'])) {
+            // The last page was committed before the previous worker exited.
+        } elseif ($job['job_type'] === 'resume_correction') {
+            $id = (int)(decodeWorkerPayload($job['payload'])['correction_id'] ?? 0);
+            (new \App\Services\PromotionApplicationCorrectionService($db,$promotionService))->resume($job['store_hash'],$id);
+            $processedCount = $successCount = 1;
+        } elseif ($job['job_type'] === 'retry_promotion_product') {
+            $ids = $queue->extractProductIdsFromPayload($job['payload'] ?? null);
+            $result = count($ids) === 1 ? $promotionService->syncProduct($ids[0]) : [];
+            if ($result['errors'] ?? 1) {
+                throw new \RuntimeException('Product reconciliation needs another attempt');
+            }
+            $omnibusProductIds = $result['omnibus_product_ids'] ?? [];
+            $successCount = $processedCount = 1;
+        } elseif ($job['job_type'] === 'verify_variants') {
             $ids = $queue->extractProductIdsFromPayload($job['payload'] ?? null);
             if (count($ids) !== 1) {
                 throw new \RuntimeException('Variant verification requires one product ID');
@@ -197,7 +238,7 @@ do {
             if (count($ids) !== 1) {
                 throw new \RuntimeException('Promotion field cleanup requires one product ID');
             }
-            $promotionService->removeUnusedPromotionField($ids[0]);
+            $promotionService->withProductLock($ids[0], fn() => $promotionService->removeUnusedPromotionField($ids[0]));
             $successCount = $processedCount = 1;
         } elseif ($job['job_type'] === 'webhook_event') {
             $eventIds = $queue->extractWebhookEventIdsFromPayload($job['payload'] ?? null);
@@ -205,8 +246,8 @@ do {
                 throw new \RuntimeException("Webhook event job #{$job['id']} has no valid webhook event payload.");
             }
 
-            $eventIdsToProcess = array_slice($eventIds, 0, $webhookEventBatchLimit);
-            $remainingEventIds = array_slice($eventIds, $webhookEventBatchLimit);
+            $eventIdsToProcess = array_slice($eventIds, $processedCount, $webhookEventBatchLimit);
+
 
             logMsg(
                 "Processing Webhook Event batch... " .
@@ -215,43 +256,40 @@ do {
             $webhookService = new \App\Services\WebhookService($db);
 
             foreach ($eventIdsToProcess as $eventId) {
-                logMsg("Processing Webhook Event #{$eventId}...");
-                $webhookResult = $webhookService->processQueuedWebhookEvent($eventId);
+
+                try {
+                    $webhookResult = $webhookService->processQueuedWebhookEvent($eventId, $job['store_hash']);
+                } catch (\Throwable $failure) {
+                    $processedCount++;
+                    $errorCount++;
+                    $state['processed'] = $processedCount;
+                    $state['success'] = $successCount;
+                    $state['errors'] = $errorCount;
+                    \App\Support\OperationalLog::write('error', ['operation'=>'process_webhook','event_id'=>$eventId,
+                        'store_hash'=>$job['store_hash'],'attempt'=>1+(int)$job['attempts'],'exception'=>get_class($failure)]);
+                    $queue->retryWebhookOrMarkTerminal($job, $eventId, $state);
+                    if (!$save($processedCount < count($eventIds))) {
+                        break;
+                    }
+                    continue;
+                }
+                $skippedCount += !empty($webhookResult['skipped']) ? 1 : 0;
 
                 $processedCount++;
                 $successCount += empty($webhookResult['skipped']) ? 1 : 0;
-                $queue->updateProgress($job['id'], $processedCount);
+                if (!$save($processedCount < count($eventIds))) {
+                    break;
+                }
 
-                logMsg("Webhook Event #{$eventId} processed. Scope: " . ($webhookResult['scope'] ?? 'n/a'));
             }
 
-            if (!empty($remainingEventIds)) {
-                $queue->deferWebhookEventJob((int)$job['id'], (string)$job['store_hash'], $remainingEventIds);
-                $jobCompleted = false;
-                logMsg(
-                    "Webhook Event job #{$job['id']} yielded with " .
-                    count($remainingEventIds) . " event(s) remaining."
-                );
+            if ($jobCompleted && $processedCount < count($eventIds)) {
+                $save(true, true);
             }
-        } elseif ($job['job_type'] === 'cleanup') {
-            logMsg("Processing Cleanup Job (Removing all promotions)...");
-            $cleanupResult = $promotionService->cleanupAllProductsBatch();
-            $cleanedCount = (int)($cleanupResult['processed'] ?? 0);
-            $omnibusProductIds = mergeWorkerProductIds(
-                $omnibusProductIds,
-                $cleanupResult['omnibus_product_ids'] ?? []
-            );
-            $processedCount = $job['total_items'];
-            $successCount = $cleanedCount;
-            $errorCount = $cleanupResult['errors'];
-            $diagnostics = $cleanupResult['diagnostics'];
-            logMsg("Cleanup finished. Removed {$cleanedCount} items.");
-        } elseif ($job['job_type'] === 'cleanup_single') {
-            logMsg("Processing Single Cleanup Job (Removing products for Promotion #{$job['promotion_id']})...");
-
-            $afterId = 0;
+        } elseif (in_array($job['job_type'], ['cleanup','cleanup_single'], true)) {
+            $afterId = (int)($state['after_id'] ?? 0);
             do {
-                $results = $promotionService->cleanupSinglePromotionBatch($job['promotion_id'], $batchSize, $afterId);
+                $results = $promotionService->cleanupOwnersPage($job['job_type'] === 'cleanup' ? null : (int)$job['promotion_id'], $batchSize, $afterId);
 
                 $successCount += $results['processed'];
                 $errorCount += $results['errors'];
@@ -259,6 +297,7 @@ do {
                     $omnibusProductIds,
                     $results['omnibus_product_ids'] ?? []
                 );
+                $queue->scheduleProductRetries($job,$results['diagnostics'] ?? []);
                 $diagnostics = mergeWorkerDiagnostics(
                     $diagnostics,
                     $results['diagnostics'] ?? []
@@ -266,9 +305,15 @@ do {
 
                 $afterId = $results['next_id'];
                 $processedCount += $results['visited'];
-                $queue->updateProgress($job['id'], $processedCount);
+                $state['after_id'] = $afterId;
+                if (!$save($results['visited'] === $batchSize)) {
+                    break;
+                }
             } while ($results['visited'] === $batchSize);
 
+            if (!$jobCompleted) {
+                continue;
+            }
             $db->query(
                 "UPDATE promotions SET status = 'expired' WHERE store_hash = ? AND id = ? AND status = 'active' AND end_date < NOW()",
                 [$job['store_hash'], $job['promotion_id']]
@@ -295,13 +340,10 @@ do {
                 $successCount += $results['success'] ?? 0;
                 $errorCount += $results['errors'] ?? 0;
 
-                $batchProcessed = $results['processed'] ?? count($batchIds);
-                if ($batchProcessed <= 0) {
-                    $batchProcessed = count($batchIds);
+                $processedCount += count($batchIds);
+                if (!$save($processedCount < count($productIds))) {
+                    break;
                 }
-
-                $processedCount += $batchProcessed;
-                $queue->updateProgress($job['id'], min($processedCount, count($productIds)));
 
                 if (function_exists('gc_collect_cycles')) {
                     gc_collect_cycles();
@@ -312,9 +354,9 @@ do {
             $omnibusService = new \App\Services\OmnibusSyncService($job['store_hash']);
             $baseProductClause = hasProductsCacheTypeColumn($db) ? " AND type = 'product'" : '';
             $payload = decodeWorkerPayload($job['payload'] ?? null);
-            $lastProductId = max(0, (int)($payload['last_product_id'] ?? 0));
+            $lastProductId = max(0, (int)($state['last_product_id'] ?? $payload['last_product_id'] ?? 0));
 
-            while ($processedCount < $job['total_items']) {
+            while (true) {
                 logMsg("Processing Omnibus batch (after product_id: {$lastProductId})...");
 
                 $parentProducts = $db->fetchAll(
@@ -343,18 +385,19 @@ do {
                     break;
                 }
 
-                $processedCount += $batchProcessed;
+                $processedCount += count($parentProducts);
                 $lastProductId = (int)end($parentProducts)['product_id'];
-                $payload['last_product_id'] = $lastProductId;
-                updateWorkerJobPayload($db, (int)$job['id'], $payload);
-                $queue->updateProgress($job['id'], $processedCount);
+                $state['last_product_id'] = $lastProductId;
+                if (!$save(count($parentProducts) === $batchSize) || count($parentProducts) < $batchSize) {
+                    break;
+                }
 
                 if (function_exists('gc_collect_cycles')) {
                     gc_collect_cycles();
                 }
             }
-        } else {
-            $cursor = null;
+        } elseif (in_array($job['job_type'], ['single_sync','sync_promotion'], true)) {
+            $cursor = $state['cursor'] ?? null;
             do {
                 $results = $promotionService->syncSinglePromotionBatch($job['promotion_id'], $batchSize, 0, $cursor);
                 $cursor = $results['next_cursor'];
@@ -366,57 +409,61 @@ do {
                     $omnibusProductIds,
                     $results['omnibus_product_ids'] ?? []
                 );
+                $queue->scheduleProductRetries($job,$results['diagnostics'] ?? []);
                 $diagnostics = mergeWorkerDiagnostics(
                     $diagnostics,
                     $results['diagnostics'] ?? []
                 );
 
                 $processedCount += $results['visited'];
-                $queue->updateProgress($job['id'], $processedCount);
+                $state['cursor'] = $cursor;
+                if (!$save($results['visited'] === $batchSize)) {
+                    break;
+                }
             } while ($results['visited'] === $batchSize);
+        } else {
+            throw new \RuntimeException('Unknown job type');
         }
 
-        if ($jobCompleted) {
-            $finalProcessedCount = (int)($job['total_items'] ?? 0);
-            if ($finalProcessedCount > 0) {
-                $queue->updateProgress($job['id'], $finalProcessedCount);
-            }
-
-            $queue->updateJobStatus($job['id'], 'completed');
+        if (!$jobCompleted) {
+            continue;
         }
-
-        if ($jobCompleted && in_array($job['job_type'], ['sync_promotion', 'single_sync', 'cleanup', 'cleanup_single'], true)) {
-            queueTargetedOmnibusSyncIfNeeded($db, $job, $omnibusProductIds);
-        }
-
-        $duration = microtime(true) - $jobStartTime;
-        $jobStatusMessage = $jobCompleted ? 'Completed' : 'Deferred';
-        $message = "Worker Job #{$job['id']} {$jobStatusMessage} (Type: {$job['job_type']})";
+        queueTargetedOmnibusSyncIfNeeded($db, $job, $omnibusProductIds);
+        $state['processed'] = $processedCount;
+        $state['success'] = $successCount;
+        $state['errors'] = $errorCount;
+        $state['skipped'] = $skippedCount;
+        $duration = $priorDuration + microtime(true) - $jobStartTime;
+        $message = "Worker job #{$job['id']} ({$job['job_type']}) completed";
         if (in_array($job['job_type'], ['sync_promotion', 'single_sync', 'cleanup', 'cleanup_single'], true)) {
             $message .= "\nPrice updates: {$successCount} successful, {$skippedCount} skipped by rules, {$errorCount} failed.";
+        }
+        $apiSummary = \App\Support\OperationalLog::takeSummary($state['api'] ?? []);
+        if ($apiSummary) {
+            $message .= "\nBC API " . json_encode($apiSummary, JSON_UNESCAPED_SLASHES);
         }
         $diagnosticSummary = PromotionService::formatPriceDiagnostics($diagnostics);
         if ($diagnosticSummary !== '') {
             $message .= "\n" . $diagnosticSummary;
         }
 
-        $promotionService->logSync(
-            $job['promotion_id'],
-            $successCount,
-            $errorCount,
-            $duration,
-            $message,
-            $jobCompleted ? 'worker' : 'worker_deferred'
-        );
-
-        logMsg(
-            $jobCompleted
-                ? "Job #{$job['id']} finished successfully! Processed: {$processedCount}"
-                : "Job #{$job['id']} deferred successfully! Processed this pass: {$processedCount}"
-        );
-    } catch (\Exception $e) {
+        $db->beginTransaction();
+        try {
+            // Commit the final outcome and its operational summary together.
+            unset($state['api'],$state['diagnostics']);
+            $queue->checkpoint($job, $state, 'completed', $errorCount ? 'partial' : 'success');
+            $promotionService->logSync($job['promotion_id'],$successCount,$errorCount,$duration,$message,'worker');
+            $db->commit();
+        } catch (\Throwable $e) {
+            $db->rollback();
+            throw $e;
+        }
+        logMsg("Job #{$job['id']} completed. Processed {$processedCount}, errors {$errorCount}.");
+    } catch (\Throwable $e) {
+        \App\Support\OperationalLog::write('error', ['operation' => 'worker', 'store_hash' => $job['store_hash'], 'exception' => get_class($e)]);
         logMsg("ERROR in Job #{$job['id']}: " . $e->getMessage());
 
+        $queue->failClaim($job, $e->getMessage());
         if (isset($promotionService)) {
             $duration = microtime(true) - $jobStartTime;
             $promotionService->logSync(
@@ -429,9 +476,8 @@ do {
             );
         }
 
-        $queue->handleJobFailure($job['id'], $e->getMessage());
+    } finally {
+        \App\Services\BigCommerceAPI::setLeaseHeartbeat(null);
     }
 
 } while (true);
-
-logMsg("--- Worker finished ---");

@@ -5,14 +5,6 @@ use App\Services\ProductCacheService;
 use App\Services\WebhookService;
 
 class CacheController {
-    private $cacheService;
-    private $webhookService;
-
-    public function __construct() {
-        $this->cacheService = new ProductCacheService();
-        $this->webhookService = new WebhookService();
-    }
-
     /**
      * Full cache sync - first time setup
      */
@@ -29,7 +21,7 @@ class CacheController {
         ob_implicit_flush(true);
         ob_end_flush();
 
-        $this->cacheService->fullSync();
+        (new ProductCacheService())->fullSync();
 
         echo '</pre>';
         echo '<div style="margin-top: 20px;">';
@@ -56,7 +48,7 @@ class CacheController {
         }
 
         try {
-            $registered = $this->webhookService->registerWebhooks($storeHash);
+            $registered = (new WebhookService())->registerWebhooks($storeHash);
             $count = count($registered);
 
             if ($count > 0) {
@@ -91,7 +83,7 @@ class CacheController {
 
         try {
             if ($webhookRowId > 0) {
-                $result = $this->webhookService->unregisterWebhookById($storeHash, $webhookRowId);
+                $result = (new WebhookService())->unregisterWebhookById($storeHash, $webhookRowId);
 
                 if (!empty($result['deleted'])) {
                     if (($result['reason'] ?? '') === 'missing_on_bc') {
@@ -103,7 +95,7 @@ class CacheController {
                     $_SESSION['flash_message'] = \trans('cache.webhook_not_found');
                 }
             } else {
-                $deletedCount = $this->webhookService->unregisterWebhooks($storeHash);
+                $deletedCount = (new WebhookService())->unregisterWebhooks($storeHash);
                 if ($deletedCount > 0) {
                     $_SESSION['flash_message'] = \trans('cache.webhooks_deleted', ['count' => $deletedCount]);
                 } else {
@@ -127,7 +119,7 @@ class CacheController {
         header('Content-Type: application/json');
 
         try {
-            $stats = $this->cacheService->getCacheStats();
+            $stats = (new ProductCacheService())->getCacheStats();
             echo json_encode(['success' => true, 'data' => $stats]);
         } catch (\Exception $e) {
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
@@ -137,13 +129,15 @@ class CacheController {
     public function quickSync() {
         header('Content-Type: application/json');
 
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !\App\Support\Csrf::validateRequest()) {
+            http_response_code($_SERVER['REQUEST_METHOD'] === 'POST' ? 403 : 405);
+            echo json_encode(['success' => false, 'error' => 'Invalid catalog refresh request']);
+            return;
+        }
         try {
-            $modifiedProducts = $this->cacheService->syncModifiedProducts();
+            $modifiedProducts = (new ProductCacheService())->syncModifiedProducts();
 
-            echo json_encode([
-                'success' => true,
-                'updated' => $modifiedProducts,
-            ]);
+            echo json_encode(['success' => true] + $modifiedProducts);
         } catch (\Exception $e) {
             echo json_encode([
                 'success' => false,
@@ -156,7 +150,7 @@ class CacheController {
         header('Content-Type: application/json');
 
         try {
-            $this->cacheService->clearCache();
+            (new ProductCacheService())->clearCache();
             echo json_encode(['success' => true]);
         } catch (\Exception $e) {
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
@@ -176,7 +170,7 @@ class CacheController {
         echo '<h3>' . htmlspecialchars(\trans('cache.bc_webhook_status'), ENT_QUOTES, 'UTF-8') . '</h3>';
 
         try {
-            $bcWebhooks = $this->webhookService->getBigCommerceWebhooks($storeHash);
+            $bcWebhooks = (new WebhookService())->getBigCommerceWebhooks($storeHash);
             echo '<p>' . htmlspecialchars(\trans('cache.bc_webhook_status_help'), ENT_QUOTES, 'UTF-8') . '</p>';
             echo '<pre style="background: #f3f4f6; padding: 15px; border-radius: 6px; overflow: auto;">' . print_r($bcWebhooks, true) . '</pre>';
         } catch (\Exception $e) {

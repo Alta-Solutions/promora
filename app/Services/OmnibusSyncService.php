@@ -53,7 +53,7 @@ class OmnibusSyncService {
         $errorCount = 0;
 
         $lastProductId = 0;
-        while ($processedCount < $totalParentProducts) {
+        while (true) {
             $parentProducts = $this->db->fetchAll(
                 "SELECT DISTINCT product_id
                  FROM products_cache
@@ -71,12 +71,12 @@ class OmnibusSyncService {
             $lastProductId = (int)end($parentProducts)['product_id'];
 
             $result = $this->processBatch($parentProducts);
-            $processedCount += $result['success'];
+            $processedCount += count($parentProducts);
             $errorCount += $result['errors'];
         }
 
         return [
-            'status' => 'completed',
+            'status' => $errorCount ? 'partial' : 'completed',
             'total_products' => $totalParentProducts,
             'processed' => $processedCount,
             'errors' => $errorCount,
@@ -98,6 +98,11 @@ class OmnibusSyncService {
             return ['success' => 0, 'errors' => 0, 'message' => 'No valid product ids in batch.'];
         }
 
+        $guard = new PriceOwnershipService($this->db,$this->api,$this->storeHash);
+        return $guard->locked(array_map(fn($id) => ['product_id'=>$id],$productIds), fn() => $this->publishProducts($productIds));
+    }
+
+    private function publishProducts(array $productIds): array {
         $storeConfig = $this->db->fetchOne(
             "SELECT currency FROM bigcommerce_stores WHERE store_hash = ?",
             [$this->storeHash]
@@ -105,6 +110,10 @@ class OmnibusSyncService {
         $currency = $storeConfig['currency'] ?? 'USD';
 
         $placeholders = str_repeat('?,', count($productIds) - 1) . '?';
+        $versions = $this->db->fetchAll("SELECT product_id,version FROM omnibus_changes
+            WHERE store_hash=? AND product_id IN ($placeholders) AND version>acknowledged",
+            array_merge([$this->storeHash], $productIds));
+        $versions = array_column($versions, 'version', 'product_id');
         $cachedProducts = $this->db->fetchAll(
             "SELECT product_id, variant_id, type, price, sale_price, custom_fields, cached_at
              FROM products_cache
@@ -112,6 +121,10 @@ class OmnibusSyncService {
             array_merge([$this->storeHash], $productIds)
         );
 
+        $missing = array_diff($productIds, array_column($cachedProducts, 'product_id'));
+        foreach ($missing as $id) {
+            $this->acknowledgeVersion($id, $versions[$id] ?? null);
+        }
         if (empty($cachedProducts)) {
             return ['success' => 0, 'errors' => 0, 'message' => 'No cached products found for this batch.'];
         }
@@ -126,6 +139,7 @@ class OmnibusSyncService {
         $priceActivationMap = $this->fetchCurrentPriceActivationMap($productsById, $promotionReferenceMap, $currency);
         $this->seedInitialPriceHistory($productsById, $currency, $priceActivationMap, $promotionReferenceMap);
 
+        $this->omnibusPricingService->prefetchHistory($this->storeHash,$productIds);
         $updates = [];
 
         foreach ($productsById as $productId => $productRows) {
@@ -140,23 +154,45 @@ class OmnibusSyncService {
 
         try {
             $apiResults = $this->omnibusMetafieldService->syncLowestPriceMetafields($updates);
-            $this->syncLegacyCustomFields($updates, $productsCacheMap);
+            $legacy = $this->omnibusFieldService->batchSyncLowestPriceFields($updates, $productsCacheMap);
+            $legacyStatuses = array_column($legacy, 'status', 'product_id');
 
+            $successful = [];
             $successCount = 0;
             foreach ($apiResults as $result) {
-                if (isset($result['status']) && $result['status'] >= 200 && $result['status'] < 300) {
+                $legacyStatus = $legacyStatuses[$result['product_id']] ?? 0;
+                if ($legacyStatus >= 200 && $legacyStatus < 300 && isset($result['status']) && $result['status'] >= 200 && $result['status'] < 300) {
                     $successCount++;
+                    $id = $result['product_id'];
+                    $successful[] = $id;
+                    $this->acknowledgeVersion($id, $versions[$id] ?? null);
                 }
             }
 
+            $this->markFailedProducts(array_diff(array_column($updates,'product_id'),$successful));
             return [
                 'processed' => count($updates),
                 'success' => $successCount,
                 'errors' => count($updates) - $successCount,
             ];
         } catch (\Exception $e) {
+            $this->markFailedProducts(array_column($updates,'product_id'));
             error_log("Omnibus Sync API Error for store {$this->storeHash}: " . $e->getMessage());
             return ['processed' => count($updates), 'success' => 0, 'errors' => count($updates)];
+        }
+    }
+
+    private function markFailedProducts(array $ids): void {
+        foreach ($ids as $id) {
+            $this->db->query('INSERT INTO omnibus_changes(store_hash,product_id,last_failure_at) VALUES (?,?,NOW())
+                ON DUPLICATE KEY UPDATE version=IF(version=acknowledged,version+1,version),last_failure_at=NOW()',[$this->storeHash,$id]);
+        }
+    }
+
+    private function acknowledgeVersion(int $id, ?int $version): void {
+        if ($version !== null) {
+            $this->db->query('UPDATE omnibus_changes SET acknowledged=GREATEST(acknowledged,?),last_failure_at=NULL
+                WHERE store_hash=? AND product_id=?', [$version, $this->storeHash, $id]);
         }
     }
 
@@ -234,14 +270,6 @@ class OmnibusSyncService {
             'has_variants' => $hasVariantRows,
             'effective_currency' => $lastDto['effective_currency'] ?? $currency,
         ];
-    }
-
-    private function syncLegacyCustomFields(array $updates, array $productsCacheMap): void {
-        try {
-            $this->omnibusFieldService->batchSyncLowestPriceFields($updates, $productsCacheMap);
-        } catch (\Throwable $e) {
-            error_log("Omnibus legacy custom field sync failed for store {$this->storeHash}: " . $e->getMessage());
-        }
     }
 
     private function hasVariantRows(array $rows): bool {
