@@ -273,7 +273,10 @@ class PromotionArchiveService {
             "UPDATE promotion_archives
              SET cleanup_completed_at = COALESCE(cleanup_completed_at, ?),
                  updated_at = NOW()
-             WHERE store_hash = ? AND id = ?",
+             WHERE store_hash = ? AND id = ?
+               AND NOT EXISTS (SELECT 1 FROM promotion_products pp
+                               WHERE pp.store_hash = promotion_archives.store_hash
+                                 AND pp.promotion_id = promotion_archives.promotion_id)",
             [$this->normalizeDate($completedAt, $this->getDatabaseTimestamp()), $this->storeHash, $archiveId]
         );
     }

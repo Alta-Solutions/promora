@@ -7,6 +7,7 @@ class ProductCacheService {
     private $db;
     private $api;
     private $storeHash;
+    private $verificationQueue;
     private $taxRatesByClass = null;
     private $taxRatesLoaded = false;
     private $productCategoryIndexAvailable = null;
@@ -362,8 +363,101 @@ class ProductCacheService {
         if ($storeConfig && $storeConfig['enable_omnibus'] && !empty($pricesToLog)) {
             $priceLogger->logPricesBatch($this->storeHash, $pricesToLog);
         }
+        $this->queueMissingVariantChecks($products);
     }
     
+    private function queueMissingVariantChecks(array $products): void {
+        $observed = [];
+        foreach ($products as $product) {
+            if (isset($product['variants']) && is_array($product['variants'])) {
+                $observed[$product['id']] = array_fill_keys(array_column($product['variants'], 'id'), true);
+            }
+        }
+        if (!$observed) {
+            return;
+        }
+        $placeholders = implode(',', array_fill(0, count($observed), '?'));
+        $rows = $this->db->fetchAll(
+            "SELECT product_id, variant_id FROM products_cache WHERE store_hash = ? AND type = 'variant'
+             AND product_id IN ($placeholders)", array_merge([$this->storeHash], array_keys($observed))
+        );
+        $suspect = [];
+        foreach ($rows as $row) {
+            if (!isset($observed[$row['product_id']][$row['variant_id']])) {
+                $suspect[$row['product_id']] = true;
+            }
+        }
+        if ($suspect) {
+            $queue = $this->verificationQueue ??= new QueueService($this->storeHash);
+            foreach (array_keys($suspect) as $id) {
+                $queue->queueVariantVerification($id);
+            }
+        }
+    }
+
+    public function verifyProductVariants(int $productId): int {
+        $scope = [$this->storeHash, $productId];
+        // Snapshot the candidates before the GET; a concurrently added row is not a deletion candidate.
+        $local = $this->db->fetchAll(
+            "SELECT variant_id FROM products_cache WHERE store_hash = ? AND product_id = ? AND type = 'variant'
+             UNION SELECT variant_id FROM promotion_products WHERE store_hash = ? AND product_id = ? AND variant_id IS NOT NULL",
+            array_merge($scope, $scope)
+        );
+        if (!$local) {
+            return 0;
+        }
+        $remoteIds = $this->api->getCompleteVariantIds($productId);
+        $missing = array_diff(array_column($local, 'variant_id'), $remoteIds);
+        if (!$missing) {
+            return 0;
+        }
+
+        $archive = new PromotionArchiveService($this->db, $this->storeHash);
+        $removed = 0;
+        $affectedPromotions = [];
+        sort($missing, SORT_NUMERIC);
+        $this->db->beginTransaction();
+        try {
+            foreach ($missing as $variantId) {
+                $params = [$this->storeHash, $productId, $variantId];
+                $key = 'store_hash = ? AND product_id = ? AND variant_id = ?';
+                $cache = $this->db->fetchOne("SELECT id AS cache_id, name, sku, price, sale_price FROM products_cache
+                    WHERE $key AND type = 'variant' FOR UPDATE", $params);
+                $owners = $this->db->fetchAll("SELECT * FROM promotion_products WHERE $key FOR UPDATE", $params);
+                foreach ($owners as $owner) {
+                    $affectedPromotions[(int)$owner['promotion_id']] = true;
+                    $archive->recordRemovedItems((int)$owner['promotion_id'], [$owner + ($cache ?: [])], 'variant_removed_from_catalog');
+                }
+                if ($owners) {
+                    $this->db->query("DELETE FROM promotion_products WHERE $key", $params);
+                }
+                if ($cache) {
+                    $this->db->query("DELETE FROM products_cache WHERE $key AND type = 'variant'", $params);
+                }
+                if ($owners || $cache) {
+                    $removed++;
+                }
+            }
+            foreach (array_keys($affectedPromotions) as $promotionId) {
+                $archive->markCleanupCompleted($promotionId);
+            }
+            // Verification only reads the catalog. Schedule field cleanup atomically with the last removal.
+            if ($affectedPromotions) {
+                $this->db->query(
+                    "INSERT INTO sync_jobs (store_hash, job_type, payload, total_items, status, attempts, created_at)
+                     SELECT ?, 'cleanup_promotion_field', ?, 1, 'pending', 0, NOW()
+                     WHERE NOT EXISTS (SELECT 1 FROM promotion_products WHERE store_hash = ? AND product_id = ?)",
+                    [$this->storeHash, json_encode(['product_ids' => [$productId]]), $this->storeHash, $productId]
+                );
+            }
+            $this->db->commit();
+        } catch (\Throwable $exception) {
+            $this->db->rollback();
+            throw $exception;
+        }
+        return $removed;
+    }
+
     /**
      * Direktno ažurira app-managed sale_price u lokalnom kešu bez API poziva.
      * Catalog price ostaje vrednost koju je keš poslednji put dobio od BigCommerce-a.

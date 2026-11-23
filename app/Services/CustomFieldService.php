@@ -199,8 +199,10 @@ class CustomFieldService {
             $getResponses = $this->api->multiRequest($getRequests);
             foreach ($getResponses as $index => $response) {
                 $pid = $productsToFetch[$index];
-                if ($response['status'] >= 200 && $response['status'] < 300) {
-                    $fetchedData[$pid] = $response['body']['data'] ?? [];
+                if ($response['status'] === 404) {
+                    $fetchedData[$pid] = [];
+                } elseif ($response['status'] >= 200 && $response['status'] < 300 && is_array($response['body']['data'] ?? null)) {
+                    $fetchedData[$pid] = $response['body']['data'];
                 }
             }
         }
@@ -212,8 +214,7 @@ class CustomFieldService {
             $customFields = $existingFieldsMap[$productId] ?? $fetchedData[$productId] ?? null;
 
             if ($customFields === null && in_array($productId, $productsToFetch)) {
-                 // Nismo uspeli da dohvatimo, pretpostavljamo uspeh (nema šta da se briše) ili grešku
-                 $results[$productId]['success'] = true; 
+                 $results[$productId]['message'] = 'Unable to read product custom fields';
                  continue;
             }
             

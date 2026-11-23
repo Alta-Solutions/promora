@@ -97,6 +97,82 @@ class BigCommerceAPITest extends TestCase {
         ]], $result);
     }
 
+    private function variantFailure(array $errors, int $status = 422): \Exception {
+        $body = json_encode(['status' => $status, 'errors' => $errors]);
+        return new \Exception("BigCommerce API Error (Status: {$status}, Endpoint: catalog/variants):  Body: {$body}");
+    }
+
+    public function testPromotion458RetriesOnlyTheSurvivingVariants(): void {
+        // Keep the production error index while placing the three target SKUs before it.
+        $updates = [];
+        foreach (range(100, 130) as $id) {
+            $updates[] = ['id' => $id, 'product_id' => 1, 'sale_price' => 1.0];
+        }
+        foreach ([13664 => 51.80, 13665 => 77.50, 13666 => 99.43] as $id => $price) {
+            $updates[] = ['id' => $id, 'product_id' => 9621, 'sale_price' => $price];
+        }
+        $survivors = $updates;
+        $updates[] = ['id' => 17409, 'product_id' => 9626, 'sale_price' => 38.60];
+        $api = new SequencedBigCommerceAPI([
+            $this->variantFailure(['34.id' => 'No variants with id 17409']),
+            ['body' => ['data' => $survivors]],
+        ]);
+        $results = $api->batchUpdateVariants($updates);
+        self::assertCount(35, $results);
+        self::assertCount(2, $api->requests);
+        self::assertSame(array_column($survivors, 'sale_price', 'id'), array_column($api->requests[1]['data'], 'sale_price', 'id'));
+        $byId = array_column($results, null, 'variant_id');
+        self::assertCount(35, $byId);
+        self::assertCount(34, array_filter($byId, static fn($row) => $row['success']));
+        self::assertSame('variant_not_found', $byId[17409]['reason']);
+        self::assertSame(9626, $byId[17409]['product_id']);
+    }
+
+    public function testMultipleMissingVariantsAndEmptyRemainder(): void {
+        $api = new SequencedBigCommerceAPI([
+            $this->variantFailure([0 => 'No variants with id 10', '2.id' => 'No variants with id 30']),
+            $this->variantFailure(['0.id' => 'No variants with id 20']),
+        ]);
+        $results = $api->batchUpdateVariants([['id' => 10], ['id' => 20], ['id' => 30]]);
+        self::assertCount(2, $api->requests);
+        self::assertSame([20], array_column($api->requests[1]['data'], 'id'));
+        self::assertSame(['variant_not_found', 'variant_not_found', 'variant_not_found'], array_column($results, 'reason'));
+    }
+
+    public function testAmbiguousVariantFailuresKeepTheOriginalErrorAndNeverRetry(): void {
+        foreach ([
+            $this->variantFailure(['0.id' => 'No variants with id 20']),
+            $this->variantFailure(['9.id' => 'No variants with id 10']),
+            $this->variantFailure(['0.id' => 'No variants with id 10', '1.sale_price' => 'Invalid price']),
+            $this->variantFailure(['0.id' => 'No variants with id 10'], 503),
+        ] as $failure) {
+            $api = new SequencedBigCommerceAPI([$failure]);
+            $results = $api->batchUpdateVariants([['id' => 10], ['id' => 20]]);
+            self::assertCount(1, $api->requests);
+            self::assertSame([], array_column($results, 'reason'));
+            self::assertSame([$failure->getMessage(), $failure->getMessage()], array_column($results, 'error'));
+        }
+    }
+
+    public function testVariantVerificationRequiresCompletePagesFromTheSameParent(): void {
+        $page = static function ($number, $id, $parent = 9626) {
+            return ['body' => ['data' => [['id' => $id, 'product_id' => $parent]],
+                'meta' => ['pagination' => ['current_page' => $number, 'total_pages' => 2, 'total' => 2]]]];
+        };
+        $api = new SequencedBigCommerceAPI([$page(1, 11), $page(2, 12)]);
+        self::assertSame([11, 12], $api->getCompleteVariantIds(9626));
+        self::assertSame(['GET', 'GET'], array_column($api->requests, 'method'));
+        foreach ([[], $page(1, 12), $page(2, 11), $page(2, 12, 5327)] as $badPage) {
+            $api = new SequencedBigCommerceAPI([$page(1, 11), $badPage]);
+            try {
+                $api->getCompleteVariantIds(9626);
+                self::fail('A partial or inconsistent listing must not permit cache removal.');
+            } catch (\RuntimeException $expected) {
+                self::assertCount(2, $api->requests);
+            }
+        }
+    }
+
     public function testBatchUpdateProductsDoesNotSendCatalogPrice() {
         $api = new TestableBigCommerceAPI([
             'status' => 200,

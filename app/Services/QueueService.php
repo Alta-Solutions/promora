@@ -200,6 +200,33 @@ class QueueService {
         }
     }
 
+    public function queueVariantVerification(int $productId): void {
+        $store = $this->requireStoreHash('verify product variants');
+        if ($productId <= 0) {
+            throw new \InvalidArgumentException('Product ID required for variant verification');
+        }
+        $payload = json_encode(['product_ids' => [$productId]]);
+        $lock = 'variant_check:' . sha1($store . ':' . $productId);
+        $this->ensureSyncJobsPayloadColumn();
+        if (!$this->acquireLock($lock, 5)) {
+            throw new \RuntimeException("Unable to queue variant verification for product {$productId}");
+        }
+        try {
+            $pending = $this->db->fetchOne(
+                "SELECT id FROM sync_jobs WHERE store_hash = ? AND job_type = 'verify_variants'
+                 AND status = 'pending' AND payload = ? LIMIT 1", [$store, $payload]
+            );
+            if (!$pending) {
+                $this->db->query(
+                    "INSERT INTO sync_jobs (store_hash, job_type, payload, total_items, status, attempts, created_at)
+                     VALUES (?, 'verify_variants', ?, 1, 'pending', 0, NOW())", [$store, $payload]
+                );
+            }
+        } finally {
+            $this->releaseLock($lock);
+        }
+    }
+
     public function createWebhookEventJob(int $eventId): array {
         $storeHash = $this->requireStoreHash('create webhook event job');
         if ($eventId <= 0) {
@@ -271,6 +298,8 @@ class QueueService {
                     WHEN 'single_sync' THEN 10
                     WHEN 'cleanup_single' THEN 20
                     WHEN 'cleanup' THEN 20
+                    WHEN 'verify_variants' THEN 22
+                    WHEN 'cleanup_promotion_field' THEN 23
                     WHEN 'omnibus_sync_products' THEN 25
                     WHEN 'webhook_event' THEN 30
                     WHEN 'omnibus_sync' THEN 40
@@ -317,6 +346,8 @@ class QueueService {
                     WHEN 'single_sync' THEN 10
                     WHEN 'cleanup_single' THEN 20
                     WHEN 'cleanup' THEN 20
+                    WHEN 'verify_variants' THEN 22
+                    WHEN 'cleanup_promotion_field' THEN 23
                     WHEN 'omnibus_sync_products' THEN 25
                     WHEN 'webhook_event' THEN 30
                     WHEN 'omnibus_sync' THEN 40

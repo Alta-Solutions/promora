@@ -96,6 +96,22 @@ When a queued promotion sync, manual single-promotion resync, or cleanup changes
 parent product IDs. Promotion and cleanup jobs are processed before Omnibus jobs
 so the targeted Omnibus sync sees the updated local price cache.
 
+### Missing catalog variants
+
+When BigCommerce rejects a variant batch with HTTP 422 and identifies a missing
+variant by both request position and ID, the app retries the remaining variants.
+Other validation errors retain the original failure. Promotion sync logs report
+successful writes, rule skips, and failed writes separately. The queue status
+can be `completed` when individual writes failed.
+
+A missing ID during a price write or a discrepancy during a catalog refresh
+queues a store-scoped `verify_variants` job for the parent product. Verification
+reads every page of the parent's catalog variants before removing confirmed
+stale cache rows. It closes active ownership with the history reason
+`variant_removed_from_catalog`. If this removes the last owner, a separate
+`cleanup_promotion_field` job rechecks ownership before clearing the shared
+field. Failed or incomplete catalog reads leave the local rows available for retry.
+
 ## Cleanup
 
 Cleanup jobs restore prices/custom fields for products no longer covered by a

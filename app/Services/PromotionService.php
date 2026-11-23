@@ -12,6 +12,7 @@ class PromotionService {
     private $db;
     private $cacheService;
     private $storeHash;
+    private $verificationQueue;
     private $omnibusPricingService;
     private $archiveService = null;
     private $storeConfigCache = null;
@@ -423,14 +424,18 @@ public function __construct(Database $db = null) {
             }
             
             $duration = microtime(true) - $startTime;
-            $message = implode("\n", $debugLog);
-            $this->logSync(null, 0, 0, $duration, $message, 'full');
+            $cleanupErrors = $expiredCleanupResult['errors'] + $cleanupResult['errors'];
+            $totalCleaned = $cleanedCount + $expiredCleanedCount;
+            $debugLog[] = "Price updates: {$totalCleaned} successful, 0 skipped by rules, {$cleanupErrors} failed.";
+            $debugLog[] = self::formatPriceDiagnostics(array_merge($expiredCleanupResult['diagnostics'], $cleanupResult['diagnostics']));
+            $message = implode("\n", array_filter($debugLog));
+            $this->logSync(null, $cleanedCount + $expiredCleanedCount, $cleanupErrors, $duration, $message, 'full');
             
             return [
                 'promotions' => 0,
                 'products' => 0,
                 'success' => 0,
-                'errors' => 0,
+                'errors' => $cleanupErrors,
                 'cleaned' => $cleanedCount,
                 'duration' => round($duration, 2),
                 'debug' => $debugLog,
@@ -442,6 +447,7 @@ public function __construct(Database $db = null) {
         $productPromotions = [];
         $existingFieldsMap = [];
         $omnibusSkippedCount = 0;
+        $matchedItems = [];
         
         // Process each promotion using LOCAL CACHE
         foreach ($promotions as $promotion) {
@@ -465,6 +471,8 @@ public function __construct(Database $db = null) {
                         : $product['custom_fields'];
                 }
 
+                $itemKey = $this->getPromotionItemKey($product['product_id'], $product['variant_id'] ?? null);
+                $matchedItems[$itemKey] = true;
                 $candidate = $this->buildPromotionCandidate($product, $promotion);
                 if (!$candidate || empty($candidate['will_apply'])) {
                     if ($candidate && ($candidate['omnibus_status'] ?? '') === 'invalid') {
@@ -473,11 +481,9 @@ public function __construct(Database $db = null) {
                     continue;
                 }
 
-                $itemKey = $this->getPromotionItemKey($candidate['product_id'], $candidate['variant_id'] ?? null);
-
                 if (!isset($productPromotions[$itemKey]) || 
                     $this->isBetterPromotion($candidate, $productPromotions[$itemKey])) {
-                    $productPromotions[$itemKey] = $candidate;
+                    $productPromotions[$itemKey] = $candidate + ['sku' => $product['sku'] ?? null];
                 }
             }
         }
@@ -492,29 +498,14 @@ public function __construct(Database $db = null) {
         [$productUpdates, $variantUpdates] = $this->buildPriceUpdateBatches($productPromotions);
         
         $productPriceResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
-        $variantPriceResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
+        $variantPriceResults = !empty($variantUpdates) ? $this->updateVariantPrices($variantUpdates) : [];
         $priceResults = array_merge($productPriceResults, $variantPriceResults);
         $appliedPromotions = $this->filterPromotionsWithSuccessfulPriceUpdates($productPromotions, $priceResults);
-        $diagnostics = $this->buildPriceUpdateFailureDiagnostics($productPromotions, $priceResults, $products);
+        $diagnostics = $this->buildPriceUpdateFailureDiagnostics($productPromotions, $priceResults, []);
         $successCount = count($appliedPromotions);
         $errorCount = count($productPromotions) - $successCount;
         
-        $debugLog[] = "Price updates: {$successCount} success, {$errorCount} errors";
-        foreach (array_slice($diagnostics, 0, 25) as $diagnostic) {
-            $label = !empty($diagnostic['sku'])
-                ? $diagnostic['sku']
-                : 'product_id=' . ($diagnostic['product_id'] ?? 'n/a');
-            $debugLog[] = sprintf(
-                'Price update failed for %s promo_price=%s: %s',
-                $label,
-                (string)($diagnostic['promo_price'] ?? 'n/a'),
-                (string)($diagnostic['error'] ?? 'Unknown error')
-            );
-        }
-        if (count($diagnostics) > 25) {
-            $debugLog[] = 'Price update diagnostics truncated; ' . (count($diagnostics) - 25) . ' more item(s).';
-        }
-        
+
         // BATCH UPDATE: Custom fields (KORIŠĆENJE MULTI CURLA)
         $customFieldUpdates = $this->buildUniquePromotionFieldUpdates($appliedPromotions);
         
@@ -551,6 +542,7 @@ public function __construct(Database $db = null) {
         // Cleanup expired products (sada će koristiti batch metode)
         $cleanupResult = $this->cleanupExpiredProductsBatch($productPromotions);
         $cleanedCount = (int)($cleanupResult['processed'] ?? 0);
+        $errorCount += $expiredCleanupResult['errors'] + $cleanupResult['errors'];
         $debugLog[] = "Cleaned {$cleanedCount} expired products";
         
         // 🚀 OPTIMIZACIJA: Direktno ažuriranje lokalnog keša (bez API poziva)
@@ -565,7 +557,11 @@ public function __construct(Database $db = null) {
         $duration = microtime(true) - $startTime;
         $debugLog[] = "\n=== Sync completed in " . round($duration, 2) . "s ===";
         
-        $this->logSync(null, $successCount, $errorCount, $duration, implode("\n", $debugLog), 'full');
+        $totalWrites = $successCount + $cleanedCount + $expiredCleanedCount;
+        $skippedCount = count(array_diff_key($matchedItems, $productPromotions));
+        $debugLog[] = "Price updates: {$totalWrites} successful, {$skippedCount} skipped by rules, {$errorCount} failed.";
+        $debugLog[] = self::formatPriceDiagnostics(array_merge($diagnostics, $expiredCleanupResult['diagnostics'], $cleanupResult['diagnostics']));
+        $this->logSync(null, $totalWrites, $errorCount, $duration, implode("\n", $debugLog), 'full');
         
         return [
             'promotions' => count($promotions),
@@ -773,109 +769,44 @@ public function __construct(Database $db = null) {
             [$this->storeHash, $now]
         );
         
-        $allItemsToClean = [];
-
+        $errors = 0;
+        $diagnostics = [];
         foreach ($expiredPromotions as $promo) {
             $items = $this->fetchPromotionProductsWithCachePrice(
-                "pp.promotion_id = ? AND pp.store_hash = ?",
-                [$promo['id'], $this->storeHash]
+                "pp.promotion_id = ? AND pp.store_hash = ?", [$promo['id'], $this->storeHash]
             );
-            
-            if (!empty($items)) {
-                $this->finalizePromotionArchive((int)$promo['id'], 'expired_cleanup');
-                $allItemsToClean = array_merge($allItemsToClean, $items);
-
-                // Batch uklanjanje sale_price (postojeće)
-                [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($items);
-                $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
-                $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
-                $omnibusProductIds = $this->mergeProductIdLists(
-                    $omnibusProductIds,
-                    $this->extractProductIdsForSuccessfulRestoreUpdates(
-                        array_merge($productUpdates, $variantUpdates),
-                        array_merge($productResults, $variantResults)
-                    )
-                );
-                if (!empty($cacheUpdates)) {
-                    $this->cacheService->updatePriceCacheDirectly($cacheUpdates);
-                }
-
-                // Brisanje iz DB za ovu promociju
-                $this->recordRemovedPromotionItems((int)$promo['id'], $items, 'expired_cleanup');
-                $this->db->query(
-                    "DELETE FROM promotion_products WHERE promotion_id = ? AND store_hash = ?",
-                    [$promo['id'], $this->storeHash]
-                );
-                $this->markPromotionArchiveCleanupCompleted((int)$promo['id']);
+            if (!$items) {
+                continue;
             }
+            $this->finalizePromotionArchive((int)$promo['id'], 'expired_cleanup');
+            $result = $this->cleanupPromotionProductItems($items, 'expired_cleanup');
+            $cleanedProductsCount += $result['processed'];
+            $errors += $result['errors'];
+            $diagnostics = array_merge($diagnostics, $result['diagnostics']);
+            $omnibusProductIds = $this->mergeProductIdLists($omnibusProductIds, $result['omnibus_product_ids']);
+            $this->markPromotionArchiveCleanupCompleted((int)$promo['id']);
         }
-        
-        // 2. KORAK: Globalno uklanjanje Custom Fieldsa za sve proizvode u batch-u (MULTI CURL)
-        if (!empty($allItemsToClean)) {
-            $productIdsToClean = $this->getProductsWithoutActivePromotionEntries($allItemsToClean);
-            $cleanResults = !empty($productIdsToClean)
-                ? $this->customFieldService->batchRemovePromotionFields($productIdsToClean)
-                : [];
-
-            $cleanedProductsCount = count(array_filter($cleanResults, fn($r) => $r['success']));
-        }
-        
-        return [
-            'processed' => $cleanedProductsCount,
-            'omnibus_product_ids' => $omnibusProductIds,
-        ];
+        return ['processed' => $cleanedProductsCount, 'errors' => $errors, 'diagnostics' => $diagnostics,
+            'omnibus_product_ids' => $omnibusProductIds];
     }
-    
+
     public function cleanupAllProductsBatch(): array {
         $allProducts = $this->fetchPromotionProductsWithCachePrice(
             "pp.store_hash = ?",
             [$this->storeHash]
         );
         
-        if (empty($allProducts)) {
-            return ['processed' => 0, 'omnibus_product_ids' => []];
-        }
-
-        foreach ($this->extractPromotionIds($allProducts) as $promotionId) {
+        $promotionIds = $this->extractPromotionIds($allProducts);
+        foreach ($promotionIds as $promotionId) {
             $this->finalizePromotionArchive($promotionId, 'global_cleanup');
         }
-        
-        [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($allProducts);
-
-        // Batch uklanjanje sale_price (postojeće)
-        $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
-        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
-        $cleanedCount = count(array_filter(array_merge($productResults, $variantResults), fn($r) => !empty($r['success'])));
-        $productIds = array_values(array_unique(array_column($allProducts, 'product_id')));
-        
-        // 🚀 IZMENA: Uklanjanje custom fields u BATCH-u (MULTI CURL)
-        if (!empty($productIds)) {
-            $this->customFieldService->batchRemovePromotionFields($productIds);
+        $result = $this->cleanupPromotionProductItems($allProducts, 'global_cleanup');
+        foreach ($promotionIds as $promotionId) {
+            $this->markPromotionArchiveCleanupCompleted($promotionId);
         }
-        
-        // 🚀 IZMENA: Update cache u BATCH-u
-        if (!empty($cacheUpdates)) {
-            $this->cacheService->updatePriceCacheDirectly($cacheUpdates);
-        }
-        
-        // Delete all (postojeće)
-        if ($cleanedCount > 0) {
-            $this->recordRemovedPromotionItems(null, $allProducts, 'global_cleanup');
-            $this->db->query("DELETE FROM promotion_products WHERE store_hash = ?", [$this->storeHash]);
-            foreach ($this->extractPromotionIds($allProducts) as $promotionId) {
-                $this->markPromotionArchiveCleanupCompleted($promotionId);
-            }
-        }
-        
-        return [
-            'processed' => $cleanedCount,
-            'omnibus_product_ids' => $this->extractProductIdsForSuccessfulRestoreUpdates(
-                array_merge($productUpdates, $variantUpdates),
-                array_merge($productResults, $variantResults)
-            ),
-        ];
+        return $result;
     }
-    
+
     private function cleanupExpiredProductsBatch($activeProducts): array {
         $activeItemKeys = array_fill_keys(array_keys($activeProducts), true);
         $allExistingItems = $this->fetchPromotionProductsWithCachePrice(
@@ -887,103 +818,24 @@ public function __construct(Database $db = null) {
             return !isset($activeItemKeys[$itemKey]);
         }));
         
-        if (empty($toClean)) {
-            return ['processed' => 0, 'omnibus_product_ids' => []];
-        }
-        
-        [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($toClean);
-        $productIds = $this->getProductsWithoutActivePromotionEntries($toClean, array_column($toClean, 'id'));
-
-        // Batch uklanjanje sale_price (postojeće)
-        $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
-        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
-        $cleanedCount = count(array_filter(array_merge($productResults, $variantResults), fn($r) => !empty($r['success'])));
-        
-        // 🚀 IZMENA: Uklanjanje custom fields u BATCH-u (MULTI CURL)
-        if (!empty($productIds)) {
-            $this->customFieldService->batchRemovePromotionFields($productIds);
-        }
-        
-        // 🚀 IZMENA: Update cache u BATCH-u
-        if (!empty($cacheUpdates)) {
-            $this->cacheService->updatePriceCacheDirectly($cacheUpdates);
-        }
-
-        // 🚀 IZMENA: Brisanje iz baze jednim BATCH SQL upitom
-        $dbIdsToDelete = array_column($toClean, 'id');
-        $placeholders = str_repeat('?,', count($dbIdsToDelete) - 1) . '?';
-        $this->recordRemovedPromotionItems(null, $toClean, 'no_longer_applicable');
-        $this->db->query(
-            "DELETE FROM promotion_products WHERE store_hash = ? AND id IN ($placeholders)",
-            array_merge([$this->storeHash], $dbIdsToDelete)
-        );
-        
-        return [
-            'processed' => $cleanedCount,
-            'omnibus_product_ids' => $this->extractProductIdsForSuccessfulRestoreUpdates(
-                array_merge($productUpdates, $variantUpdates),
-                array_merge($productResults, $variantResults)
-            ),
-        ];
+        return $this->cleanupPromotionProductItems($toClean);
     }
 
-    /**
-     * Batch čišćenje proizvoda za JEDNU specifičnu promociju.
-     * Koristi se kada promocija istekne, a korisnik klikne "Sync".
-     */
-    public function cleanupSinglePromotionBatch($promotionId, $limit = 50) {
-        $this->finalizePromotionArchive((int)$promotionId, 'expired_cleanup');
-
-        // 1. Dohvati proizvode i varijante vezane za ovu promociju, uključujući njihov PK
+    public function cleanupSinglePromotionBatch($promotionId, $limit = 50, int $afterId = 0) {
+        if ($afterId === 0) {
+            $this->finalizePromotionArchive((int)$promotionId, 'expired_cleanup');
+        }
         $items = $this->fetchPromotionProductsWithCachePrice(
-            "pp.promotion_id = ? AND pp.store_hash = ?",
-            [$promotionId, $this->storeHash],
-            "LIMIT " . (int)$limit
+            "pp.promotion_id = ? AND pp.store_hash = ? AND pp.id > ?",
+            [$promotionId, $this->storeHash, $afterId],
+            "ORDER BY pp.id LIMIT " . (int)$limit
         );
-        
-        if (empty($items)) {
-            return ['processed' => 0, 'errors' => 0, 'omnibus_product_ids' => []];
-        }
-        
-        $productIds = array_column($items, 'product_id');
-        [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($items);
-        
-        // 3. Ukloni sale_price na BigCommerce
-        $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
-        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
-        $errors = count(array_filter($productResults, fn($r) => !$r['success'])) + count(array_filter($variantResults, fn($r) => !$r['success']));
-        $omnibusProductIds = $this->extractProductIdsForSuccessfulRestoreUpdates(
-            array_merge($productUpdates, $variantUpdates),
-            array_merge($productResults, $variantResults)
-        );
-
-        // 4. Ukloni Custom Fields (Batch)
-        $productsToClearFields = [];
-        
-        // 5. Obriši iz lokalne baze koristeći primarne ključeve
-        $dbIdsToDelete = array_column($items, 'id');
-        $placeholders = str_repeat('?,', count($dbIdsToDelete) - 1) . '?';
-        $this->recordRemovedPromotionItems((int)$promotionId, $items, 'promotion_cleanup');
-        $this->db->query(
-            "DELETE FROM promotion_products WHERE store_hash = ? AND id IN ($placeholders)",
-            array_merge([$this->storeHash], $dbIdsToDelete)
-        );
-        
-        // 6. Ažuriraj keš direktno
-        $productsToClearFields = $this->getProductsWithoutActivePromotionEntries($items, $dbIdsToDelete);
-        if (!empty($productsToClearFields)) {
-            $this->customFieldService->batchRemovePromotionFields($productsToClearFields);
-        }
-
-        $this->cacheService->updatePriceCacheDirectly($cacheUpdates);
-        
-        return [
-            'processed' => count($items),
-            'errors' => $errors,
-            'omnibus_product_ids' => $omnibusProductIds,
-        ];
+        $result = $this->cleanupPromotionProductItems($items, 'promotion_cleanup');
+        $result['next_id'] = $items ? (int)end($items)['id'] : null;
+        $result['visited'] = count($items);
+        return $result;
     }
-    
+
     private function batchSavePromotionProducts($promotions, ?string $lifecycleAt = null) {
         if (empty($promotions)) {
             return;
@@ -1209,7 +1061,8 @@ public function __construct(Database $db = null) {
         $reconciledCount = $reconciliationResult['changed'] ?? 0;
         
         $stats = $this->processProductsBatch($products, $promotionId);
-        $stats['cleaned'] = $reconciledCount;
+        $stats['cleaned'] += $reconciledCount;
+        $stats['errors'] += $reconciliationResult['errors'] ?? 0;
         $stats['omnibus_product_ids'] = $this->mergeProductIdLists(
             $stats['omnibus_product_ids'] ?? [],
             $reconciliationResult['omnibus_product_ids'] ?? []
@@ -1217,34 +1070,37 @@ public function __construct(Database $db = null) {
 
         $duration = round(microtime(true) - $startTime, 2);
         
-        $this->logSync($promotionId, $stats['synced'], $stats['errors'], $duration, "Single Sync: " . $promotion['name']);
+        $success = $stats['synced'] + $stats['cleaned'];
+        $message = "Single Sync: {$promotion['name']}\nPrice updates: {$success} successful, 0 skipped by rules, {$stats['errors']} failed.";
+        $details = self::formatPriceDiagnostics(array_merge($stats['diagnostics'], $reconciliationResult['diagnostics'] ?? []));
+        $this->logSync($promotionId, $success, $stats['errors'], $duration, trim($message . "\n" . $details));
 
         return $stats;
     }
 
-    public function syncSinglePromotionBatch($promotionId, $limit = 50, $offset = 0) {
+    public function syncSinglePromotionBatch($promotionId, $limit = 50, $offset = 0, ?array $cursor = null) {
         $promotion = $this->promotionModel->findById($promotionId);
         if (!$promotion) throw new \Exception("Promocija nije pronađena.");
 
         $filters = json_decode($promotion['filters'], true);
         $activePromotions = $this->normalizeActivePromotionsForBatch($this->promotionModel->findActive());
-        $reconciliationResult = $offset === 0
+        $reconciliationResult = $offset === 0 && $cursor === null
             ? $this->reconcilePromotionProductsForPromotion($promotion, $activePromotions)
             : ['changed' => 0, 'omnibus_product_ids' => []];
         $reconciledCount = $reconciliationResult['changed'] ?? 0;
         
         // 1. Dohvati proizvode i varijante
-        $items = $this->cacheService->getProductsByFilters($filters, $limit, $offset);
-        if (empty($items)) {
-            return [
-                'processed' => 0,
-                'errors' => 0,
-                'cleaned' => $reconciledCount,
-                'omnibus_product_ids' => $reconciliationResult['omnibus_product_ids'] ?? [],
-            ];
-        }
+        $items = $this->cacheService->getProductsByFilters($filters, $limit, $offset, ['cursor' => $cursor]);
+        $lastItem = end($items);
+        $nextCursor = $lastItem ? [
+            'product_id' => (int)$lastItem['product_id'],
+            'variant_sort_id' => (int)($lastItem['variant_sort_id'] ?? $lastItem['variant_id'] ?? 0),
+            'id' => (string)$lastItem['id'],
+        ] : null;
 
-        $this->prefetchPromotionProductExclusions($activePromotions, $items);
+        if ($items) {
+            $this->prefetchPromotionProductExclusions($activePromotions, $items);
+        }
         $productPromotions = [];
 
         // 2. Priprema podataka (samo logika, bez API poziva)
@@ -1279,21 +1135,15 @@ public function __construct(Database $db = null) {
             }
         }
 
-        if (empty($productPromotions)) {
-            return [
-                'processed' => 0, 
-                'errors' => count($items),
-                'cleaned' => $reconciledCount,
-                'omnibus_product_ids' => $reconciliationResult['omnibus_product_ids'] ?? [],
-            ];
-        }
-        // 3. Razdvajanje ažuriranja za proizvode i za varijante
         $applyResults = $this->applyPromotionCandidatesBatch($productPromotions, $items);
 
         return [
             'processed' => $applyResults['processed'],
-            'errors' => count($items) - $applyResults['processed'],
-            'diagnostics' => $applyResults['diagnostics'] ?? [],
+            'errors' => $applyResults['errors'] + ($reconciliationResult['errors'] ?? 0),
+            'skipped' => count($items) - count($productPromotions),
+            'visited' => count($items),
+            'next_cursor' => $nextCursor,
+            'diagnostics' => array_merge($applyResults['diagnostics'] ?? [], $reconciliationResult['diagnostics'] ?? []),
             'cleaned' => $reconciledCount,
             'omnibus_product_ids' => $this->mergeProductIdLists(
                 $applyResults['omnibus_product_ids'] ?? [],
@@ -1310,7 +1160,7 @@ public function __construct(Database $db = null) {
         [$productUpdates, $variantUpdates] = $this->buildPriceUpdateBatches($productPromotions);
 
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
-        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
+        $variantResults = !empty($variantUpdates) ? $this->updateVariantPrices($variantUpdates) : [];
         $priceResults = array_merge($productResults, $variantResults);
         $appliedPromotions = $this->filterPromotionsWithSuccessfulPriceUpdates($productPromotions, $priceResults);
         $diagnostics = $this->buildPriceUpdateFailureDiagnostics($productPromotions, $priceResults, $sourceItems);
@@ -1439,7 +1289,12 @@ public function __construct(Database $db = null) {
             );
         }
 
-        return ['changed' => $changedCount, 'omnibus_product_ids' => $omnibusProductIds];
+        return [
+            'changed' => $changedCount,
+            'omnibus_product_ids' => $omnibusProductIds,
+            'errors' => ($applyResults['errors'] ?? 0) + ($cleanupResults['errors'] ?? 0),
+            'diagnostics' => array_merge($applyResults['diagnostics'] ?? [], $cleanupResults['diagnostics'] ?? []),
+        ];
     }
 
     private function getPromotionItemsNoLongerApplicable(array $items, int $promotionId, array $activePromotions): array {
@@ -1468,50 +1323,67 @@ public function __construct(Database $db = null) {
         ];
     }
 
-    private function cleanupPromotionProductItems(array $items): array {
-        if (empty($items)) {
-            return ['processed' => 0, 'omnibus_product_ids' => []];
-        }
-
+    private function cleanupPromotionProductItems(array $items, string $reason = 'no_longer_applicable'): array {
+        $productResults = [];
         [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates($items);
-        $dbIdsToDelete = array_values(array_filter(array_map('intval', array_column($items, 'id')), static function (int $id): bool {
-            return $id > 0;
-        }));
-        $productIds = $this->getProductsWithoutActivePromotionEntries($items, $dbIdsToDelete);
-
-        $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
-        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
-        $cleanedCount = count(array_filter(array_merge($productResults, $variantResults), fn($result) => !empty($result['success'])));
-
-        if (!empty($productIds)) {
-            $this->customFieldService->batchRemovePromotionFields($productIds);
+        if ($productUpdates) {
+            $productResults = $this->api->batchUpdateProducts($productUpdates);
         }
+        $variantResults = $variantUpdates ? $this->updateVariantPrices($variantUpdates) : [];
+        $priceResults = array_merge($productResults, $variantResults);
+        $restored = $this->filterPromotionsWithSuccessfulPriceUpdates($items, $priceResults);
+        $diagnostics = $this->buildPriceUpdateFailureDiagnostics($items, $priceResults, $items);
 
-        if (!empty($cacheUpdates)) {
-            $this->cacheService->updatePriceCacheDirectly($cacheUpdates);
-        }
-
-        if (!empty($dbIdsToDelete)) {
-            $placeholders = str_repeat('?,', count($dbIdsToDelete) - 1) . '?';
-            $this->recordRemovedPromotionItems(null, $items, 'no_longer_applicable');
-            $this->db->query(
-                "DELETE FROM promotion_products WHERE store_hash = ? AND id IN ($placeholders)",
-                array_merge([$this->storeHash], $dbIdsToDelete)
+        if ($restored) {
+            $ids = array_column($restored, 'id');
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
+            // The price logger can run schema guards. Finish its work before the ownership transaction.
+            $this->cacheService->updatePriceCacheDirectly(
+                $this->filterPromotionsWithSuccessfulPriceUpdates($cacheUpdates, $priceResults)
             );
+            $this->db->beginTransaction();
+            try {
+                // A concurrent verification or replacement can have already closed these ownership rows.
+                $owners = $this->db->fetchAll(
+                    "SELECT id, promotion_id FROM promotion_products WHERE store_hash = ?
+                     AND id IN ($placeholders) ORDER BY id FOR UPDATE", array_merge([$this->storeHash], $ids)
+                );
+                $ownerById = array_column($owners, 'promotion_id', 'id');
+                $stillOwned = array_filter($restored, static function ($item) use ($ownerById) {
+                    return isset($ownerById[$item['id']]) && (int)$ownerById[$item['id']] === (int)$item['promotion_id'];
+                });
+                if ($stillOwned) {
+                    $this->recordRemovedPromotionItems(null, $stillOwned, $reason);
+                    $ids = array_column($stillOwned, 'id');
+                    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+                    $this->db->query(
+                        "DELETE FROM promotion_products WHERE store_hash = ? AND id IN ($placeholders)",
+                        array_merge([$this->storeHash], $ids)
+                    );
+                }
+                $this->db->commit();
+            } catch (\Throwable $e) {
+                $this->db->rollback();
+                throw $e;
+            }
+            $productIds = $this->getProductsWithoutActivePromotionEntries($stillOwned);
+            if ($productIds) {
+                $this->customFieldService->batchRemovePromotionFields($productIds);
+            }
         }
-
         return [
-            'processed' => $cleanedCount,
-            'omnibus_product_ids' => $this->extractProductIdsForSuccessfulRestoreUpdates(
-                array_merge($productUpdates, $variantUpdates),
-                array_merge($productResults, $variantResults)
-            ),
+            'processed' => count($restored),
+            'errors' => count($items) - count($restored),
+            'diagnostics' => $diagnostics,
+            'omnibus_product_ids' => $this->extractUniqueProductIds($restored),
         ];
     }
 
     private function processProductsBatch($products, $specificPromoId = null) {
         $synced = 0;
         $errors = 0;
+        $cleaned = 0;
+        $diagnostics = [];
         $omnibusProductIds = [];
         
         // Dohvati sve trenutno aktivne promocije za poređenje prioriteta
@@ -1533,6 +1405,7 @@ public function __construct(Database $db = null) {
                 } else {
                     // Ako proizvod više ne upada ni u jednu promociju, vrati originalnu cenu
                     $this->removePromotionFromProduct($product);
+                    $cleaned++;
                     $omnibusProductIds = $this->mergeProductIdLists(
                         $omnibusProductIds,
                         [(int)$product['product_id']]
@@ -1540,11 +1413,17 @@ public function __construct(Database $db = null) {
                 }
             } catch (\Exception $e) {
                 $errors++;
+                $diagnostics[] = [
+                    'product_id' => $product['product_id'],
+                    'variant_id' => $product['variant_id'] ?? null,
+                    'sku' => $product['sku'] ?? null,
+                    'error' => $e->getMessage(),
+                ];
                 error_log("Error syncing product {$product['product_id']}: " . $e->getMessage());
             }
         }
 
-        return ['synced' => $synced, 'errors' => $errors, 'omnibus_product_ids' => $omnibusProductIds];
+        return ['synced' => $synced, 'cleaned' => $cleaned, 'errors' => $errors, 'diagnostics' => $diagnostics, 'omnibus_product_ids' => $omnibusProductIds];
     }
 
     /**
@@ -1596,7 +1475,7 @@ public function __construct(Database $db = null) {
         [$productUpdates, $variantUpdates] = $this->buildPriceUpdateBatches([$replacement]);
 
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
-        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
+        $variantResults = !empty($variantUpdates) ? $this->updateVariantPrices($variantUpdates) : [];
         $priceResults = array_merge($productResults, $variantResults);
         $applied = $this->filterPromotionsWithSuccessfulPriceUpdates([$replacement], $priceResults);
 
@@ -1670,7 +1549,7 @@ public function __construct(Database $db = null) {
         [$productUpdates, $variantUpdates, $cacheUpdates] = $this->buildRestoreUpdates([$item]);
 
         $productResults = !empty($productUpdates) ? $this->api->batchUpdateProducts($productUpdates) : [];
-        $variantResults = !empty($variantUpdates) ? $this->api->batchUpdateVariants($variantUpdates) : [];
+        $variantResults = !empty($variantUpdates) ? $this->updateVariantPrices($variantUpdates) : [];
         $priceResults = array_merge($productResults, $variantResults);
 
         $successfulKeys = $this->getSuccessfulPriceUpdateKeys($priceResults);
@@ -2842,14 +2721,14 @@ public function __construct(Database $db = null) {
 
         // 1. Update na BC (Ovo je sporo ako se radi u petlji!)
         if (!empty($product['variant_id'])) {
-            $priceResults = $this->api->batchUpdateVariants([[
+            $priceResults = $this->updateVariantPrices([[
                 'product_id' => $product['product_id'],
                 'id' => $product['variant_id'],
                 'sale_price' => $promoPrice
             ]]);
 
             if (!$this->hasSuccessfulPriceUpdateForItem($product['product_id'], $product['variant_id'], $priceResults)) {
-                throw new \RuntimeException("Variant price update failed for product {$product['product_id']} variant {$product['variant_id']}.");
+                throw new \RuntimeException($priceResults[0]['error'] ?? "Variant price update failed for product {$product['product_id']} variant {$product['variant_id']}.");
             }
         } else {
             $this->api->updateProductSalePrice($product['product_id'], $promoPrice);
@@ -2896,11 +2775,14 @@ public function __construct(Database $db = null) {
         );
 
         if (!empty($product['variant_id'])) {
-            $this->api->batchUpdateVariants([[
+            $results = $this->updateVariantPrices([[
                 'product_id' => $product['product_id'],
                 'id' => $product['variant_id'],
                 'sale_price' => null
             ]]);
+            if (!$this->hasSuccessfulPriceUpdateForItem($product['product_id'], $product['variant_id'], $results)) {
+                throw new \RuntimeException($results[0]['error'] ?? 'Variant price restore failed');
+            }
             $this->recordRemovedPromotionItems(null, $existingPromotionItems, 'product_resync');
             $this->db->query(
                 "DELETE FROM promotion_products WHERE product_id = ? AND variant_id = ? AND store_hash = ?",
@@ -2926,6 +2808,29 @@ public function __construct(Database $db = null) {
         ]]);
     }
 
+    private function updateVariantPrices(array $updates): array {
+        $results = $this->api->batchUpdateVariants($updates);
+        $missing = array_filter($results, static function ($result) {
+            return ($result['reason'] ?? null) === 'variant_not_found';
+        });
+        if ($missing) {
+            $queue = $this->verificationQueue ??= new QueueService($this->storeHash);
+            foreach ($this->extractUniqueProductIds($missing) as $productId) {
+                try {
+                    $queue->queueVariantVerification($productId);
+                } catch (\Exception $e) {
+                    foreach ($results as &$result) {
+                        if (($result['reason'] ?? '') === 'variant_not_found' && (int)$result['product_id'] === $productId) {
+                            $result['error'] .= '; cache verification could not be queued: ' . $e->getMessage();
+                        }
+                    }
+                    unset($result);
+                }
+            }
+        }
+        return $results;
+    }
+
     private function filterPromotionsWithSuccessfulPriceUpdates(array $promotions, array $priceResults): array {
         $successfulKeys = $this->getSuccessfulPriceUpdateKeys($priceResults);
         if (empty($successfulKeys)) {
@@ -2936,6 +2841,36 @@ public function __construct(Database $db = null) {
             $key = $this->getPromotionItemKey($promo['product_id'], $promo['variant_id'] ?? null);
             return isset($successfulKeys[$key]);
         });
+    }
+
+    public static function formatPriceDiagnostics(array $diagnostics, int $limit = 25): string {
+        if (empty($diagnostics)) {
+            return '';
+        }
+
+        $lines = [];
+        foreach (array_slice($diagnostics, 0, $limit) as $item) {
+            $label = (!empty($item['sku']) ? $item['sku'] . ' ' : '')
+                . 'product_id=' . ($item['product_id'] ?? 'n/a');
+            $variantId = $item['variant_id'] ?? null;
+            if ($variantId !== null && $variantId !== '') {
+                $label .= ' variant_id=' . (string)$variantId;
+            }
+
+            $promoPrice = array_key_exists('promo_price', $item) && $item['promo_price'] !== null
+                ? ' promo_price=' . (string)$item['promo_price']
+                : '';
+            $error = trim((string)($item['error'] ?? 'Unknown error'));
+
+            $lines[] = "- {$label}{$promoPrice}: {$error}";
+        }
+
+        $remaining = count($diagnostics) - count($lines);
+        if ($remaining > 0) {
+            $lines[] = "- ... {$remaining} more diagnostic item(s)";
+        }
+
+        return "Diagnostics:\n" . implode("\n", $lines);
     }
 
     private function buildPriceUpdateFailureDiagnostics(
@@ -2961,7 +2896,7 @@ public function __construct(Database $db = null) {
                 (int)($productId ?: 0),
                 $variantId !== null && $variantId !== '' ? (int)$variantId : null
             );
-            $failedByKey[$key] = (string)($result['error'] ?? 'Unknown price update error');
+            $failedByKey[$key] = $result;
         }
 
         $sourceByKey = [];
@@ -2994,14 +2929,14 @@ public function __construct(Database $db = null) {
 
             $source = $sourceByKey[$key] ?? [];
             $diagnostics[] = [
-                'type' => 'price_update_failed',
+                'type' => $failedByKey[$key]['reason'] ?? 'price_update_failed',
                 'promotion_id' => (int)($promo['promotion_id'] ?? 0),
                 'product_id' => $productId,
                 'variant_id' => $variantId,
-                'sku' => $source['sku'] ?? null,
+                'sku' => $source['sku'] ?? $promo['sku'] ?? null,
                 'product_name' => $promo['product_name'] ?? ($source['name'] ?? null),
                 'promo_price' => $promo['promo_price'] ?? null,
-                'error' => $failedByKey[$key] ?? 'No successful price update response returned',
+                'error' => $failedByKey[$key]['error'] ?? 'No successful price update response returned',
             ];
         }
 
@@ -3091,35 +3026,6 @@ public function __construct(Database $db = null) {
         }
 
         $productIds = array_keys($merged);
-        sort($productIds, SORT_NUMERIC);
-        return $productIds;
-    }
-
-    private function extractProductIdsForSuccessfulRestoreUpdates(array $updates, array $priceResults): array {
-        $successfulKeys = $this->getSuccessfulPriceUpdateKeys($priceResults);
-        if (empty($successfulKeys)) {
-            return [];
-        }
-
-        $productIds = [];
-        foreach ($updates as $update) {
-            $productId = (int)($update['product_id'] ?? 0);
-            if ($productId <= 0) {
-                continue;
-            }
-
-            $variantId = $update['id'] ?? ($update['variant_id'] ?? null);
-            $key = $this->getPromotionItemKey(
-                $productId,
-                $variantId !== null && $variantId !== '' ? (int)$variantId : null
-            );
-
-            if (isset($successfulKeys[$key])) {
-                $productIds[$productId] = true;
-            }
-        }
-
-        $productIds = array_keys($productIds);
         sort($productIds, SORT_NUMERIC);
         return $productIds;
     }
@@ -3467,6 +3373,15 @@ public function __construct(Database $db = null) {
 
         $result = $this->db->fetchOne($sql, $params);
         return !empty($result['cnt']);
+    }
+
+    public function removeUnusedPromotionField(int $productId): void {
+        if (!$this->hasActivePromotionEntriesForProduct($productId)) {
+            $results = $this->customFieldService->batchRemovePromotionFields([$productId]);
+            if (empty($results[0]['success'])) {
+                throw new \RuntimeException("Unable to remove promotion field from product {$productId}");
+            }
+        }
     }
 
     private function getProductsWithoutActivePromotionEntries(array $items, array $deletedIds = []): array {

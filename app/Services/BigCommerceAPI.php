@@ -505,103 +505,133 @@ class BigCommerceAPI {
      * 🚀 NOVO: Batch update variants using BigCommerce native batch endpoint
      */
     public function batchUpdateVariants($updates) {
-        if (empty($updates)) {
-            return [];
-        }
-        
-        // BigCommerce API limit for this endpoint is 50
-        $batches = array_chunk($updates, 50);
         $results = [];
-        
-        foreach ($batches as $batch) {
-            try {
-                // The payload is an array of variant sale price update objects.
-                // BigCommerce's cross-product batch variant endpoint is /catalog/variants.
-                $payload = array_map(function($update) {
+        foreach (array_chunk($updates, 50) as $batch) {
+            while ($batch) {
+                $payload = [];
+                foreach ($batch as $update) {
                     $item = [
                         'id' => (int)$update['id'],
-                        'sale_price' => $this->normalizeSalePriceForApi($update['sale_price'] ?? null)
+                        'sale_price' => $this->normalizeSalePriceForApi($update['sale_price'] ?? null),
                     ];
-
                     if (!empty($update['product_id'])) {
                         $item['product_id'] = (int)$update['product_id'];
                     }
-
-                    return $item;
-                }, $batch);
-                $requestedByVariantId = [];
-                foreach ($batch as $update) {
-                    if (!empty($update['id'])) {
-                        $requestedByVariantId[(int)$update['id']] = $update;
-                    }
+                    $payload[] = $item;
                 }
-                $resolvedVariantIds = [];
 
-                $response = $this->request('PUT', 'catalog/variants', $payload);
-                
-                // Process response
-                if (isset($response['body']['data'])) {
-                    foreach ($response['body']['data'] as $updatedVariant) {
-                        $variantId = isset($updatedVariant['id']) ? (int)$updatedVariant['id'] : null;
-                        if ($variantId !== null) {
-                            $resolvedVariantIds[$variantId] = true;
+                try {
+                    $response = $this->request('PUT', 'catalog/variants', $payload);
+                } catch (\Exception $exception) {
+                    $missing = $this->missingVariantErrors($exception->getMessage(), $batch);
+                    $remaining = [];
+                    foreach ($batch as $index => $update) {
+                        if ($missing && !isset($missing[$index])) {
+                            $remaining[] = $update;
+                            continue;
                         }
-                        $productId = $updatedVariant['product_id']
-                            ?? ($variantId !== null && isset($requestedByVariantId[$variantId]['product_id'])
-                                ? $requestedByVariantId[$variantId]['product_id']
-                                : null);
-
-                        $results[] = [
-                            'success' => true,
-                            'product_id' => $productId !== null ? (int)$productId : null,
-                            'variant_id' => $variantId
-                        ];
-                    }
-                }
-                
-                // Handle partial errors if present
-                if (isset($response['body']['errors'])) {
-                     foreach ((array)$response['body']['errors'] as $error) {
-                        $error = is_array($error) ? $error : ['message' => (string)$error];
-                        $results[] = [
+                        $failure = [
                             'success' => false,
-                            'product_id' => $error['product_id'] ?? null,
-                            'variant_id' => $error['id'] ?? null,
-                            'error' => $error['message'] ?? 'Unknown batch error'
+                            'product_id' => $update['product_id'] ?? null,
+                            'variant_id' => $update['id'],
+                            'error' => $missing[$index] ?? $exception->getMessage(),
                         ];
-                        if (!empty($error['id'])) {
-                            $resolvedVariantIds[(int)$error['id']] = true;
+                        if (isset($missing[$index])) {
+                            $failure['reason'] = 'variant_not_found';
                         }
+                        $results[] = $failure;
                     }
+                    $batch = $remaining;
+                    continue;
                 }
 
-                foreach ($requestedByVariantId as $variantId => $update) {
-                    if (isset($resolvedVariantIds[$variantId])) {
-                        continue;
+                $returned = array_column($response['body']['data'] ?? [], null, 'id');
+                $errors = [];
+                foreach (($response['body']['errors'] ?? []) as $error) {
+                    if (isset($error['id'])) {
+                        $errors[$error['id']] = $this->stringifyBatchError($error);
                     }
-
-                    $results[] = [
-                        'success' => false,
-                        'product_id' => $update['product_id'] ?? null,
-                        'variant_id' => $variantId,
-                        'error' => 'Variant was not returned in BigCommerce batch response'
-                    ];
                 }
-                
-            } catch (\Exception $e) {
-                // If the whole batch fails, mark all variants in it as failed
                 foreach ($batch as $update) {
-                    $results[] = [
-                        'success' => false,
-                        'product_id' => $update['product_id'],
-                        'variant_id' => $update['id'],
-                        'error' => $e->getMessage()
+                    $id = (int)$update['id'];
+                    $success = isset($returned[$id]) && !isset($errors[$id]);
+                    $result = [
+                        'success' => $success,
+                        'product_id' => $update['product_id'] ?? $returned[$id]['product_id'] ?? null,
+                        'variant_id' => $id,
                     ];
+                    if (!$success) {
+                        $result['error'] = $errors[$id] ?? 'Variant was not returned in BigCommerce batch response';
+                    }
+                    $results[] = $result;
                 }
+                break;
             }
         }
-        
         return $results;
+    }
+
+    private function missingVariantErrors(string $message, array $batch): array {
+        if (!preg_match('/^BigCommerce API Error \(Status: 422, Endpoint: catalog\/variants\):.*?\bBody:\s*(\{.*\})\s*$/s', $message, $match)) {
+            return [];
+        }
+        $body = json_decode($match[1], true);
+        if (!is_array($body['errors'] ?? null) || (int)($body['status'] ?? 422) !== 422) {
+            return [];
+        }
+        $missing = [];
+        foreach ($body['errors'] as $field => $error) {
+            if (!preg_match('/^(0|[1-9]\d*)(?:\.id)?$/D', (string)$field, $position)
+                || !is_string($error) || !preg_match('/^No variants with id ([1-9]\d*)$/D', $error, $id)) {
+                return [];
+            }
+            $index = (int)$position[1];
+            if ((string)($batch[$index]['id'] ?? '') !== $id[1]) {
+                return [];
+            }
+            $missing[$index] = $error;
+        }
+        return $missing;
+    }
+
+    public function getCompleteVariantIds(int $productId): array {
+        $ids = [];
+        $expectedTotal = null;
+        $expectedPages = null;
+        for ($page = 1; ; $page++) {
+            $response = $this->request('GET', "catalog/products/{$productId}/variants?limit=250&page={$page}");
+            $rows = $response['body']['data'] ?? null;
+            $pagination = $response['body']['meta']['pagination'] ?? [];
+            $total = filter_var($pagination['total'] ?? null, FILTER_VALIDATE_INT);
+            $pages = filter_var($pagination['total_pages'] ?? null, FILTER_VALIDATE_INT);
+            $current = filter_var($pagination['current_page'] ?? null, FILTER_VALIDATE_INT);
+            $validPage = $current === $page || ($page === 1 && $current === 0 && $total === 0 && $pages === 0);
+            if (!is_array($rows) || array_values($rows) !== $rows || !$validPage
+                || $total === false || $total < 0 || $pages === false || $pages < 0
+                || ($expectedTotal !== null && ($total !== $expectedTotal || $pages !== $expectedPages))) {
+                throw new \RuntimeException("Incomplete variant list for product {$productId} on page {$page}");
+            }
+            if (($total === 0 && ($pages > 1 || $rows)) || ($total > 0 && (!$rows || $pages < $page || $pages > $total))) {
+                throw new \RuntimeException("Invalid variant pagination for product {$productId}");
+            }
+            $expectedTotal = $total;
+            $expectedPages = $pages;
+            foreach ($rows as $row) {
+                $id = filter_var($row['id'] ?? null, FILTER_VALIDATE_INT);
+                $parent = filter_var($row['product_id'] ?? null, FILTER_VALIDATE_INT);
+                if ($id === false || $id <= 0 || $parent !== $productId || isset($ids[$id])) {
+                    throw new \RuntimeException("Inconsistent variant list for product {$productId}");
+                }
+                $ids[$id] = true;
+            }
+            if ($page >= $pages) {
+                break;
+            }
+        }
+        if (count($ids) !== $expectedTotal) {
+            throw new \RuntimeException("Incomplete variant count for product {$productId}");
+        }
+        return array_keys($ids);
     }
 
     private function extractBulkOperationIndexedErrors(string $message): array {

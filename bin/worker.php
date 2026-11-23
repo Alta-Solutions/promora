@@ -114,37 +114,6 @@ function mergeWorkerDiagnostics(array ...$lists): array {
     return $merged;
 }
 
-function formatWorkerDiagnostics(array $diagnostics, int $limit = 25): string {
-    if (empty($diagnostics)) {
-        return '';
-    }
-
-    $lines = [];
-    foreach (array_slice($diagnostics, 0, $limit) as $item) {
-        $label = !empty($item['sku'])
-            ? (string)$item['sku']
-            : 'product_id=' . (string)($item['product_id'] ?? 'n/a');
-        $variantId = $item['variant_id'] ?? null;
-        if ($variantId !== null && $variantId !== '') {
-            $label .= ' variant_id=' . (string)$variantId;
-        }
-
-        $promoPrice = array_key_exists('promo_price', $item) && $item['promo_price'] !== null
-            ? ' promo_price=' . (string)$item['promo_price']
-            : '';
-        $error = trim((string)($item['error'] ?? 'Unknown error'));
-
-        $lines[] = "- {$label}{$promoPrice}: {$error}";
-    }
-
-    $remaining = count($diagnostics) - count($lines);
-    if ($remaining > 0) {
-        $lines[] = "- ... {$remaining} more diagnostic item(s)";
-    }
-
-    return "Diagnostics:\n" . implode("\n", $lines);
-}
-
 function isOmnibusEnabledForStore(Database $db, string $storeHash): bool {
     $storeConfig = $db->fetchOne(
         "SELECT enable_omnibus FROM bigcommerce_stores WHERE store_hash = ?",
@@ -200,6 +169,7 @@ do {
     $processedCount = 0;
     $successCount = 0;
     $errorCount = 0;
+    $skippedCount = 0;
     $omnibusProductIds = [];
     $jobCompleted = true;
     $diagnostics = [];
@@ -213,7 +183,23 @@ do {
         $promotionService = new PromotionService();
         $batchSize = 50;
 
-        if ($job['job_type'] === 'webhook_event') {
+        if ($job['job_type'] === 'verify_variants') {
+            $ids = $queue->extractProductIdsFromPayload($job['payload'] ?? null);
+            if (count($ids) !== 1) {
+                throw new \RuntimeException('Variant verification requires one product ID');
+            }
+            $cache = new \App\Services\ProductCacheService($db);
+            $removed = $cache->verifyProductVariants($ids[0]);
+            $successCount = $processedCount = 1;
+            logMsg("Verified product {$ids[0]}; removed {$removed} stale variant(s).");
+        } elseif ($job['job_type'] === 'cleanup_promotion_field') {
+            $ids = $queue->extractProductIdsFromPayload($job['payload'] ?? null);
+            if (count($ids) !== 1) {
+                throw new \RuntimeException('Promotion field cleanup requires one product ID');
+            }
+            $promotionService->removeUnusedPromotionField($ids[0]);
+            $successCount = $processedCount = 1;
+        } elseif ($job['job_type'] === 'webhook_event') {
             $eventIds = $queue->extractWebhookEventIdsFromPayload($job['payload'] ?? null);
             if (empty($eventIds)) {
                 throw new \RuntimeException("Webhook event job #{$job['id']} has no valid webhook event payload.");
@@ -257,12 +243,15 @@ do {
             );
             $processedCount = $job['total_items'];
             $successCount = $cleanedCount;
+            $errorCount = $cleanupResult['errors'];
+            $diagnostics = $cleanupResult['diagnostics'];
             logMsg("Cleanup finished. Removed {$cleanedCount} items.");
         } elseif ($job['job_type'] === 'cleanup_single') {
             logMsg("Processing Single Cleanup Job (Removing products for Promotion #{$job['promotion_id']})...");
 
-            while ($processedCount < $job['total_items']) {
-                $results = $promotionService->cleanupSinglePromotionBatch($job['promotion_id'], $batchSize);
+            $afterId = 0;
+            do {
+                $results = $promotionService->cleanupSinglePromotionBatch($job['promotion_id'], $batchSize, $afterId);
 
                 $successCount += $results['processed'];
                 $errorCount += $results['errors'];
@@ -275,13 +264,10 @@ do {
                     $results['diagnostics'] ?? []
                 );
 
-                if ($results['processed'] === 0) {
-                    break;
-                }
-
-                $processedCount += $results['processed'];
+                $afterId = $results['next_id'];
+                $processedCount += $results['visited'];
                 $queue->updateProgress($job['id'], $processedCount);
-            }
+            } while ($results['visited'] === $batchSize);
 
             $db->query(
                 "UPDATE promotions SET status = 'expired' WHERE store_hash = ? AND id = ? AND status = 'active' AND end_date < NOW()",
@@ -368,15 +354,11 @@ do {
                 }
             }
         } else {
-            while ($processedCount < $job['total_items']) {
-                logMsg("Processing batch (Offset: {$processedCount})...");
-
-                $results = $promotionService->syncSinglePromotionBatch(
-                    $job['promotion_id'],
-                    $batchSize,
-                    $processedCount
-                );
-
+            $cursor = null;
+            do {
+                $results = $promotionService->syncSinglePromotionBatch($job['promotion_id'], $batchSize, 0, $cursor);
+                $cursor = $results['next_cursor'];
+                $skippedCount += $results['skipped'];
                 $cleanedCount = $results['cleaned'] ?? 0;
                 $successCount += $results['processed'] + $cleanedCount;
                 $errorCount += $results['errors'];
@@ -389,25 +371,9 @@ do {
                     $results['diagnostics'] ?? []
                 );
 
-                $batchProcessed = $results['processed'] + $results['errors'];
-                if ($batchProcessed === 0) {
-                    if ($cleanedCount > 0) {
-                        logMsg("Reconciled {$cleanedCount} existing promotion items. No filter batch items returned.");
-                        $processedCount = $job['total_items'];
-                        $queue->updateProgress($job['id'], $processedCount);
-                    } else {
-                        logMsg("Warning: Batch returned 0 items. Stopping loop.");
-                    }
-                    break;
-                }
-
-                $processedCount += $batchProcessed;
+                $processedCount += $results['visited'];
                 $queue->updateProgress($job['id'], $processedCount);
-
-                if (function_exists('gc_collect_cycles')) {
-                    gc_collect_cycles();
-                }
-            }
+            } while ($results['visited'] === $batchSize);
         }
 
         if ($jobCompleted) {
@@ -426,7 +392,10 @@ do {
         $duration = microtime(true) - $jobStartTime;
         $jobStatusMessage = $jobCompleted ? 'Completed' : 'Deferred';
         $message = "Worker Job #{$job['id']} {$jobStatusMessage} (Type: {$job['job_type']})";
-        $diagnosticSummary = formatWorkerDiagnostics($diagnostics);
+        if (in_array($job['job_type'], ['sync_promotion', 'single_sync', 'cleanup', 'cleanup_single'], true)) {
+            $message .= "\nPrice updates: {$successCount} successful, {$skippedCount} skipped by rules, {$errorCount} failed.";
+        }
+        $diagnosticSummary = PromotionService::formatPriceDiagnostics($diagnostics);
         if ($diagnosticSummary !== '') {
             $message .= "\n" . $diagnosticSummary;
         }
